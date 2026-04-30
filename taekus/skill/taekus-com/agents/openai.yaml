@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taekus.com"
+  short_description: "Use the taekus-api package for Taekus auth and exports"
+  default_prompt: "Use $taekus-com to work with the taekus-api npm package for Taekus auth, refresh, and read-only exports."
