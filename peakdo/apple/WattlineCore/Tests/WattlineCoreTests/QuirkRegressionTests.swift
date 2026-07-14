@@ -44,6 +44,7 @@ final class QuirkRegressionTests: XCTestCase {
         let off = try DCPortStatus(frame: dcFrame(enabled: true, bypassOn: false))
         let on = try DCPortStatus(frame: dcFrame(enabled: true, bypassOn: true))
 
+        XCTAssertEqual(command.timeout, .seconds(10))
         XCTAssertNoThrow(try command.validate(Data([0x14, 0x81, 0xFD])))
         XCTAssertFalse(command.reconciler.matches(.dc(off)))
         XCTAssertTrue(command.reconciler.matches(.dc(on)))

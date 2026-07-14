@@ -161,14 +161,14 @@ public extension DeviceCommand {
             // API §3.4: bypass reports nonstandard results; telemetry is authoritative.
             resultPolicy: .ignoreForBypass,
             reconciler: .bypass(on),
-            timeout: .seconds(3)
+            timeout: .seconds(10)
         )
     }
 
     static let restart = DeviceCommand(
         request: DeviceRequest(CommandRequest(command: .restart, action: .set)),
         expectsRead: false,
-        // API §3.4/§3.5: the immediate disconnect is the success acknowledgement.
+        // Spec §5.7/API §3.4: the immediate disconnect is the success acknowledgement.
         disconnectPolicy: .successThenReconnect
     )
 
