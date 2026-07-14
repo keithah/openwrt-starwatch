@@ -60,16 +60,19 @@ public actor DemoTransport: DeviceTransport {
 
     private let continuation: AsyncStream<DeviceEvent>.Continuation
     private let clock: any DeviceClock
+    private let transactions = SerializedTransactions()
     private var random: SeededGenerator
     private var telemetryTask: Task<Void, Never>?
     private var connected = false
     private var dcEnabled = true
-    private var typeCOutputEnabled = true
+    private var typeCOutputPreferred = true
     private var bypassEnabled = false
     private var chargerConnected = false
     private var limits = DemoTransport.defaultLimits
 
     public private(set) var snapshot: DemoSnapshot
+    public private(set) var pendingTransactionCount = 0
+    public private(set) var maximumPendingTransactionCount = 0
 
     public init(seed: UInt64, clock: any DeviceClock = ContinuousDeviceClock()) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
@@ -79,7 +82,7 @@ public actor DemoTransport: DeviceTransport {
         random = SeededGenerator(seed: seed)
         snapshot = Self.makeSnapshot(
             dcEnabled: true,
-            typeCOutputEnabled: true,
+            typeCOutputPreferred: true,
             bypassEnabled: false,
             chargerConnected: false,
             limits: Self.defaultLimits
@@ -106,7 +109,10 @@ public actor DemoTransport: DeviceTransport {
         guard !connected else { return }
         connected = true
         continuation.yield(.connected(id))
-        await emitTelemetry(jittered: false)
+        let timestamp = await clock.now
+        guard connected else { return }
+        snapshot = makeSnapshot(jittered: false)
+        emitCurrentSnapshot(at: timestamp)
         startTelemetryCadence()
     }
 
@@ -125,8 +131,41 @@ public actor DemoTransport: DeviceTransport {
     }
 
     public func perform(_ command: DeviceCommand) async throws -> CommandOutcome {
-        continuation.yield(.transactionDepth(1))
-        defer { continuation.yield(.transactionDepth(0)) }
+        beginTransaction()
+        do {
+            let outcome = try await transactions.enqueue { [self] in
+                try await execute(command)
+            }
+            endTransaction()
+            return outcome
+        } catch {
+            endTransaction()
+            throw error
+        }
+    }
+
+    public func refreshTelemetry() async throws {
+        beginTransaction()
+        do {
+            try await transactions.enqueue { [self] in
+                await executeTelemetryRefresh()
+            }
+            endTransaction()
+        } catch {
+            endTransaction()
+            throw error
+        }
+    }
+
+    public func setChargerConnected(_ connected: Bool) async {
+        beginTransaction()
+        _ = try? await transactions.enqueue { [self] in
+            await executeChargerConnection(connected)
+        }
+        endTransaction()
+    }
+
+    private func execute(_ command: DeviceCommand) async throws -> CommandOutcome {
 
         guard command.request.target == .command, let request = command.request.command else {
             throw DemoTransportError.unsupportedCommand
@@ -136,20 +175,22 @@ public actor DemoTransport: DeviceTransport {
         let payload: [UInt8]
         switch (request.command, request.action) {
         case (.dcControl, .set):
-            dcEnabled = try Self.boolPayload(request.payload, at: 0)
+            dcEnabled = try Self.boolPayload(request.payload, count: 1, at: 0)
             result = 0
             payload = []
         case (.typeCControl, .set):
-            guard request.payload.first == 0x02 else { throw DemoTransportError.malformedCommand }
-            typeCOutputEnabled = try Self.boolPayload(request.payload, at: 1)
+            guard request.payload.count == 2, request.payload.first == 0x02 else {
+                throw DemoTransportError.malformedCommand
+            }
+            typeCOutputPreferred = try Self.boolPayload(request.payload, count: 2, at: 1)
             result = 0
             payload = []
         case (.dcBypassControl, .set):
-            bypassEnabled = try Self.boolPayload(request.payload, at: 0)
+            bypassEnabled = try Self.boolPayload(request.payload, count: 1, at: 0)
             result = 0
             payload = []
         case (.typeCPowerLimit, .get):
-            let type = try Self.limitType(request.payload)
+            let type = try Self.limitType(request.payload, count: 1)
             if let level = limits[type] {
                 result = 0
                 payload = [level.rawValue]
@@ -158,55 +199,49 @@ public actor DemoTransport: DeviceTransport {
                 payload = []
             }
         case (.typeCPowerLimit, .set):
-            let type = try Self.limitType(request.payload)
-            guard request.payload.count >= 2,
+            let type = try Self.limitType(request.payload, count: 2)
+            guard
                   let level = PowerLimitLevel(rawValue: request.payload[1])
             else { throw DemoTransportError.malformedCommand }
             limits[type] = level
             result = 0
             payload = []
         case (.typeCPowerLimit, .delete):
-            let type = try Self.limitType(request.payload)
+            let type = try Self.limitType(request.payload, count: 1)
             limits[type] = Self.defaultLimits[type]
             result = 0
             payload = []
         case (.runningModeControl, .set):
+            guard request.payload.count == 1,
+                  RunningMode(rawValue: request.payload[0]) != nil
+            else { throw DemoTransportError.malformedCommand }
             result = 0
             payload = []
         default:
             throw DemoTransportError.unsupportedCommand
         }
 
-        snapshot = Self.makeSnapshot(
-            dcEnabled: dcEnabled,
-            typeCOutputEnabled: typeCOutputEnabled,
-            bypassEnabled: bypassEnabled,
-            chargerConnected: chargerConnected,
-            limits: limits
-        )
-        await emitCurrentSnapshot()
+        let nextSnapshot = makeSnapshot(jittered: false)
+        let timestamp = await clock.now
+        snapshot = nextSnapshot
+        emitCurrentSnapshot(at: timestamp)
 
         let replyBytes = Data([request.command.rawValue, request.action.rawValue | 0x80, result] + payload)
         return .reply(try command.validate(replyBytes))
     }
 
-    public func refreshTelemetry() async throws {
-        continuation.yield(.transactionDepth(1))
-        await emitTelemetry(jittered: true)
-        continuation.yield(.transactionDepth(0))
+    private func executeTelemetryRefresh() async {
+        let timestamp = await clock.now
+        snapshot = makeSnapshot(jittered: true)
+        emitCurrentSnapshot(at: timestamp)
     }
 
-    public func setChargerConnected(_ connected: Bool) async {
+    private func executeChargerConnection(_ connected: Bool) async {
         chargerConnected = connected
-        if connected { typeCOutputEnabled = false }
-        snapshot = Self.makeSnapshot(
-            dcEnabled: dcEnabled,
-            typeCOutputEnabled: typeCOutputEnabled,
-            bypassEnabled: bypassEnabled,
-            chargerConnected: chargerConnected,
-            limits: limits
-        )
-        await emitCurrentSnapshot()
+        let nextSnapshot = makeSnapshot(jittered: false)
+        let timestamp = await clock.now
+        snapshot = nextSnapshot
+        emitCurrentSnapshot(at: timestamp)
     }
 
     private func startTelemetryCadence() {
@@ -219,46 +254,64 @@ public actor DemoTransport: DeviceTransport {
                 } catch {
                     return
                 }
+                guard !Task.isCancelled else { return }
+                let timestamp = await clock.now
                 guard !Task.isCancelled, let self else { return }
-                guard await self.emitCadenceTickIfConnected() else { return }
+                guard await self.emitCadenceTick(at: timestamp) else { return }
             }
         }
     }
 
-    private func emitCadenceTickIfConnected() async -> Bool {
+    private func emitCadenceTick(at timestamp: DeviceTimestamp) -> Bool {
         guard connected else { return false }
-        await emitTelemetry(jittered: true)
+        snapshot = makeSnapshot(jittered: true)
+        emitCurrentSnapshot(at: timestamp)
         return true
     }
 
-    private func emitTelemetry(jittered: Bool) async {
-        snapshot = Self.makeSnapshot(
+    private func makeSnapshot(jittered: Bool) -> DemoSnapshot {
+        Self.makeSnapshot(
             dcEnabled: dcEnabled,
-            typeCOutputEnabled: typeCOutputEnabled,
+            typeCOutputPreferred: typeCOutputPreferred,
             bypassEnabled: bypassEnabled,
             chargerConnected: chargerConnected,
             limits: limits,
             jitter: jittered ? { [self] value in random.jitter(value) } : nil
         )
-        await emitCurrentSnapshot()
     }
 
-    private func emitCurrentSnapshot() async {
-        let timestamp = await clock.now
+    private func emitCurrentSnapshot(at timestamp: DeviceTimestamp) {
         continuation.yield(.battery(snapshot.battery, timestamp: timestamp))
         continuation.yield(.dc(snapshot.dc, timestamp: timestamp))
         continuation.yield(.typeC(snapshot.typeC, timestamp: timestamp))
     }
 
-    private static func boolPayload(_ payload: [UInt8], at index: Int) throws -> Bool {
-        guard payload.indices.contains(index), payload[index] <= 1 else {
+    private func beginTransaction() {
+        pendingTransactionCount += 1
+        maximumPendingTransactionCount = max(
+            maximumPendingTransactionCount,
+            pendingTransactionCount
+        )
+        continuation.yield(.transactionDepth(pendingTransactionCount))
+    }
+
+    private func endTransaction() {
+        pendingTransactionCount -= 1
+        continuation.yield(.transactionDepth(pendingTransactionCount))
+    }
+
+    private static func boolPayload(_ payload: [UInt8], count: Int, at index: Int) throws -> Bool {
+        guard payload.count == count, payload.indices.contains(index), payload[index] <= 1 else {
             throw DemoTransportError.malformedCommand
         }
         return payload[index] == 1
     }
 
-    private static func limitType(_ payload: [UInt8]) throws -> PowerLimitType {
-        guard let raw = payload.first, let type = PowerLimitType(rawValue: raw) else {
+    private static func limitType(_ payload: [UInt8], count: Int) throws -> PowerLimitType {
+        guard payload.count == count,
+              let raw = payload.first,
+              let type = PowerLimitType(rawValue: raw)
+        else {
             throw DemoTransportError.malformedCommand
         }
         return type
@@ -266,7 +319,7 @@ public actor DemoTransport: DeviceTransport {
 
     private static func makeSnapshot(
         dcEnabled: Bool,
-        typeCOutputEnabled: Bool,
+        typeCOutputPreferred: Bool,
         bypassEnabled: Bool,
         chargerConnected: Bool,
         limits: [PowerLimitType: PowerLimitLevel],
@@ -296,15 +349,16 @@ public actor DemoTransport: DeviceTransport {
             bypassOn: bypassEnabled
         ))
 
-        let typeCMode: TypeCPortMode = typeCOutputEnabled ? .output : .input
-        let typeCStatus: PowerFlow = chargerConnected ? .charging : (typeCOutputEnabled ? .discharging : .idle)
-        let typeCVoltage = chargerConnected ? vary(20) : (typeCOutputEnabled ? vary(12) : 0)
-        let typeCCurrent = chargerConnected ? vary(5) : (typeCOutputEnabled ? vary(1.4) : 0)
+        let effectiveTypeCOutput = typeCOutputPreferred && !chargerConnected
+        let typeCMode: TypeCPortMode = effectiveTypeCOutput ? .output : .input
+        let typeCStatus: PowerFlow = chargerConnected ? .charging : (effectiveTypeCOutput ? .discharging : .idle)
+        let typeCVoltage = chargerConnected ? vary(20) : (effectiveTypeCOutput ? vary(12) : 0)
+        let typeCCurrent = chargerConnected ? vary(5) : (effectiveTypeCOutput ? vary(1.4) : 0)
         let typeC = try! TypeCPortStatus(frame: typeCFrame(
             status: typeCStatus,
             voltage: typeCVoltage,
             current: typeCCurrent,
-            power: chargerConnected ? vary(100) : (typeCOutputEnabled ? vary(16.8) : 0),
+            power: chargerConnected ? vary(100) : (effectiveTypeCOutput ? vary(16.8) : 0),
             mode: typeCMode,
             isDCInput: chargerConnected
         ))

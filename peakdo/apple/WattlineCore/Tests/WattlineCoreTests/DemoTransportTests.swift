@@ -134,6 +134,138 @@ final class DemoTransportTests: XCTestCase {
         XCTAssertNil(weakDemo)
     }
 
+    func testDisconnectDuringCadenceTimestampReadSuppressesOldTick() async throws {
+        let clock = DemoSuspendingNowClock(immediateNowReads: 1)
+        let demo = DemoTransport(seed: 1, clock: clock)
+        let recorder = DemoEventRecorder()
+        await recorder.start(stream: demo.events)
+        _ = try await demo.connectDemo()
+        await recorder.waitForEventCount(4)
+        await clock.waitForSleepers(1)
+
+        await clock.advance(by: .seconds(1))
+        await clock.waitForNowWaiters(1)
+        await demo.disconnect()
+        await recorder.waitForEventCount(5)
+        await clock.resumeNextNow()
+        for _ in 0..<100 { await Task.yield() }
+
+        let events = await recorder.events
+        XCTAssertEqual(events.count, 5)
+        XCTAssertEqual(events.last, .disconnected(nil))
+    }
+
+    func testCadenceTimestampReadDoesNotRetainTransport() async throws {
+        let clock = DemoSuspendingNowClock(immediateNowReads: 1)
+        weak var weakDemo: DemoTransport?
+
+        do {
+            let demo = DemoTransport(seed: 1, clock: clock)
+            weakDemo = demo
+            _ = try await demo.connectDemo()
+            await clock.waitForSleepers(1)
+            await clock.advance(by: .seconds(1))
+            await clock.waitForNowWaiters(1)
+        }
+
+        for _ in 0..<100 where weakDemo != nil { await Task.yield() }
+        XCTAssertNil(weakDemo)
+        await clock.resumeNextNow()
+    }
+
+    func testChargerTemporarilyOverridesEnabledOutputPreference() async throws {
+        let demo = DemoTransport(seed: 1)
+
+        await demo.setChargerConnected(true)
+        let pluggedMode = await demo.snapshot.typeC.mode
+        XCTAssertEqual(pluggedMode, .input)
+        _ = try await demo.perform(.setTypeCOutput(true))
+        let whileCharging = await demo.snapshot.typeC
+        XCTAssertEqual(whileCharging.mode, .input)
+        XCTAssertEqual(whileCharging.status, .charging)
+
+        await demo.setChargerConnected(false)
+        let unpluggedMode = await demo.snapshot.typeC.mode
+        XCTAssertEqual(unpluggedMode, .output)
+    }
+
+    func testDisabledOutputPreferenceSurvivesChargerCycle() async throws {
+        let demo = DemoTransport(seed: 1)
+
+        _ = try await demo.perform(.setTypeCOutput(false))
+        await demo.setChargerConnected(true)
+        _ = try await demo.perform(.setTypeCOutput(false))
+        await demo.setChargerConnected(false)
+
+        let restored = await demo.snapshot.typeC
+        XCTAssertEqual(restored.mode, .input)
+        XCTAssertEqual(restored.status, .idle)
+    }
+
+    func testConcurrentCommandsAreSerializedWithPendingDepth() async throws {
+        let clock = DemoSuspendingNowClock(immediateNowReads: 0)
+        let demo = DemoTransport(seed: 1, clock: clock)
+        var iterator = demo.events.makeAsyncIterator()
+
+        let first = Task { try await demo.perform(.setDC(false)) }
+        await clock.waitForNowWaiters(1)
+        let second = Task { try await demo.perform(.setDC(true)) }
+        while await demo.pendingTransactionCount < 2 { await Task.yield() }
+
+        await clock.resumeNextNow()
+        await clock.waitForNowWaiters(1)
+        await clock.resumeNextNow()
+        _ = try await (first.value, second.value)
+
+        var depths: [Int] = []
+        while depths.count < 4, let event = await iterator.next() {
+            if case let .transactionDepth(depth) = event { depths.append(depth) }
+        }
+        XCTAssertEqual(depths, [1, 2, 1, 0])
+        let maximumPending = await demo.maximumPendingTransactionCount
+        let finalPending = await demo.pendingTransactionCount
+        let dcEnabled = await demo.snapshot.dc.enabled
+        XCTAssertEqual(maximumPending, 2)
+        XCTAssertEqual(finalPending, 0)
+        XCTAssertTrue(dcEnabled)
+    }
+
+    func testSupportedCommandsRejectMalformedAndTrailingPayloads() async throws {
+        let demo = DemoTransport(seed: 1)
+        let malformed = [
+            rawCommand(.dcControl, action: .set, payload: []),
+            rawCommand(.dcControl, action: .set, payload: [1, 0]),
+            rawCommand(.typeCControl, action: .set, payload: [2]),
+            rawCommand(.typeCControl, action: .set, payload: [2, 1, 0]),
+            rawCommand(.dcBypassControl, action: .set, payload: [1, 0]),
+            rawCommand(.typeCPowerLimit, action: .get, payload: [1, 0]),
+            rawCommand(.typeCPowerLimit, action: .set, payload: [1, 3, 0]),
+            rawCommand(.typeCPowerLimit, action: .delete, payload: [1, 0]),
+            rawCommand(.runningModeControl, action: .set, payload: []),
+            rawCommand(.runningModeControl, action: .set, payload: [2]),
+            rawCommand(.runningModeControl, action: .set, payload: [0, 1]),
+        ]
+
+        for command in malformed {
+            do {
+                _ = try await demo.perform(command)
+                XCTFail("Expected malformed command: \(command.request.bytes as NSData)")
+            } catch let error as DemoTransportError {
+                XCTAssertEqual(error, .malformedCommand)
+            }
+        }
+
+        _ = try await demo.perform(.runningMode(.factory))
+    }
+
+    private func rawCommand(_ command: Command, action: Action, payload: [UInt8]) -> DeviceCommand {
+        DeviceCommand(request: DeviceRequest(CommandRequest(
+            command: command,
+            action: action,
+            payload: payload
+        )))
+    }
+
 }
 
 private extension CommandOutcome {
@@ -183,5 +315,77 @@ private actor DemoTestClock: DeviceClock {
 
     func waitForSleepers(_ count: Int) async {
         while sleepers.count < count { await Task.yield() }
+    }
+}
+
+private actor DemoSuspendingNowClock: DeviceClock {
+    private struct Sleeper {
+        let deadline: Duration
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private let immediateNowReads: Int
+    private var nowReadCount = 0
+    private var instant: Duration = .zero
+    private var sleepers: [Sleeper] = []
+    private var nowWaiters: [CheckedContinuation<Duration, Never>] = []
+
+    init(immediateNowReads: Int) {
+        self.immediateNowReads = immediateNowReads
+    }
+
+    var now: Duration {
+        get async {
+            nowReadCount += 1
+            guard nowReadCount > immediateNowReads else { return instant }
+            return await withCheckedContinuation { nowWaiters.append($0) }
+        }
+    }
+
+    func sleep(for duration: Duration) async throws {
+        await withCheckedContinuation { continuation in
+            sleepers.append(Sleeper(deadline: instant + duration, continuation: continuation))
+        }
+    }
+
+    func advance(by duration: Duration) {
+        instant += duration
+        let ready = sleepers.filter { $0.deadline <= instant }
+        sleepers.removeAll { $0.deadline <= instant }
+        ready.forEach { $0.continuation.resume() }
+    }
+
+    func resumeNextNow() {
+        nowWaiters.removeFirst().resume(returning: instant)
+    }
+
+    func waitForSleepers(_ count: Int) async {
+        while sleepers.count < count { await Task.yield() }
+    }
+
+    func waitForNowWaiters(_ count: Int) async {
+        while nowWaiters.count < count { await Task.yield() }
+    }
+}
+
+private actor DemoEventRecorder {
+    private(set) var events: [DeviceEvent] = []
+    private var task: Task<Void, Never>?
+
+    func start(stream: AsyncStream<DeviceEvent>) {
+        guard task == nil else { return }
+        task = Task { [weak self] in
+            for await event in stream { await self?.record(event) }
+        }
+    }
+
+    deinit { task?.cancel() }
+
+    func waitForEventCount(_ count: Int) async {
+        while events.count < count { await Task.yield() }
+    }
+
+    private func record(_ event: DeviceEvent) {
+        events.append(event)
     }
 }
