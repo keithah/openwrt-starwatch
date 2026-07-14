@@ -52,7 +52,7 @@ final class TelemetryCodecTests: XCTestCase {
 
         XCTAssertEqual(value.temperature, 25.0, accuracy: 0.001)
         XCTAssertEqual(value.mode, .inputAndOutput)
-        XCTAssertFalse(value.isDCInput)
+        XCTAssertEqual(value.isDCInput, false)
     }
 
     func testTypeCFrameIgnoresTrailingBytes() throws {
@@ -61,23 +61,36 @@ final class TelemetryCodecTests: XCTestCase {
         let value = try TypeCPortStatus(frame: frame)
 
         XCTAssertEqual(value.mode, .disabled)
-        XCTAssertFalse(value.isDCInput)
+        XCTAssertEqual(value.isDCInput, false)
     }
 
-    func testOptionalFieldsAreAbsentOnLegacyPrefixes() throws {
+    func testOptionalFieldsAreAbsentWhenTheirBytesAreMissing() throws {
         let dc = try DCPortStatus(frame: Data(repeating: 0, count: 8))
-        let typeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 10))
+        let tenByteTypeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 10))
+        let elevenByteTypeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 11))
+        let twelveByteTypeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 12))
 
         XCTAssertNil(dc.bypassOn)
-        XCTAssertNil(typeC.mode)
-        XCTAssertFalse(typeC.isDCInput)
+        XCTAssertNil(tenByteTypeC.mode)
+        XCTAssertNil(tenByteTypeC.isDCInput)
+        XCTAssertNil(elevenByteTypeC.mode)
+        XCTAssertNil(elevenByteTypeC.isDCInput)
+        XCTAssertEqual(twelveByteTypeC.mode, .disabled)
+        XCTAssertNil(twelveByteTypeC.isDCInput)
     }
 
     func testTypeCGapByteDoesNotBecomeMode() throws {
         let value = try TypeCPortStatus(frame: Data(repeating: 0x03, count: 11))
 
         XCTAssertNil(value.mode)
-        XCTAssertFalse(value.isDCInput)
+        XCTAssertNil(value.isDCInput)
+    }
+
+    func testThirteenByteTypeCFrameDecodesNonzeroDCInputAsTrue() throws {
+        var frame = Data(repeating: 0, count: 13)
+        frame[12] = 0x7F
+
+        XCTAssertEqual(try TypeCPortStatus(frame: frame).isDCInput, true)
     }
 
     func testPowerFlowValuesAndUnknownValueFallback() throws {

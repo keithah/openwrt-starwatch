@@ -69,7 +69,7 @@ public struct TypeCPortStatus: Equatable, Sendable {
     public let power: Double
     public let temperature: Double
     public let mode: TypeCPortMode?
-    public let isDCInput: Bool
+    public let isDCInput: Bool?
 
     public init(frame: Data) throws {
         guard frame.count >= 10 else { throw CodecError.truncated }
@@ -81,7 +81,7 @@ public struct TypeCPortStatus: Equatable, Sendable {
         power = try frame.sfloat(at: 6)
         temperature = try frame.sfloat(at: 8)
         mode = frame.count >= 12 ? TypeCPortMode(rawValue: try frame.byte(at: 11)) : nil
-        isDCInput = frame.count >= 13 ? try frame.byte(at: 12) != 0 : false
+        isDCInput = frame.count >= 13 ? try frame.byte(at: 12) != 0 : nil
     }
 }
 
