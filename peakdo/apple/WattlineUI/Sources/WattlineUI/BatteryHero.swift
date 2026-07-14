@@ -10,15 +10,23 @@ public struct BatteryHero: View {
     public let status: BatteryStatus
     public let style: BatteryHeroStyle
     public let compact: Bool
+    public let freshness: TelemetryFreshness
+
+    @ScaledMetric(relativeTo: .largeTitle) private var regularLevelSize: CGFloat = 52
+    @ScaledMetric(relativeTo: .title) private var compactLevelSize: CGFloat = 38
+    @ScaledMetric(relativeTo: .largeTitle) private var regularGaugeDiameter: CGFloat = 112
+    @ScaledMetric(relativeTo: .title) private var compactGaugeDiameter: CGFloat = 84
 
     public init(
         status: BatteryStatus,
         style: BatteryHeroStyle = .segmented,
-        compact: Bool = false
+        compact: Bool = false,
+        freshness: TelemetryFreshness = .live
     ) {
         self.status = status
         self.style = style
         self.compact = compact
+        self.freshness = freshness
     }
 
     public var body: some View {
@@ -29,6 +37,8 @@ public struct BatteryHero: View {
                     .foregroundStyle(WattlineTheme.secondaryText)
 
                 Spacer()
+
+                WattlineFreshnessBadge(freshness: freshness)
 
                 if status.isFull {
                     Text("FULL")
@@ -41,12 +51,15 @@ public struct BatteryHero: View {
                 }
             }
 
-            switch style {
-            case .segmented:
-                segmentedMeter
-            case .gauge:
-                gauge
+            Group {
+                switch style {
+                case .segmented:
+                    segmentedMeter
+                case .gauge:
+                    gauge
+                }
             }
+            .opacity(freshness.wattlineIsStale ? 0.58 : 1)
 
             HStack(spacing: 7) {
                 Image(systemName: status.status.wattlineSymbol)
@@ -59,6 +72,7 @@ public struct BatteryHero: View {
             }
             .font(.subheadline.weight(.medium))
             .foregroundStyle(WattlineTheme.color(for: status.status))
+            .opacity(freshness.wattlineIsStale ? 0.58 : 1)
         }
         .wattlinePanel(compact: compact)
         .accessibilityElement(children: .ignore)
@@ -91,10 +105,9 @@ public struct BatteryHero: View {
                     .font(compact ? .title3.weight(.bold) : .title2.weight(.bold))
                     .monospacedDigit()
             }
-            .gaugeStyle(.accessoryCircularCapacity)
+            .gaugeStyle(.accessoryCircular)
             .tint(WattlineTheme.color(for: status.status))
-            .scaleEffect(compact ? 1.3 : 1.65)
-            .frame(width: compact ? 84 : 112, height: compact ? 76 : 104)
+            .frame(width: gaugeDiameter, height: gaugeDiameter)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("STATE OF CHARGE")
@@ -110,8 +123,10 @@ public struct BatteryHero: View {
     private var levelLabel: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
             Text("\(status.level)")
-                .font(compact ? .system(size: 38, weight: .bold) : .system(size: 52, weight: .bold))
+                .font(.system(size: levelSize, weight: .bold))
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Text("%")
                 .font(compact ? .title3.weight(.semibold) : .title2.weight(.semibold))
                 .foregroundStyle(WattlineTheme.secondaryText)
@@ -129,6 +144,9 @@ public struct BatteryHero: View {
     private var accessibilityValue: String {
         let power = abs(status.power).wattlineFormatted()
         let full = status.isFull ? ", fully charged" : ""
-        return "\(status.level) percent, \(status.status.wattlineName), \(power) watts\(full)"
+        return "\(status.level) percent, \(status.status.wattlineName), \(power) watts\(full), \(freshness.wattlineAccessibilityDescription)"
     }
+
+    private var levelSize: CGFloat { compact ? compactLevelSize : regularLevelSize }
+    private var gaugeDiameter: CGFloat { compact ? compactGaugeDiameter : regularGaugeDiameter }
 }

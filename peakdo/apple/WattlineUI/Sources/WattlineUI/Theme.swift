@@ -64,6 +64,35 @@ extension PowerFlow {
     }
 }
 
+extension TelemetryFreshness {
+    var wattlineIsStale: Bool { self == .stale }
+
+    var wattlineAccessibilityDescription: String {
+        switch self {
+        case .loading: "Telemetry loading"
+        case .live: "Live telemetry"
+        case .stale: "Last known data, telemetry is stale"
+        }
+    }
+}
+
+struct WattlineFreshnessBadge: View {
+    let freshness: TelemetryFreshness
+
+    var body: some View {
+        if freshness.wattlineIsStale {
+            Label("LAST KNOWN", systemImage: "clock.arrow.circlepath")
+                .font(.caption2.weight(.bold))
+                .tracking(0.6)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(WattlineTheme.recessedSurface, in: Capsule())
+                .foregroundStyle(WattlineTheme.secondaryText)
+                .accessibilityLabel("Last known data")
+        }
+    }
+}
+
 extension Double {
     func wattlineFormatted(decimals: Int = 1) -> String {
         guard isFinite else { return "—" }

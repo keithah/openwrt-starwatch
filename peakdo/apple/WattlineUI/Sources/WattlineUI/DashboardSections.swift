@@ -3,26 +3,34 @@ import WattlineCore
 public struct DashboardCapabilities: Equatable, Sendable {
     public let hasBattery: Bool
     public let hasDCPort: Bool
+    public let hasDCControl: Bool
     public let hasUSBPort: Bool
+    public let hasUSBOutputControl: Bool
     public let hasPowerLimits: Bool
 
     public init(
         hasBattery: Bool,
         hasDCPort: Bool,
+        hasDCControl: Bool,
         hasUSBPort: Bool,
-        hasPowerLimits: Bool? = nil
+        hasUSBOutputControl: Bool,
+        hasPowerLimits: Bool
     ) {
         self.hasBattery = hasBattery
         self.hasDCPort = hasDCPort
+        self.hasDCControl = hasDCControl
         self.hasUSBPort = hasUSBPort
-        self.hasPowerLimits = hasPowerLimits ?? hasUSBPort
+        self.hasUSBOutputControl = hasUSBOutputControl
+        self.hasPowerLimits = hasPowerLimits
     }
 
     public init(_ capabilities: DeviceCapabilities) {
         self.init(
             hasBattery: capabilities.hasBattery,
             hasDCPort: capabilities.hasDCPort,
+            hasDCControl: capabilities.hasDCControl,
             hasUSBPort: capabilities.hasUSBPort,
+            hasUSBOutputControl: capabilities.hasUSBOutputControl,
             hasPowerLimits: capabilities.hasPowerLimits
         )
     }
@@ -30,21 +38,27 @@ public struct DashboardCapabilities: Equatable, Sendable {
     public static let all = DashboardCapabilities(
         hasBattery: true,
         hasDCPort: true,
+        hasDCControl: true,
         hasUSBPort: true,
+        hasUSBOutputControl: true,
         hasPowerLimits: true
     )
 
     public static let dcOnly = DashboardCapabilities(
         hasBattery: false,
         hasDCPort: true,
+        hasDCControl: true,
         hasUSBPort: false,
+        hasUSBOutputControl: false,
         hasPowerLimits: false
     )
 
     public static let none = DashboardCapabilities(
         hasBattery: false,
         hasDCPort: false,
+        hasDCControl: false,
         hasUSBPort: false,
+        hasUSBOutputControl: false,
         hasPowerLimits: false
     )
 }
@@ -58,6 +72,16 @@ public enum DashboardSection: Equatable, Hashable, Sendable {
     case limitsLink
 }
 
+public enum DashboardPort: Equatable, Hashable, Sendable {
+    case dc
+    case usb
+}
+
+public enum DashboardControlPresentation: Equatable, Sendable {
+    case hidden
+    case toggle
+}
+
 public struct DashboardSections: Equatable, RandomAccessCollection, Sendable,
     ExpressibleByArrayLiteral
 {
@@ -65,6 +89,8 @@ public struct DashboardSections: Equatable, RandomAccessCollection, Sendable,
     public typealias Index = Int
 
     private let storage: [DashboardSection]
+    private let dcControl: DashboardControlPresentation
+    private let usbControl: DashboardControlPresentation
 
     public init(capabilities: DashboardCapabilities) {
         var sections: [DashboardSection] = []
@@ -87,6 +113,8 @@ public struct DashboardSections: Equatable, RandomAccessCollection, Sendable,
         }
 
         storage = sections
+        dcControl = capabilities.hasDCPort && capabilities.hasDCControl ? .toggle : .hidden
+        usbControl = capabilities.hasUSBPort && capabilities.hasUSBOutputControl ? .toggle : .hidden
     }
 
     public init(capabilities: DeviceCapabilities) {
@@ -95,6 +123,8 @@ public struct DashboardSections: Equatable, RandomAccessCollection, Sendable,
 
     public init(arrayLiteral elements: DashboardSection...) {
         storage = elements
+        dcControl = .hidden
+        usbControl = .hidden
     }
 
     public var startIndex: Int { storage.startIndex }
@@ -102,5 +132,12 @@ public struct DashboardSections: Equatable, RandomAccessCollection, Sendable,
 
     public subscript(position: Int) -> DashboardSection {
         storage[position]
+    }
+
+    public func controlPresentation(for port: DashboardPort) -> DashboardControlPresentation {
+        switch port {
+        case .dc: dcControl
+        case .usb: usbControl
+        }
     }
 }

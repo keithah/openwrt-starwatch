@@ -12,8 +12,10 @@ public struct PortCard: View {
     public let detail: String?
     public let compact: Bool
     public let canToggle: Bool
-    public let onToggle: (@Sendable (Bool) -> Void)?
-    public let onSelect: (@Sendable () -> Void)?
+    public let isPending: Bool
+    public let freshness: TelemetryFreshness
+    public let onToggle: (@MainActor @Sendable (Bool) -> Void)?
+    public let onSelect: (@MainActor @Sendable () -> Void)?
 
     public init(
         title: String,
@@ -26,8 +28,10 @@ public struct PortCard: View {
         detail: String? = nil,
         compact: Bool = false,
         canToggle: Bool = true,
-        onToggle: (@Sendable (Bool) -> Void)? = nil,
-        onSelect: (@Sendable () -> Void)? = nil
+        isPending: Bool = false,
+        freshness: TelemetryFreshness = .live,
+        onToggle: (@MainActor @Sendable (Bool) -> Void)? = nil,
+        onSelect: (@MainActor @Sendable () -> Void)? = nil
     ) {
         self.title = title
         self.symbol = symbol
@@ -39,6 +43,8 @@ public struct PortCard: View {
         self.detail = detail
         self.compact = compact
         self.canToggle = canToggle
+        self.isPending = isPending
+        self.freshness = freshness
         self.onToggle = onToggle
         self.onSelect = onSelect
     }
@@ -47,8 +53,10 @@ public struct PortCard: View {
         dcStatus status: DCPortStatus,
         compact: Bool = false,
         canToggle: Bool = true,
-        onToggle: (@Sendable (Bool) -> Void)? = nil,
-        onSelect: (@Sendable () -> Void)? = nil
+        isPending: Bool = false,
+        freshness: TelemetryFreshness = .live,
+        onToggle: (@MainActor @Sendable (Bool) -> Void)? = nil,
+        onSelect: (@MainActor @Sendable () -> Void)? = nil
     ) {
         self.init(
             title: "DC Port",
@@ -61,6 +69,8 @@ public struct PortCard: View {
             detail: status.bypassOn == true ? "Bypass" : nil,
             compact: compact,
             canToggle: canToggle,
+            isPending: isPending,
+            freshness: freshness,
             onToggle: onToggle,
             onSelect: onSelect
         )
@@ -70,8 +80,10 @@ public struct PortCard: View {
         typeCStatus status: TypeCPortStatus,
         compact: Bool = false,
         canToggle: Bool = true,
-        onToggle: (@Sendable (Bool) -> Void)? = nil,
-        onSelect: (@Sendable () -> Void)? = nil
+        isPending: Bool = false,
+        freshness: TelemetryFreshness = .live,
+        onToggle: (@MainActor @Sendable (Bool) -> Void)? = nil,
+        onSelect: (@MainActor @Sendable () -> Void)? = nil
     ) {
         self.init(
             title: "USB-C Port",
@@ -84,26 +96,15 @@ public struct PortCard: View {
             detail: Self.typeCDetail(status),
             compact: compact,
             canToggle: canToggle,
+            isPending: isPending,
+            freshness: freshness,
             onToggle: onToggle,
             onSelect: onSelect
         )
     }
 
     public var body: some View {
-        selectableCard
-    }
-
-    @ViewBuilder
-    private var selectableCard: some View {
-        if let onSelect {
-            card
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onSelect)
-                .accessibilityAddTraits(.isButton)
-                .accessibilityAction(named: "Open details", onSelect)
-        } else {
-            card
-        }
+        card
     }
 
     private var card: some View {
@@ -125,15 +126,28 @@ public struct PortCard: View {
 
                 Spacer()
 
-                if let onToggle {
+                WattlineFreshnessBadge(freshness: freshness)
+
+                if isPending {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Updating \(title)")
+                        .accessibilityValue("Pending")
+                }
+
+                if let onToggle, canToggle {
                     Toggle(
                         "\(title) power",
-                        isOn: Binding(get: { enabled }, set: onToggle)
+                        isOn: Binding(
+                            get: { enabled },
+                            set: { newValue in onToggle(newValue) }
+                        )
                     )
                     .labelsHidden()
                     .tint(WattlineTheme.accent)
-                    .disabled(!canToggle)
-                    .accessibilityValue(enabled ? "On" : "Off")
+                    .disabled(isPending)
+                    .accessibilityValue(toggleAccessibilityValue)
+                    .accessibilityHint(isPending ? "Update in progress" : "Changes \(title) power")
                 } else {
                     statusPill
                 }
@@ -147,6 +161,7 @@ public struct PortCard: View {
                 reading(value: current, unit: "A", label: "Current")
                 reading(value: abs(power), unit: "W", label: "Power")
             }
+            .opacity(freshness.wattlineIsStale ? 0.58 : 1)
 
             if let detail {
                 Text(detail.uppercased())
@@ -157,6 +172,25 @@ public struct PortCard: View {
                     .background(WattlineTheme.accent.opacity(0.16), in: Capsule())
                     .foregroundStyle(WattlineTheme.accent)
                     .accessibilityLabel(detail)
+                    .opacity(freshness.wattlineIsStale ? 0.58 : 1)
+            }
+
+            if let onSelect {
+                Divider()
+                    .overlay(WattlineTheme.border)
+
+                Button(action: { onSelect() }) {
+                    HStack {
+                        Text("View \(title) details")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(WattlineTheme.accent)
+                .accessibilityHint("Opens details")
             }
         }
         .wattlinePanel(compact: compact)
@@ -190,7 +224,7 @@ public struct PortCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
-        .accessibilityValue("\(value.wattlineFormatted()) \(unit)")
+        .accessibilityValue("\(value.wattlineFormatted()) \(unit), \(freshness.wattlineAccessibilityDescription)")
     }
 
     private static func typeCDetail(_ status: TypeCPortStatus) -> String? {
@@ -207,5 +241,10 @@ public struct PortCard: View {
             details.append("DC input")
         }
         return details.isEmpty ? nil : details.joined(separator: " · ")
+    }
+
+    private var toggleAccessibilityValue: String {
+        let state = enabled ? "On" : "Off"
+        return isPending ? "\(state), update pending" : state
     }
 }

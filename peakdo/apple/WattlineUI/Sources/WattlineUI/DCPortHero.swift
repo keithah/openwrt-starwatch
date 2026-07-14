@@ -4,10 +4,19 @@ import WattlineCore
 public struct DCPortHero: View {
     public let status: DCPortStatus
     public let compact: Bool
+    public let freshness: TelemetryFreshness
 
-    public init(status: DCPortStatus, compact: Bool = false) {
+    @ScaledMetric(relativeTo: .largeTitle) private var regularMeasurementSize: CGFloat = 52
+    @ScaledMetric(relativeTo: .title) private var compactMeasurementSize: CGFloat = 38
+
+    public init(
+        status: DCPortStatus,
+        compact: Bool = false,
+        freshness: TelemetryFreshness = .live
+    ) {
         self.status = status
         self.compact = compact
+        self.freshness = freshness
     }
 
     public var body: some View {
@@ -17,6 +26,7 @@ public struct DCPortHero: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(WattlineTheme.secondaryText)
                 Spacer()
+                WattlineFreshnessBadge(freshness: freshness)
                 Text(status.enabled ? "LIVE" : "OFF")
                     .font(.caption2.weight(.bold))
                     .tracking(0.8)
@@ -24,14 +34,15 @@ public struct DCPortHero: View {
             }
 
             HStack(alignment: .lastTextBaseline, spacing: compact ? 16 : 28) {
-                measurement(status.voltage, unit: "V", size: compact ? 38 : 52)
+                measurement(status.voltage, unit: "V")
 
                 Rectangle()
                     .fill(WattlineTheme.border)
                     .frame(width: 1, height: compact ? 32 : 43)
 
-                measurement(abs(status.power), unit: "W", size: compact ? 38 : 52)
+                measurement(abs(status.power), unit: "W")
             }
+            .opacity(freshness.wattlineIsStale ? 0.58 : 1)
 
             HStack(spacing: 7) {
                 Image(systemName: status.status.wattlineSymbol)
@@ -41,6 +52,7 @@ public struct DCPortHero: View {
             }
             .font(.subheadline.weight(.medium))
             .foregroundStyle(WattlineTheme.color(for: status.status))
+            .opacity(freshness.wattlineIsStale ? 0.58 : 1)
         }
         .wattlinePanel(compact: compact)
         .accessibilityElement(children: .ignore)
@@ -48,19 +60,28 @@ public struct DCPortHero: View {
         .accessibilityValue(accessibilityValue)
     }
 
-    private func measurement(_ value: Double, unit: String, size: CGFloat) -> some View {
+    private func measurement(_ value: Double, unit: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(value.wattlineFormatted())
-                .font(.system(size: size, weight: .bold))
+                .font(.system(size: measurementSize, weight: .bold))
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
             Text(unit)
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(WattlineTheme.secondaryText)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var accessibilityValue: String {
-        guard status.enabled else { return "Off" }
-        return "On, \(status.status.wattlineName), \(status.voltage.wattlineFormatted()) volts, \(abs(status.power).wattlineFormatted()) watts"
+        guard status.enabled else {
+            return "Off, \(freshness.wattlineAccessibilityDescription)"
+        }
+        return "On, \(status.status.wattlineName), \(status.voltage.wattlineFormatted()) volts, \(abs(status.power).wattlineFormatted()) watts, \(freshness.wattlineAccessibilityDescription)"
+    }
+
+    private var measurementSize: CGFloat {
+        compact ? compactMeasurementSize : regularMeasurementSize
     }
 }

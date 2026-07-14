@@ -18,13 +18,13 @@ public struct LimitSlider: View {
     public let label: String
     @Binding public var selection: PowerLimitLevel
     public let isPending: Bool
-    public let onReset: (() -> Void)?
+    public let onReset: (@MainActor @Sendable () -> Void)?
 
     public init(
         _ label: String,
         selection: Binding<PowerLimitLevel>,
         isPending: Bool = false,
-        onReset: (() -> Void)? = nil
+        onReset: (@MainActor @Sendable () -> Void)? = nil
     ) {
         self.label = label
         _selection = selection
@@ -68,7 +68,7 @@ public struct LimitSlider: View {
             }
 
             if let onReset {
-                Button("Reset to default", action: onReset)
+                Button("Reset to default", action: { onReset() })
                     .font(.subheadline.weight(.medium))
                     .disabled(isPending)
             }
