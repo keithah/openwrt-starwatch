@@ -41,22 +41,17 @@ public actor BLETransport: DeviceTransport {
         beginTransaction()
         defer { endTransaction() }
         return try await transactions.enqueue { [bridge] in
-            do {
-                if command.request.target == .command, command.expectsRead {
-                    let response = try await bridge.commandTransaction(command.request.bytes)
-                    return .reply(try command.validate(response))
-                }
-
-                try await bridge.write(command.request.bytes, to: command.request.target.gattUUID)
-                return .sent
-            } catch {
-                if command.disconnectPolicy != .none,
-                   case BLETransportError.disconnected = error
-                {
-                    return .sent
-                }
-                throw error
+            if command.request.target == .command, command.expectsRead {
+                let response = try await bridge.commandTransaction(command.request.bytes)
+                return .reply(try command.validate(response))
             }
+
+            try await bridge.write(
+                command.request.bytes,
+                to: command.request.target.gattUUID,
+                disconnectPolicy: command.disconnectPolicy
+            )
+            return .sent
         }
     }
 
