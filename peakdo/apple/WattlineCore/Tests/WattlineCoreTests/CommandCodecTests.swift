@@ -40,6 +40,20 @@ final class CommandCodecTests: XCTestCase {
         XCTAssertEqual(unset.payload, Data([0xA5]))
     }
 
+    func testRuntimeUnsetPolicyRejectsOtherNonzeroResult() {
+        let request = CommandRequest(command: .typeCPowerLimit, action: .get, payload: [4])
+
+        XCTAssertThrowsError(
+            try CommandReply.decode(
+                Data([0x02, 0x80, 0xFD]),
+                for: request,
+                resultPolicy: .runtimeUnset
+            )
+        ) { error in
+            XCTAssertEqual(error as? CodecError, .rejectedResult(0xFD))
+        }
+    }
+
     func testIgnoreForBypassMustBeExplicitToAcceptArbitraryResult() throws {
         let request = CommandRequest(command: .dcBypassControl, action: .set, payload: [1])
         let data = Data([0x14, 0x81, 0xFD, 0xA5])
