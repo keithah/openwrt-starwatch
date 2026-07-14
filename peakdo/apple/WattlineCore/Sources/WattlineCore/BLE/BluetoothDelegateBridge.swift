@@ -8,6 +8,7 @@ public enum BLETransportError: Error, Equatable, Sendable {
     case otaBondRecoveryRequired
     case missingCharacteristic(GATTUUID)
     case operationInProgress
+    case notReady
     case invalidResponse
 }
 
@@ -73,6 +74,12 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         let continuation: CheckedContinuation<Void, Error>
     }
 
+    private struct Teardown {
+        let scope: BLEConnectionScope
+        let peripheral: CBPeripheral
+        let eventAlreadyEmitted: Bool
+    }
+
     private enum PendingIO {
         case command(
             operationID: UUID,
@@ -122,7 +129,9 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var discoveredModes: [UUID: DeviceMode] = [:]
     private var callbackState = BLEBridgeCallbackStateMachine()
+    private var lifecycle = BLESessionLifecycleStateMachine()
     private var session: Session?
+    private var teardown: Teardown?
     private var pendingConnect: PendingConnect?
     private var pendingIO: PendingIO?
     private var cancelledOperations: Set<UUID> = []
@@ -170,7 +179,11 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                         continuation.resume(throwing: CancellationError())
                         return
                     }
-                    guard session == nil, pendingConnect == nil else {
+                    guard session == nil,
+                          teardown == nil,
+                          pendingConnect == nil,
+                          lifecycle.canBeginConnection
+                    else {
                         continuation.resume(throwing: BLETransportError.operationInProgress)
                         return
                     }
@@ -180,7 +193,10 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                         continuation.resume(throwing: BLETransportError.peripheralNotFound(identifier))
                         return
                     }
-                    let scope = beginSession(for: target)
+                    guard let scope = beginSession(for: target) else {
+                        continuation.resume(throwing: BLETransportError.operationInProgress)
+                        return
+                    }
                     pendingConnect = PendingConnect(
                         operationID: operationID,
                         scope: scope,
@@ -216,9 +232,15 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                         continuation.resume(throwing: BLETransportError.operationInProgress)
                         return
                     }
-                    guard let session,
-                          let characteristic = session.characteristics[GATTUUID.command.bluetoothUUID]
-                    else {
+                    guard let session else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    guard lifecycle.externalIOAdmission(scope: session.scope) == .allowed else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    guard let characteristic = session.characteristics[GATTUUID.command.bluetoothUUID] else {
                         continuation.resume(throwing: BLETransportError.missingCharacteristic(.command))
                         return
                     }
@@ -265,7 +287,15 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                         continuation.resume(throwing: BLETransportError.operationInProgress)
                         return
                     }
-                    guard let session, let characteristic = session.characteristics[uuid.bluetoothUUID] else {
+                    guard let session else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    guard lifecycle.externalIOAdmission(scope: session.scope) == .allowed else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    guard let characteristic = session.characteristics[uuid.bluetoothUUID] else {
                         continuation.resume(throwing: BLETransportError.missingCharacteristic(uuid))
                         return
                     }
@@ -309,7 +339,15 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                         continuation.resume(throwing: BLETransportError.operationInProgress)
                         return
                     }
-                    guard let session, let characteristic = session.characteristics[uuid.bluetoothUUID] else {
+                    guard let session else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    guard lifecycle.externalIOAdmission(scope: session.scope) == .allowed else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    guard let characteristic = session.characteristics[uuid.bluetoothUUID] else {
                         continuation.resume(throwing: BLETransportError.missingCharacteristic(uuid))
                         return
                     }
@@ -334,10 +372,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
             if let pendingConnect, pendingConnect.operationID == operationID {
                 self.pendingConnect = nil
                 if session?.scope == pendingConnect.scope {
-                    if let peripheral = session?.peripheral {
-                        central.cancelPeripheralConnection(peripheral)
-                    }
-                    invalidateSession(scope: pendingConnect.scope)
+                    beginTeardown(scope: pendingConnect.scope, eventAlreadyEmitted: false)
                 }
                 pendingConnect.continuation.resume(throwing: CancellationError())
                 return
@@ -349,6 +384,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                     var expectation = currentExpectation
                     _ = expectation.cancel(scope: scope)
                 }
+                beginTeardown(scope: pendingIO.scope, eventAlreadyEmitted: false)
                 resume(pendingIO, throwing: CancellationError())
                 return
             }
@@ -374,8 +410,10 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    private func beginSession(for peripheral: CBPeripheral) -> BLEConnectionScope {
+    private func beginSession(for peripheral: CBPeripheral) -> BLEConnectionScope? {
+        guard lifecycle.canBeginConnection, teardown == nil else { return nil }
         let scope = callbackState.beginConnection(peripheralID: peripheral.identifier)
+        guard lifecycle.beginConnection(scope: scope) else { return nil }
         let proxy = PeripheralDelegateProxy(bridge: self, scope: scope)
         peripheral.delegate = proxy
         session = Session(scope: scope, peripheral: peripheral, proxy: proxy)
@@ -446,6 +484,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
 
     private func finishConnection(scope: BLEConnectionScope) {
         guard let session, session.scope == scope else { return }
+        guard lifecycle.didFinishSetup(scope: scope) else { return }
         if let pendingConnect, pendingConnect.scope == scope {
             self.pendingConnect = nil
             pendingConnect.continuation.resume()
@@ -453,8 +492,36 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         eventSink(.connected(session.peripheral.identifier))
     }
 
-    private func invalidateSession(scope: BLEConnectionScope) {
+    private func terminateSession(scope: BLEConnectionScope) {
         guard let session, session.scope == scope else { return }
+        _ = callbackState.didDisconnect(scope: scope)
+        _ = lifecycle.terminate(scope: scope)
+        session.peripheral.delegate = nil
+        self.session = nil
+    }
+
+    private func completeDisconnectedSession(scope: BLEConnectionScope) {
+        guard let session, session.scope == scope else { return }
+        _ = callbackState.didDisconnect(scope: scope)
+        _ = lifecycle.didDisconnect(scope: scope)
+        session.peripheral.delegate = nil
+        self.session = nil
+    }
+
+    private func beginTeardown(
+        scope: BLEConnectionScope,
+        cancelPeripheral: Bool = true,
+        eventAlreadyEmitted: Bool
+    ) {
+        guard let session, session.scope == scope, lifecycle.beginTeardown(scope: scope) else { return }
+        if cancelPeripheral {
+            central.cancelPeripheralConnection(session.peripheral)
+        }
+        teardown = Teardown(
+            scope: scope,
+            peripheral: session.peripheral,
+            eventAlreadyEmitted: eventAlreadyEmitted
+        )
         _ = callbackState.didDisconnect(scope: scope)
         session.peripheral.delegate = nil
         self.session = nil
@@ -473,7 +540,19 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
             }
             resume(pendingIO, throwing: error)
         }
-        invalidateSession(scope: scope)
+        terminateSession(scope: scope)
+    }
+
+    private func failSetup(scope: BLEConnectionScope, error: Error) {
+        guard session?.scope == scope else { return }
+        var continuation: CheckedContinuation<Void, Error>?
+        if let pendingConnect, pendingConnect.scope == scope {
+            self.pendingConnect = nil
+            continuation = pendingConnect.continuation
+        }
+        eventSink(.disconnected(TransportFailure(message: String(describing: error))))
+        beginTeardown(scope: scope, eventAlreadyEmitted: true)
+        continuation?.resume(throwing: error)
     }
 
     private func resume(_ pendingIO: PendingIO, throwing error: Error) {
@@ -518,8 +597,9 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         switch reconnectPolicy {
         case .armed:
             eventSink(.reconnecting(peripheral.identifier))
-            _ = beginSession(for: peripheral)
-            central.connect(peripheral)
+            if beginSession(for: peripheral) != nil {
+                central.connect(peripheral)
+            }
         case .awaitingOTAMode:
             central.scanForPeripherals(
                 withServices: [GATTUUID.linkPowerService.bluetoothUUID],
@@ -556,7 +636,11 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
 extension BluetoothDelegateBridge: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         let state = centralState(central.state)
-        let hasActiveWork = !powerWaiters.isEmpty || pendingConnect != nil || pendingIO != nil || session != nil
+        let hasActiveWork = !powerWaiters.isEmpty
+            || pendingConnect != nil
+            || pendingIO != nil
+            || session != nil
+            || teardown != nil
         switch BLECentralStatePolicy.resolution(for: state, hasActiveWork: hasActiveWork) {
         case .ready:
             let waiters = powerWaiters
@@ -572,6 +656,10 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             if let scope = session?.scope {
                 failActive(scope: scope, error: error)
                 eventSink(.disconnected(TransportFailure(message: String(describing: error))))
+            }
+            if let teardown {
+                self.teardown = nil
+                _ = lifecycle.terminate(scope: teardown.scope)
             }
         }
     }
@@ -600,7 +688,8 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         guard let session,
               session.peripheral === peripheral,
               session.scope == callbackState.activeScope,
-              peripheral.state == .connected
+              peripheral.state == .connected,
+              lifecycle.didConnect(scope: session.scope)
         else { return }
         beginServiceDiscovery(scope: session.scope)
     }
@@ -610,6 +699,14 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         didFailToConnect peripheral: CBPeripheral,
         error: Error?
     ) {
+        if let teardown, teardown.peripheral === peripheral {
+            self.teardown = nil
+            _ = lifecycle.didDisconnect(scope: teardown.scope)
+            if !teardown.eventAlreadyEmitted {
+                eventSink(.disconnected(error.map { TransportFailure(message: String(describing: $0)) }))
+            }
+            return
+        }
         guard let session,
               session.peripheral === peripheral,
               session.scope == callbackState.activeScope,
@@ -625,6 +722,17 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
+        if let teardown,
+           teardown.peripheral === peripheral,
+           peripheral.state == .disconnected
+        {
+            self.teardown = nil
+            _ = lifecycle.didDisconnect(scope: teardown.scope)
+            if !teardown.eventAlreadyEmitted {
+                eventSink(.disconnected(error.map { TransportFailure(message: String(describing: $0)) }))
+            }
+            return
+        }
         guard let session,
               session.peripheral === peripheral,
               session.scope == callbackState.activeScope,
@@ -640,7 +748,7 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         if case var .write(_, _, _, expectation?, _) = pendingIO {
             expectedAction = expectation.didDisconnect(scope: scope)
         }
-        invalidateSession(scope: scope)
+        completeDisconnectedSession(scope: scope)
 
         let transportFailure = error.map { TransportFailure(message: String(describing: $0)) }
         eventSink(.disconnected(transportFailure))
@@ -669,9 +777,11 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         guard session == nil,
+              teardown == nil,
+              lifecycle.canBeginConnection,
               let restored = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first
         else { return }
-        let scope = beginSession(for: restored)
+        guard let scope = beginSession(for: restored) else { return }
         eventSink(.reconnecting(restored.identifier))
         switch RestorationPolicy.action(for: restoredState(restored.state)) {
         case .connect:
@@ -679,10 +789,15 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         case .awaitConnection:
             break
         case .discoverServices:
-            beginServiceDiscovery(scope: scope)
+            if lifecycle.didConnect(scope: scope) {
+                beginServiceDiscovery(scope: scope)
+            }
         case .terminate:
-            invalidateSession(scope: scope)
-            eventSink(.disconnected(nil))
+            beginTeardown(
+                scope: scope,
+                cancelPeripheral: false,
+                eventAlreadyEmitted: false
+            )
         }
     }
 }
@@ -698,12 +813,12 @@ private extension BluetoothDelegateBridge {
               callbackState.didDiscoverServices(scope: scope) == .accepted
         else { return }
         if let error {
-            failActive(scope: scope, error: error)
+            failSetup(scope: scope, error: error)
             return
         }
         let services = peripheral.services ?? []
         guard !services.isEmpty else {
-            failActive(scope: scope, error: BLETransportError.missingCharacteristic(.command))
+            failSetup(scope: scope, error: BLETransportError.missingCharacteristic(.command))
             return
         }
         var updated = session
@@ -729,7 +844,7 @@ private extension BluetoothDelegateBridge {
         session.expectedServices.remove(ObjectIdentifier(service))
         self.session = session
         if let error {
-            failActive(scope: scope, error: error)
+            failSetup(scope: scope, error: error)
             return
         }
         for characteristic in service.characteristics ?? [] {
@@ -738,7 +853,7 @@ private extension BluetoothDelegateBridge {
         self.session = session
         if callbackState.outstandingCharacteristicDiscoveries == 0 {
             guard session.characteristics[GATTUUID.command.bluetoothUUID] != nil else {
-                failActive(scope: scope, error: BLETransportError.missingCharacteristic(.command))
+                failSetup(scope: scope, error: BLETransportError.missingCharacteristic(.command))
                 return
             }
             beginInitialTelemetryReads(scope: scope)
@@ -826,9 +941,15 @@ private extension BluetoothDelegateBridge {
         {
             session.setupReading = nil
             self.session = session
-            if let value = characteristic.value, error == nil {
-                emitTelemetry(uuid: setup.uuid, value: value)
+            if let error {
+                failSetup(scope: scope, error: error)
+                return
             }
+            guard let value = characteristic.value else {
+                failSetup(scope: scope, error: BLETransportError.invalidResponse)
+                return
+            }
+            emitTelemetry(uuid: setup.uuid, value: value)
             readNextSetupCharacteristic(scope: scope)
             return
         }

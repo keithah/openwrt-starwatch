@@ -192,6 +192,82 @@ final class BLETransactionStateMachineTests: XCTestCase {
         XCTAssertEqual(RestorationPolicy.action(for: .disconnected), .connect)
         XCTAssertEqual(RestorationPolicy.action(for: .disconnecting), .terminate)
     }
+
+    func testExternalIOIsRejectedDuringSetupWithoutOverwritingSetupRead() {
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var lifecycle = BLESessionLifecycleStateMachine()
+        var callbacks = BLEBridgeCallbackStateMachine()
+        let callbackScope = callbacks.beginConnection(peripheralID: scope.peripheralID)
+        XCTAssertTrue(lifecycle.beginConnection(scope: callbackScope))
+        XCTAssertTrue(lifecycle.didConnect(scope: callbackScope))
+        callbacks.expectUpdate(scope: callbackScope, characteristic: .extendedBatteryInfo)
+
+        XCTAssertEqual(
+            lifecycle.externalIOAdmission(for: .command, scope: callbackScope),
+            .notReady
+        )
+        XCTAssertEqual(
+            lifecycle.externalIOAdmission(for: .refreshTelemetry, scope: callbackScope),
+            .notReady
+        )
+        XCTAssertEqual(
+            callbacks.didUpdate(scope: callbackScope, characteristic: .extendedBatteryInfo),
+            .accepted
+        )
+    }
+
+    func testExternalIOIsAllowedOnlyAfterSetupFinishes() {
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var lifecycle = BLESessionLifecycleStateMachine()
+        XCTAssertTrue(lifecycle.beginConnection(scope: scope))
+        XCTAssertEqual(lifecycle.externalIOAdmission(scope: scope), .notReady)
+        XCTAssertTrue(lifecycle.didConnect(scope: scope))
+        XCTAssertEqual(lifecycle.externalIOAdmission(scope: scope), .notReady)
+        XCTAssertTrue(lifecycle.didFinishSetup(scope: scope))
+        XCTAssertEqual(lifecycle.externalIOAdmission(scope: scope), .allowed)
+    }
+
+    func testSetupFailureQuarantinesRetryUntilScopedDisconnect() {
+        let old = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        let retry = BLEConnectionScope(peripheralID: old.peripheralID, generation: 2)
+        var lifecycle = BLESessionLifecycleStateMachine()
+        XCTAssertTrue(lifecycle.beginConnection(scope: old))
+        XCTAssertTrue(lifecycle.didConnect(scope: old))
+
+        XCTAssertTrue(lifecycle.beginTeardown(scope: old))
+        XCTAssertFalse(lifecycle.beginConnection(scope: retry))
+        XCTAssertEqual(lifecycle.didDisconnect(scope: retry), .ignored)
+        XCTAssertEqual(lifecycle.didDisconnect(scope: old), .accepted)
+        XCTAssertTrue(lifecycle.beginConnection(scope: retry))
+    }
+
+    func testCancelledGenerationCallbacksCannotAffectReconnectedGeneration() {
+        let peripheralID = UUID()
+        var lifecycle = BLESessionLifecycleStateMachine()
+        var callbacks = BLEBridgeCallbackStateMachine()
+
+        let old = callbacks.beginConnection(peripheralID: peripheralID)
+        XCTAssertTrue(lifecycle.beginConnection(scope: old))
+        XCTAssertTrue(lifecycle.didConnect(scope: old))
+        XCTAssertTrue(lifecycle.didFinishSetup(scope: old))
+        callbacks.expectWrite(scope: old, characteristic: .command, followedByRead: true)
+
+        XCTAssertTrue(lifecycle.beginTeardown(scope: old))
+        XCTAssertEqual(callbacks.didDisconnect(scope: old), .accepted)
+        XCTAssertEqual(lifecycle.didDisconnect(scope: old), .accepted)
+
+        let current = callbacks.beginConnection(peripheralID: peripheralID)
+        XCTAssertTrue(lifecycle.beginConnection(scope: current))
+        XCTAssertTrue(lifecycle.didConnect(scope: current))
+        XCTAssertTrue(lifecycle.didFinishSetup(scope: current))
+        callbacks.expectWrite(scope: current, characteristic: .command, followedByRead: true)
+
+        XCTAssertEqual(callbacks.didWrite(scope: old, characteristic: .command), .ignored)
+        XCTAssertEqual(callbacks.didUpdate(scope: old, characteristic: .command), .ignored)
+        XCTAssertEqual(callbacks.didDisconnect(scope: old), .ignored)
+        XCTAssertEqual(callbacks.didWrite(scope: current, characteristic: .command), .accepted)
+        XCTAssertEqual(callbacks.didUpdate(scope: current, characteristic: .command), .accepted)
+    }
 }
 
 private extension ExpectedDisconnectPolicy {

@@ -40,6 +40,94 @@ public enum BLECallbackDisposition: Equatable, Sendable {
     case ignored
 }
 
+public enum BLEExternalIOAdmission: Equatable, Sendable {
+    case allowed
+    case notReady
+}
+
+public enum BLEExternalOperation: Equatable, Sendable {
+    case command
+    case refreshTelemetry
+}
+
+public struct BLESessionLifecycleStateMachine: Sendable {
+    private enum State: Sendable {
+        case idle
+        case connecting(BLEConnectionScope)
+        case setup(BLEConnectionScope)
+        case ready(BLEConnectionScope)
+        case tearingDown(BLEConnectionScope)
+
+        var scope: BLEConnectionScope? {
+            switch self {
+            case .idle: nil
+            case let .connecting(scope), let .setup(scope), let .ready(scope),
+                 let .tearingDown(scope): scope
+            }
+        }
+    }
+
+    private var state: State = .idle
+
+    public init() {}
+
+    public var canBeginConnection: Bool {
+        if case .idle = state { return true }
+        return false
+    }
+
+    public mutating func beginConnection(scope: BLEConnectionScope) -> Bool {
+        guard canBeginConnection else { return false }
+        state = .connecting(scope)
+        return true
+    }
+
+    public mutating func didConnect(scope: BLEConnectionScope) -> Bool {
+        guard case .connecting(scope) = state else { return false }
+        state = .setup(scope)
+        return true
+    }
+
+    public mutating func didFinishSetup(scope: BLEConnectionScope) -> Bool {
+        guard case .setup(scope) = state else { return false }
+        state = .ready(scope)
+        return true
+    }
+
+    public func externalIOAdmission(scope: BLEConnectionScope) -> BLEExternalIOAdmission {
+        guard case .ready(scope) = state else { return .notReady }
+        return .allowed
+    }
+
+    public func externalIOAdmission(
+        for _: BLEExternalOperation,
+        scope: BLEConnectionScope
+    ) -> BLEExternalIOAdmission {
+        externalIOAdmission(scope: scope)
+    }
+
+    public mutating func beginTeardown(scope: BLEConnectionScope) -> Bool {
+        guard state.scope == scope else { return false }
+        if case .tearingDown = state { return false }
+        state = .tearingDown(scope)
+        return true
+    }
+
+    public mutating func didDisconnect(
+        scope: BLEConnectionScope
+    ) -> BLECallbackDisposition {
+        guard state.scope == scope else { return .ignored }
+        state = .idle
+        return .accepted
+    }
+
+    public mutating func terminate(scope: BLEConnectionScope) -> Bool {
+        guard state.scope == scope else { return false }
+        state = .idle
+        return true
+    }
+}
+
 public struct BLEBridgeCallbackStateMachine: Sendable {
     private enum DiscoveryPhase: Sendable {
         case none
