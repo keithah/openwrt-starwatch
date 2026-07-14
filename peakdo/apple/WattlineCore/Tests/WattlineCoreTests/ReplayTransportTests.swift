@@ -97,6 +97,34 @@ final class ReplayTransportTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    func testTransactionDepthIncludesQueuedRefreshAndCommandWithoutIntermediateZero() async throws {
+        let clock = TestDeviceClock()
+        let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
+        let replay = ReplayTransport(steps: [.delay(.seconds(1)), .reply(bytes: reply)], clock: clock)
+        var iterator = replay.events.makeAsyncIterator()
+
+        let refresh = Task { try await replay.refreshTelemetry() }
+        await clock.waitForSleepers(1)
+        let command = Task { try await replay.perform(.setDC(true)) }
+        while await replay.pendingTransactionCount < 2 { await Task.yield() }
+
+        await clock.advance(by: .seconds(1))
+        try await refresh.value
+        _ = try await command.value
+
+        var depths: [Int] = []
+        while depths.count < 4, let event = await iterator.next() {
+            if case let .transactionDepth(depth) = event { depths.append(depth) }
+        }
+        XCTAssertEqual(depths, [1, 2, 1, 0])
+        let maximumPending = await replay.maximumPendingTransactionCount
+        let finalPending = await replay.pendingTransactionCount
+        let maximumInFlight = await replay.maximumInFlightCount
+        XCTAssertEqual(maximumPending, 2)
+        XCTAssertEqual(finalPending, 0)
+        XCTAssertEqual(maximumInFlight, 1)
+    }
 }
 
 private enum ReplayTestError: Error, Sendable {

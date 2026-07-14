@@ -29,6 +29,8 @@ public actor ReplayTransport: DeviceTransport {
     private var currentInFlightCount = 0
 
     public private(set) var maximumInFlightCount = 0
+    public private(set) var pendingTransactionCount = 0
+    public private(set) var maximumPendingTransactionCount = 0
     public private(set) var reconnectPolicy: ReconnectPolicy = .armed
 
     public var inFlightCount: Int { currentInFlightCount }
@@ -61,25 +63,49 @@ public actor ReplayTransport: DeviceTransport {
     }
 
     public func perform(_ command: DeviceCommand) async throws -> CommandOutcome {
-        try await transactions.enqueue { [self] in
-            try await execute(command)
+        beginTransaction()
+        do {
+            let outcome = try await transactions.enqueue { [self] in
+                try await execute(command)
+            }
+            endTransaction()
+            return outcome
+        } catch {
+            endTransaction()
+            throw error
         }
     }
 
     public func refreshTelemetry() async throws {
-        try await transactions.enqueue { [self] in
-            try await executeTelemetryRefresh()
+        beginTransaction()
+        do {
+            try await transactions.enqueue { [self] in
+                try await executeTelemetryRefresh()
+            }
+            endTransaction()
+        } catch {
+            endTransaction()
+            throw error
         }
     }
 
+    private func beginTransaction() {
+        pendingTransactionCount += 1
+        maximumPendingTransactionCount = max(
+            maximumPendingTransactionCount,
+            pendingTransactionCount
+        )
+        continuation.yield(.transactionDepth(pendingTransactionCount))
+    }
+
+    private func endTransaction() {
+        pendingTransactionCount -= 1
+        continuation.yield(.transactionDepth(pendingTransactionCount))
+    }
+
     private func execute(_ command: DeviceCommand) async throws -> CommandOutcome {
-        currentInFlightCount += 1
-        maximumInFlightCount = max(maximumInFlightCount, currentInFlightCount)
-        continuation.yield(.transactionDepth(currentInFlightCount))
-        defer {
-            currentInFlightCount -= 1
-            continuation.yield(.transactionDepth(currentInFlightCount))
-        }
+        beginExecution()
+        defer { endExecution() }
 
         while true {
             let step = try nextStep()
@@ -113,6 +139,9 @@ public actor ReplayTransport: DeviceTransport {
     }
 
     private func executeTelemetryRefresh() async throws {
+        beginExecution()
+        defer { endExecution() }
+
         while !steps.isEmpty {
             let step = try nextStep()
             switch step {
@@ -130,5 +159,14 @@ public actor ReplayTransport: DeviceTransport {
     private func nextStep() throws -> ReplayStep {
         guard !steps.isEmpty else { throw ReplayTransportError.exhausted }
         return steps.removeFirst()
+    }
+
+    private func beginExecution() {
+        currentInFlightCount += 1
+        maximumInFlightCount = max(maximumInFlightCount, currentInFlightCount)
+    }
+
+    private func endExecution() {
+        currentInFlightCount -= 1
     }
 }

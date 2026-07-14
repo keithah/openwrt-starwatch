@@ -59,8 +59,13 @@ public actor DeviceSession {
 
     private let transport: any DeviceTransport
     private let clock: any DeviceClock
+    private let logicalOperations = SerializedTransactions()
     private var eventTask: Task<Void, Never>?
     private var freshnessGeneration: UInt64 = 0
+    private var telemetryTimestamps: [TelemetryChannel: DeviceTimestamp] = [:]
+    private(set) var logicalOperationDepth = 0
+
+    var isEventConsumerRunning: Bool { eventTask != nil }
 
     public init(
         transport: any DeviceTransport,
@@ -82,7 +87,12 @@ public actor DeviceSession {
                 guard !Task.isCancelled else { return }
                 await self?.receive(event)
             }
+            await self?.eventStreamDidFinish()
         }
+    }
+
+    private func eventStreamDidFinish() {
+        eventTask = nil
     }
 
     public func receive(_ event: DeviceEvent) async {
@@ -99,14 +109,23 @@ public actor DeviceSession {
             state.freshness = .stale
             state.lastError = failure?.message
         case let .battery(status, timestamp):
+            guard let timing = await prepareTelemetry(channel: .battery, timestamp: timestamp) else {
+                return
+            }
             state.battery = status
-            receiveTelemetry(.none, timestamp: timestamp)
+            finishTelemetry(.none, timing: timing)
         case let .dc(status, timestamp):
+            guard let timing = await prepareTelemetry(channel: .dc, timestamp: timestamp) else {
+                return
+            }
             state.dc = status
-            receiveTelemetry(.dc(status), timestamp: timestamp)
+            finishTelemetry(.dc(status), timing: timing)
         case let .typeC(status, timestamp):
+            guard let timing = await prepareTelemetry(channel: .typeC, timestamp: timestamp) else {
+                return
+            }
             state.typeC = status
-            receiveTelemetry(.typeC(status), timestamp: timestamp)
+            finishTelemetry(.typeC(status), timing: timing)
         case let .transactionDepth(depth):
             state.transactionDepth = depth
         }
@@ -114,24 +133,33 @@ public actor DeviceSession {
 
     @discardableResult
     public func perform(_ command: DeviceCommand) async throws -> CommandOutcome {
+        logicalOperationDepth += 1
         let mutation = await makePendingMutation(for: command)
-        if let mutation { state.pendingMutations.append(mutation) }
+        if let mutation {
+            state.pendingMutations.append(mutation)
+            scheduleTimeout(for: mutation)
+        }
 
         do {
-            var outcome = try await transport.perform(command)
-            if let followUp = command.followUp {
-                outcome = try await transport.perform(followUp.command)
+            let outcome = try await logicalOperations.enqueue { [self] in
+                try await performLogicalOperation(command)
             }
-            if let mutation,
-               state.pendingMutations.contains(where: { $0.id == mutation.id }) {
-                scheduleTimeout(for: mutation)
-            }
+            logicalOperationDepth -= 1
             return outcome
         } catch {
             if let mutation { removePendingMutation(id: mutation.id) }
             state.lastError = String(describing: error)
+            logicalOperationDepth -= 1
             throw error
         }
+    }
+
+    private func performLogicalOperation(_ command: DeviceCommand) async throws -> CommandOutcome {
+        var outcome = try await transport.perform(command)
+        if let followUp = command.followUp {
+            outcome = try await transport.perform(followUp.command)
+        }
+        return outcome
     }
 
     private func makePendingMutation(for command: DeviceCommand) async -> PendingMutation? {
@@ -144,20 +172,50 @@ public actor DeviceSession {
         )
     }
 
-    private func receiveTelemetry(_ update: TelemetryUpdate?, timestamp: DeviceTimestamp) {
+    private enum TelemetryChannel: Hashable {
+        case battery
+        case dc
+        case typeC
+    }
+
+    private struct TelemetryTiming {
+        let remainingFreshness: Duration?
+        let generation: UInt64
+    }
+
+    private func prepareTelemetry(
+        channel: TelemetryChannel,
+        timestamp: DeviceTimestamp
+    ) async -> TelemetryTiming? {
+        if let latest = telemetryTimestamps[channel], timestamp < latest { return nil }
+        let now = await clock.now
+        // The clock access above is an actor suspension point, so validate ordering again.
+        if let latest = telemetryTimestamps[channel], timestamp < latest { return nil }
+        telemetryTimestamps[channel] = timestamp
+
+        guard state.lastTelemetryAt.map({ timestamp >= $0 }) ?? true else {
+            return TelemetryTiming(remainingFreshness: nil, generation: freshnessGeneration)
+        }
+
+        let age = max(now - timestamp, .zero)
+        let remaining = .seconds(10) - age
         state.connection = .live
-        state.freshness = .live
+        state.freshness = remaining > .zero ? .live : .stale
         state.lastTelemetryAt = timestamp
+        freshnessGeneration &+= 1
+        return TelemetryTiming(remainingFreshness: remaining, generation: freshnessGeneration)
+    }
+
+    private func finishTelemetry(_ update: TelemetryUpdate?, timing: TelemetryTiming) {
         if let update {
             state.pendingMutations.removeAll { $0.reconciler.matches(update) }
         }
 
-        freshnessGeneration &+= 1
-        let generation = freshnessGeneration
+        guard let remaining = timing.remainingFreshness, remaining > .zero else { return }
         Task { [weak self, clock] in
             do {
-                try await clock.sleep(for: .seconds(10))
-                await self?.markStale(ifGenerationIs: generation)
+                try await clock.sleep(for: remaining)
+                await self?.markStale(ifGenerationIs: timing.generation)
             } catch is CancellationError {
                 return
             } catch {
@@ -174,7 +232,13 @@ public actor DeviceSession {
     private func scheduleTimeout(for mutation: PendingMutation) {
         Task { [weak self, clock] in
             do {
-                try await clock.sleep(for: mutation.timeout)
+                let elapsed = max(await clock.now - mutation.startedAt, .zero)
+                let remaining = mutation.timeout - elapsed
+                guard remaining > .zero else {
+                    await self?.timeOutMutation(id: mutation.id)
+                    return
+                }
+                try await clock.sleep(for: remaining)
                 await self?.timeOutMutation(id: mutation.id)
             } catch is CancellationError {
                 return

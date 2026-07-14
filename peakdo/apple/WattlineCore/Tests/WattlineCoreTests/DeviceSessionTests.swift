@@ -103,6 +103,134 @@ final class DeviceSessionTests: XCTestCase {
         }
         XCTAssertEqual(reply.payload, Data([3]))
     }
+
+    func testConcurrentCommandAndReadbackPairsAreAtomic() async throws {
+        let clock = TestDeviceClock()
+        let replay = ReplayTransport(steps: [
+            .reply(after: .seconds(1), bytes: Data([Command.typeCPowerLimit.rawValue, Action.set.rawValue | 0x80, 0])),
+            .reply(bytes: Data([Command.typeCPowerLimit.rawValue, Action.get.rawValue | 0x80, 0, 3])),
+            .reply(bytes: Data([Command.typeCPowerLimit.rawValue, Action.set.rawValue | 0x80, 0])),
+            .reply(bytes: Data([Command.typeCPowerLimit.rawValue, Action.get.rawValue | 0x80, 0, 4])),
+        ], clock: clock)
+        let session = DeviceSession(transport: replay, clock: clock)
+
+        let first = Task { try await session.perform(.setPowerLimit(.global, level: .watts65)) }
+        await clock.waitForSleepers(1)
+        let second = Task { try await session.perform(.setPowerLimit(.input, level: .watts100)) }
+        while await session.logicalOperationDepth < 2 { await Task.yield() }
+        await clock.advance(by: .seconds(1))
+
+        let outcomes = try await (first.value, second.value)
+        XCTAssertEqual(outcomes.0.replyPayload, Data([3]))
+        XCTAssertEqual(outcomes.1.replyPayload, Data([4]))
+        let finalDepth = await session.logicalOperationDepth
+        XCTAssertEqual(finalDepth, 0)
+    }
+
+    func testAlreadyExpiredTelemetryIsImmediatelyStale() async throws {
+        let clock = TestDeviceClock()
+        await clock.advance(by: .seconds(20))
+        let session = DeviceSession(transport: ReplayTransport(), clock: clock)
+        let status = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+
+        await session.receive(.dc(status, timestamp: .zero))
+
+        let state = await session.state
+        let sleeperCount = await clock.sleeperCount
+        XCTAssertEqual(state.freshness, .stale)
+        XCTAssertEqual(sleeperCount, 0)
+    }
+
+    func testBufferedTelemetryUsesOnlyItsRemainingFreshLifetime() async throws {
+        let clock = TestDeviceClock()
+        await clock.advance(by: .seconds(9))
+        let session = DeviceSession(transport: ReplayTransport(), clock: clock)
+        let status = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+
+        await session.receive(.dc(status, timestamp: .zero))
+        await clock.waitForSleepers(1)
+        await clock.advance(by: .seconds(1))
+        await Task.yield()
+
+        let state = await session.state
+        XCTAssertEqual(state.freshness, .stale)
+    }
+
+    func testOlderOutOfOrderTelemetryCannotOverwriteNewerState() async throws {
+        let clock = TestDeviceClock()
+        await clock.advance(by: .seconds(2))
+        let session = DeviceSession(transport: ReplayTransport(), clock: clock)
+        let newer = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+        let older = try DCPortStatus(frame: Data([0, 0, 0, 0, 0, 0, 0, 0]))
+
+        await session.receive(.dc(newer, timestamp: .seconds(2)))
+        await session.receive(.dc(older, timestamp: .seconds(1)))
+
+        let state = await session.state
+        XCTAssertEqual(state.dc, newer)
+        XCTAssertEqual(state.lastTelemetryAt, .seconds(2))
+    }
+
+    func testOlderSampleFromAnotherTelemetryChannelStillUpdatesThatChannel() async throws {
+        let clock = TestDeviceClock()
+        await clock.advance(by: .seconds(2))
+        let session = DeviceSession(transport: ReplayTransport(), clock: clock)
+        let battery = try BatteryStatus(frame: Data(repeating: 0, count: 16))
+        let dc = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+
+        await session.receive(.battery(battery, timestamp: .seconds(2)))
+        await session.receive(.dc(dc, timestamp: .seconds(1)))
+
+        let state = await session.state
+        XCTAssertEqual(state.dc, dc)
+        XCTAssertEqual(state.lastTelemetryAt, .seconds(2))
+    }
+
+    func testMutationTimeoutBudgetIncludesSlowCommandIO() async throws {
+        let clock = TestDeviceClock()
+        let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
+        let replay = ReplayTransport(steps: [.reply(after: .seconds(4), bytes: reply)], clock: clock)
+        let session = DeviceSession(transport: replay, clock: clock)
+
+        let operation = Task { try await session.perform(.setDC(true)) }
+        await clock.waitForSleepers(2)
+        await clock.advance(by: .seconds(3))
+        await Task.yield()
+
+        var state = await session.state
+        XCTAssertTrue(state.pendingMutations.isEmpty)
+        XCTAssertEqual(state.lastError, "Device did not confirm the requested change.")
+        await clock.advance(by: .seconds(1))
+        _ = try await operation.value
+        state = await session.state
+        XCTAssertTrue(state.pendingMutations.isEmpty)
+    }
+
+    func testStartIsIdempotentAndConsumesBufferedEvents() async throws {
+        let status = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+        let replay = ReplayTransport(steps: [
+            .telemetry(.dc(status, timestamp: .zero)),
+            .reply(bytes: Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])),
+        ])
+        _ = try await replay.perform(.setDC(true))
+        let session = DeviceSession(transport: replay, clock: TestDeviceClock())
+
+        await session.start()
+        await session.start()
+        while await session.state.dc == nil { await Task.yield() }
+
+        let state = await session.state
+        let isRunning = await session.isEventConsumerRunning
+        XCTAssertEqual(state.dc, status)
+        XCTAssertTrue(isRunning)
+    }
+}
+
+private extension CommandOutcome {
+    var replyPayload: Data? {
+        guard case let .reply(reply) = self else { return nil }
+        return reply.payload
+    }
 }
 
 actor TestDeviceClock: DeviceClock {
@@ -113,6 +241,8 @@ actor TestDeviceClock: DeviceClock {
 
     private(set) var now: Duration = .zero
     private var sleepers: [Sleeper] = []
+
+    var sleeperCount: Int { sleepers.count }
 
     func sleep(for duration: Duration) async throws {
         await withCheckedContinuation { continuation in
