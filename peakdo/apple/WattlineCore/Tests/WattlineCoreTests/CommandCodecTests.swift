@@ -13,9 +13,69 @@ final class CommandCodecTests: XCTestCase {
                        "DC:04:5A:EB:72:2B")
     }
 
-    func testMismatchedEchoesFail() {
+    func testStandardPolicyRejectsNonzeroResult() {
+        let request = CommandRequest(command: .features, action: .get)
+
+        XCTAssertThrowsError(try CommandReply.decode(Data([0xFE, 0x80, 0xFD]), for: request)) { error in
+            XCTAssertEqual(error as? CodecError, .rejectedResult(0xFD))
+        }
+    }
+
+    func testRuntimeUnsetPolicyAcceptsSuccessAndUnsetWhilePreservingReply() throws {
+        let request = CommandRequest(command: .typeCPowerLimit, action: .get, payload: [4])
+        let success = try CommandReply.decode(
+            Data([0x02, 0x80, 0x00, 0x04]),
+            for: request,
+            resultPolicy: .runtimeUnset
+        )
+        let unset = try CommandReply.decode(
+            Data([0x02, 0x80, 0xFF, 0xA5]),
+            for: request,
+            resultPolicy: .runtimeUnset
+        )
+
+        XCTAssertEqual(success.result, 0x00)
+        XCTAssertEqual(success.payload, Data([0x04]))
+        XCTAssertEqual(unset.result, 0xFF)
+        XCTAssertEqual(unset.payload, Data([0xA5]))
+    }
+
+    func testIgnoreForBypassMustBeExplicitToAcceptArbitraryResult() throws {
+        let request = CommandRequest(command: .dcBypassControl, action: .set, payload: [1])
+        let data = Data([0x14, 0x81, 0xFD, 0xA5])
+
+        XCTAssertThrowsError(try CommandReply.decode(data, for: request)) { error in
+            XCTAssertEqual(error as? CodecError, .rejectedResult(0xFD))
+        }
+
+        let reply = try CommandReply.decode(data, for: request, resultPolicy: .ignoreForBypass)
+        XCTAssertEqual(reply.result, 0xFD)
+        XCTAssertEqual(reply.payload, Data([0xA5]))
+    }
+
+    func testCommandEchoMismatchReportsExactError() {
         let request = CommandRequest(command: .dcControl, action: .set, payload: [1])
-        XCTAssertThrowsError(try CommandReply.decode(Data([0x02, 0x81, 0x00]), for: request))
-        XCTAssertThrowsError(try CommandReply.decode(Data([0x01, 0x80, 0x00]), for: request))
+
+        XCTAssertThrowsError(try CommandReply.decode(Data([0x02, 0x81, 0x00]), for: request)) { error in
+            XCTAssertEqual(error as? CodecError, .commandEchoMismatch(expected: 0x01, actual: 0x02))
+        }
+    }
+
+    func testActionEchoMismatchReportsExactError() {
+        let request = CommandRequest(command: .dcControl, action: .set, payload: [1])
+
+        XCTAssertThrowsError(try CommandReply.decode(Data([0x01, 0x80, 0x00]), for: request)) { error in
+            XCTAssertEqual(error as? CodecError, .actionEchoMismatch(expected: 0x81, actual: 0x80))
+        }
+    }
+
+    func testTruncatedReplyAtEachPrefixBoundaryReportsExactError() {
+        let request = CommandRequest(command: .features, action: .get)
+
+        for data in [Data(), Data([0xFE]), Data([0xFE, 0x80])] {
+            XCTAssertThrowsError(try CommandReply.decode(data, for: request)) { error in
+                XCTAssertEqual(error as? CodecError, .truncated)
+            }
+        }
     }
 }
