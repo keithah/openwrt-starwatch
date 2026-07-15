@@ -24,4 +24,37 @@ final class CurrentTimeCodecTests: XCTestCase {
             XCTAssertThrowsError(try CurrentTimeCodec.decode(valid.prefix(length)))
         }
     }
+
+    func testCurrentTimeDecodeRejectsOutOfRangeFieldsBeforeCalendarNormalization() {
+        let malformedValues: [(field: String, index: Int, values: [UInt8])] = [
+            ("month", 2, [0, 13]),
+            ("day", 3, [0, 32]),
+            ("hour", 4, [24]),
+            ("minute", 5, [60]),
+            ("second", 6, [60]),
+            ("day of week", 7, [0, 8]),
+        ]
+
+        for malformed in malformedValues {
+            for value in malformed.values {
+                var bytes: [UInt8] = [0xEA, 0x07, 7, 15, 12, 34, 5, 2, 128, 0]
+                bytes[malformed.index] = value
+
+                XCTAssertThrowsError(
+                    try CurrentTimeCodec.decode(Data(bytes)),
+                    "Expected invalid \(malformed.field) value \(value) to be rejected"
+                )
+            }
+        }
+    }
+
+    func testCurrentTimeDecodeAcceptsEveryFractions256Value() throws {
+        for fractions in UInt8.min...UInt8.max {
+            let bytes = Data([0xEA, 0x07, 7, 15, 12, 34, 5, 2, fractions, 0])
+            XCTAssertNoThrow(
+                try CurrentTimeCodec.decode(bytes),
+                "Fractions256 is a uint8, so \(fractions) is in range"
+            )
+        }
+    }
 }

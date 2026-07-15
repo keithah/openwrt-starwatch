@@ -13,6 +13,19 @@ public enum BLETransportError: Error, Equatable, Sendable {
     case handshakeFailed(String)
 }
 
+enum OptionalCharacteristicReadGate {
+    static func beginRead(
+        properties: CBCharacteristicProperties?,
+        registerPendingRead: () -> Void,
+        readValue: () -> Void
+    ) -> Bool {
+        guard properties?.contains(.read) == true else { return false }
+        registerPendingRead()
+        readValue()
+        return true
+    }
+}
+
 private final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate, @unchecked Sendable {
     weak var bridge: BluetoothDelegateBridge?
     let scope: BLEConnectionScope
@@ -96,6 +109,25 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     }
 
     private enum PendingIO {
+        struct ReadContinuation: Sendable {
+            let resumeReturning: @Sendable (Data) -> Void
+            let resumeThrowing: @Sendable (Error) -> Void
+
+            static func required(_ continuation: CheckedContinuation<Data, Error>) -> Self {
+                Self(
+                    resumeReturning: { continuation.resume(returning: $0) },
+                    resumeThrowing: { continuation.resume(throwing: $0) }
+                )
+            }
+
+            static func optional(_ continuation: CheckedContinuation<Data?, Error>) -> Self {
+                Self(
+                    resumeReturning: { continuation.resume(returning: $0) },
+                    resumeThrowing: { continuation.resume(throwing: $0) }
+                )
+            }
+        }
+
         case command(
             operationID: UUID,
             scope: BLEConnectionScope,
@@ -115,7 +147,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
             scope: BLEConnectionScope,
             uuid: GATTUUID,
             characteristic: CBCharacteristic,
-            continuation: CheckedContinuation<Data, Error>
+            continuation: ReadContinuation
         )
 
         var operationID: UUID {
@@ -397,7 +429,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                         scope: session.scope,
                         uuid: uuid,
                         characteristic: characteristic,
-                        continuation: continuation
+                        continuation: .required(continuation)
                     )
                     session.peripheral.readValue(for: characteristic)
                 }
@@ -408,27 +440,54 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     }
 
     func readIfSupported(_ uuid: GATTUUID) async throws -> Data? {
-        let isSupported = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Bool, Error>) in
-            queue.async { [self] in
-                guard pendingIO == nil else {
-                    continuation.resume(throwing: BLETransportError.operationInProgress)
-                    return
+        let operationID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Data?, Error>) in
+                queue.async { [self] in
+                    guard cancelledOperations.remove(operationID) == nil else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    guard pendingIO == nil else {
+                        continuation.resume(throwing: BLETransportError.operationInProgress)
+                        return
+                    }
+                    guard let session else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    guard lifecycle.externalIOAdmission(scope: session.scope) == .allowed else {
+                        continuation.resume(throwing: BLETransportError.notReady)
+                        return
+                    }
+                    let characteristic = session.characteristics[uuid.bluetoothUUID]
+                    let didBeginRead = OptionalCharacteristicReadGate.beginRead(
+                        properties: characteristic?.properties,
+                        registerPendingRead: {
+                            guard let characteristic else { return }
+                            callbackState.expectUpdate(scope: session.scope, characteristic: uuid)
+                            pendingIO = .read(
+                                operationID: operationID,
+                                scope: session.scope,
+                                uuid: uuid,
+                                characteristic: characteristic,
+                                continuation: .optional(continuation)
+                            )
+                        },
+                        readValue: {
+                            guard let characteristic else { return }
+                            session.peripheral.readValue(for: characteristic)
+                        }
+                    )
+                    if !didBeginRead {
+                        continuation.resume(returning: nil)
+                    }
                 }
-                guard let session else {
-                    continuation.resume(throwing: BLETransportError.notReady)
-                    return
-                }
-                guard lifecycle.externalIOAdmission(scope: session.scope) == .allowed else {
-                    continuation.resume(throwing: BLETransportError.notReady)
-                    return
-                }
-                let characteristic = session.characteristics[uuid.bluetoothUUID]
-                continuation.resume(returning: characteristic?.properties.contains(.read) == true)
             }
+        } onCancel: {
+            self.cancel(operationID: operationID)
         }
-        guard isSupported else { return nil }
-        return try await read(uuid)
     }
 
     private func cancel(operationID: UUID) {
@@ -703,7 +762,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         switch pendingIO {
         case let .command(_, _, _, _, continuation): continuation.resume(throwing: error)
         case let .write(_, _, _, _, continuation): continuation.resume(throwing: error)
-        case let .read(_, _, _, _, continuation): continuation.resume(throwing: error)
+        case let .read(_, _, _, _, continuation): continuation.resumeThrowing(error)
         }
     }
 
@@ -1200,12 +1259,12 @@ private extension BluetoothDelegateBridge {
             else { return }
             self.pendingIO = nil
             if let error {
-                continuation.resume(throwing: error)
+                continuation.resumeThrowing(error)
             } else if let value = characteristic.value {
                 emitTelemetry(uuid: uuid, value: value)
-                continuation.resume(returning: value)
+                continuation.resumeReturning(value)
             } else {
-                continuation.resume(throwing: BLETransportError.invalidResponse)
+                continuation.resumeThrowing(BLETransportError.invalidResponse)
             }
         }
     }

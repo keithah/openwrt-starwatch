@@ -34,6 +34,15 @@ public enum CurrentTimeCodec {
     ) throws -> Date {
         guard data.count >= 10 else { throw BLETransportError.invalidResponse }
         let bytes = Array(data.prefix(10))
+        guard (1...12).contains(bytes[2]),
+              (1...31).contains(bytes[3]),
+              (0...23).contains(bytes[4]),
+              (0...59).contains(bytes[5]),
+              (0...59).contains(bytes[6]),
+              (1...7).contains(bytes[7])
+        else {
+            throw BLETransportError.invalidResponse
+        }
         var components = DateComponents()
         components.calendar = calendar
         components.timeZone = calendar.timeZone

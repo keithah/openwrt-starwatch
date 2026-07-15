@@ -73,12 +73,21 @@ public actor BLETransport: DeviceTransport {
         beginTransaction()
         defer { endTransaction() }
         try await transactions.enqueue { [bridge] in
-            try await bridge.write(
-                CurrentTimeCodec.encode(Date(), adjustReason: 1),
-                to: .currentTime,
-                disconnectPolicy: .none
-            )
+            try await Self.performManualTimeSynchronization(at: Date()) { bytes, uuid, policy in
+                try await bridge.write(bytes, to: uuid, disconnectPolicy: policy)
+            }
         }
+    }
+
+    static func performManualTimeSynchronization(
+        at date: Date,
+        write: @Sendable (Data, GATTUUID, ExpectedDisconnectPolicy) async throws -> Void
+    ) async throws {
+        try await write(
+            CurrentTimeCodec.encode(date, adjustReason: 0),
+            .currentTime,
+            .none
+        )
     }
 
     public func readDeviceTimeIfSupported() async throws -> Date? {
