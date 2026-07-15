@@ -27,7 +27,7 @@ This is a scoped deviation from the written Phase 2 feature list; the contract d
   - widget extension on macOS: `com.keithah.wattline.mac.widgets`
   - app group: `group.com.keithah.wattline`
 - Restart is available for every connected application-mode Link-Power device. Only Shut Down is gated by `FF_SHUTDOWN`, because the protocol defines no restart feature bit.
-- Low-battery alerts are opt-in, default to a 20% threshold, fire once per downward crossing during discharge, and re-arm after the battery rises three percentage points above the threshold.
+- Low-battery alerts are opt-in, default to a 20% threshold, fire once per downward crossing during discharge, and re-arm after the battery rises three percentage points above the threshold. Enabling alerts or connecting while already at or below the threshold and discharging emits one initial alert, then remains armed-off until the same hysteresis condition is met.
 - Both charging and discharging Live Activity preferences default on, subject to system Activity authorization.
 - Current Time drift uses a standard `0x2A2B` read only when CoreBluetooth reports the characteristic as readable. Otherwise Settings honestly reports that drift is unavailable.
 - macOS launches menu-bar-only by default. Showing the Dock icon is an opt-in persisted preference.
@@ -115,7 +115,7 @@ The existing handshake continues writing the verified ten-byte Current Time valu
 
 ### 7.3 DC and Bypass
 
-DC and bypass controls call the existing `.setDC` and `.setBypass` commands through `DeviceSession`. The UI renders pending state without changing telemetry. DC resolves from `DcPortStatus.enabled` within the existing 3-second window. Bypass ignores its nonstandard reply result and resolves only from `DcPortStatus.bypassOn` within ten seconds.
+DC and bypass controls call the existing `.setDC` and `.setBypass` commands through `DeviceSession`. The UI renders pending state without changing telemetry. Pending DC presentation uses the existing target-agnostic mutation query, matching either `.dcEnabled(true)` or `.dcEnabled(false)`; it must not derive pending state from `DcPortStatus.enabled`, which remains authoritative telemetry. DC resolves from `DcPortStatus.enabled` within the existing 3-second window. Bypass ignores its nonstandard reply result and resolves only from `DcPortStatus.bypassOn` within ten seconds.
 
 ### 7.4 Restart
 
@@ -145,7 +145,7 @@ Staleness is computed by each reader from `observedAt` and the current wall cloc
 
 ## 9. Low-battery Notification (F16)
 
-The preference defaults off with a 20% threshold. Wattline requests notification authorization only when the user enables it. While battery capability exists, the pure policy emits once when discharging telemetry crosses downward through the threshold. It re-arms when level reaches threshold + 3 percentage points, allowing a later genuine discharge episode without repeated notifications around the boundary.
+The preference defaults off with a 20% threshold. Wattline requests notification authorization only when the user enables it. While battery capability exists, the pure policy emits once when discharging telemetry crosses downward through the threshold. If the first eligible sample after enable or connect is already at or below the threshold and discharging, it emits once immediately so an unseen crossing is not silently lost. It then remains suppressed until level reaches threshold + 3 percentage points, allowing a later genuine discharge episode without repeated notifications around the boundary.
 
 The notification includes “Turn off DC Port” only when `FF_DC_OUT_CONTROL` is resolved. Selecting it wakes/opens Wattline as required, enters the shared operation broker, allows at most ten seconds to reconnect, performs `.setDC(false)`, and reports success only after authoritative DC telemetry confirms off. Timeout, denial, unsupported capability, and unavailable device states produce clear outcomes.
 
@@ -168,7 +168,7 @@ ActivityKit request/update/end failures do not affect BLE state or snapshot pers
 
 ### 10.2 Widgets
 
-Small and medium widgets deep-link to the dashboard and read only the app-group snapshot. Small shows battery level/state and staleness. Medium adds direction-aware runtime plus DC and USB-C power. Both render “as of” information when data is no longer live. When no eligible snapshot exists, they render an unavailable setup state rather than attempting BLE.
+Small and medium widgets deep-link to the dashboard and read only the app-group snapshot. Small shows battery level/state and staleness. Medium adds direction-aware runtime plus DC and USB-C power. Both render “as of” information when data is no longer live. When no eligible snapshot exists, they render an unavailable setup state rather than attempting BLE. `TimelineProvider.placeholder(in:)` is a synchronous, deterministic sample and never awaits `SharedSnapshotStore`; only `getSnapshot` and `getTimeline` bridge asynchronously to the actor-isolated store.
 
 ## 11. macOS Surfaces (F13–F14)
 
@@ -178,11 +178,15 @@ The popover reuses compact `BatteryHero` and `PortCard` variants. Supported DC a
 
 “Show in Dock” is off by default and persists a runtime activation-policy choice. Launch at login uses `SMAppService`; registration failures are visible in Settings. The macOS app owns BLE and app-group snapshot writes. The shared WidgetKit extension supplies Notification Center widgets and remains read-only.
 
+Demo Mode is available from the macOS menu-bar app as well as iOS. `MacAppModel` reuses `DemoTransport`, shows the persistent `DEMO` badge in the popover and optional window, and provides a “Connect a real device” affordance that leaves Demo without constructing a second BLE owner. Demo drives battery, compact port controls, Settings, snapshot writes, and gallery surfaces without CoreBluetooth.
+
 Deterministic tests cover command-to-confirmation behavior. Signposts record actual popover command-to-confirmation duration for the Phase 2 `<1.5 s` hardware criterion.
 
 ## 12. App Intents and Gallery (F15)
 
-An actor-isolated device-operation broker serializes intent and notification-action access to the app's active transport/session. It reuses an existing connection or performs a generation-tokened reconnect for at most ten seconds. It never creates a second simultaneous BLE owner.
+An actor-isolated device-operation broker serializes intent and notification-action access to the app's active transport/session. It reuses an existing connection or performs a generation-tokened reconnect for at most ten seconds. It never creates a second simultaneous BLE owner. The bounded reconnect API is established with Settings infrastructure in Milestone 1 and is the single reconnect path later consumed by notification actions and App Intents.
+
+`AppModel` remains the sole caller of `DeviceTransport.connect()`. Before asking `AppModel` to reconnect, the broker registers exactly one continuation under the requested generation. `AppModel.attach()` installs the broker context before reconnect waiting is armed; the next matching `.connected` or terminal lifecycle event resolves and removes that continuation exactly once. A single timeout task removes the same generation-keyed registry entry after ten seconds and resumes it with timeout. Cancellation, detach, and superseding `attach(generation: N)` remove only their matching entries. A late callback for generation N-1 cannot resolve or mutate generation N, and the broker never waits on an operation that requires its own actor to process the lifecycle callback.
 
 ### 12.1 Toggle DC Port
 
@@ -202,14 +206,17 @@ Before any device has connected, the in-app gallery shows the three device-opera
 
 `ForegroundContinuableIntent` is used when Wattline must open or resume for Bluetooth access. Already-connected operations remain background-capable where the OS permits. Demo execution uses `DemoTransport` and labels its result as simulated. The low-battery gallery card accurately describes local notifications and a time-based Get Battery Level recipe; it does not claim a third-party event trigger.
 
+Because iOS 17 system-instantiates `AppIntent` values and does not provide the newer dependency-registration surface used on later OS releases, production intents resolve their broker through a launch-time shared accessor. `WattlineApp` registers the exact `DeviceOperationBroker` instance owned by its `AppModel` before intent execution is enabled. Both background intents and `ForegroundContinuableIntent` resolve that accessor; tests must prove the production resolution path returns the same object identity as the app-owned broker. The accessor is a reference registry, not a factory, and cannot construct a transport, session, broker, or second BLE owner.
+
 ## 13. Error and Concurrency Model
 
 - Device telemetry or confirmed readback is authoritative for every mutation.
 - Expected-disconnect commands retain the Phase 1 restart/shutdown state machine, including the disconnecting write-error path.
 - All commands remain serialized through the existing transaction engine.
 - App coordinators and the operation broker are actor-isolated under Swift 6.
-- Reconnects and long-lived callbacks carry generation tokens; stale generations cannot mutate a newer session.
-- Continuations are resumed exactly once on success, failure, timeout, cancellation, or disconnect.
+- `AppModel` is the sole caller of `DeviceTransport.connect()`; notification and intent coordinators request bounded connection only through the shared broker.
+- Reconnects and long-lived callbacks carry generation tokens; stale generations cannot mutate a newer session. `attach()` publishes broker context before reconnect arming, and an overlapping attach for generation N supersedes and resumes generation N-1 without touching N.
+- Connection continuations live in one generation-keyed broker registry and are resumed exactly once on success, failure, timeout, cancellation, detach, or disconnect. One ten-second timeout task removes its registry entry before resuming; late callbacks find no entry and are ignored.
 - Snapshot, ActivityKit, WidgetKit, notification, AppIntent, and ServiceManagement errors are isolated from the BLE session and surfaced at the appropriate UI boundary.
 - No Phase 2 target contains networking code, URLSession usage, web sockets, or firmware CDN references.
 
@@ -222,7 +229,7 @@ Every behavior is introduced with a failing test that would fail if production b
 - Snapshot round-trip, version rejection, corruption handling, and wall-clock staleness.
 - Material-change and widget-throttle decision tables with injected clocks.
 - Live Activity lifecycle tables covering status transitions, five-minute idle, fifteen-minute disconnect, and renewal.
-- Low-battery downward crossing, no-repeat behavior, 3% re-arm, status/capability gating, and preference-disabled behavior.
+- Low-battery downward crossing, already-low first eligible sample, no-repeat behavior, 3% re-arm, status/capability gating, and preference-disabled behavior.
 - Current Time decoding and optional-read policy without assuming unsupported hardware behavior.
 - Replay/Demo regression tests proving Settings and broker operations preserve serialization, telemetry reconciliation, and disconnect-as-success quirks.
 
@@ -238,8 +245,8 @@ Every behavior is introduced with a failing test that would fail if production b
 - Notification permission timing, category/action registration, broker routing, and confirmed DC-off outcomes.
 - Live Activity coordinator commands against a fake adapter.
 - Widget provider reads snapshots only and never receives a transport dependency.
-- macOS activation-policy and launch-at-login adapters with injected fakes.
-- Intent live, reconnect, timeout, stale-snapshot, unsupported, SET-then-GET, and Demo outcomes.
+- macOS activation-policy and launch-at-login adapters with injected fakes, plus `DemoTransport` entry/exit, `DEMO` presentation, and no-CoreBluetooth Demo ownership.
+- Intent live, reconnect, timeout, stale-snapshot, unsupported, SET-then-GET, Demo outcomes, and production broker object-identity resolution on the iOS 17 floor.
 - UI tests for each simulator-accessible Phase 2 surface.
 
 ### 14.4 Structural Audits
@@ -247,7 +254,7 @@ Every behavior is introduced with a failing test that would fail if production b
 - iOS remains 17.0+ and macOS is 14.0+.
 - App group, ActivityKit, WidgetKit, background BLE, notification, and `NSSupportsLiveActivities` configuration is present only where required.
 - `WattlineCore` has no forbidden UI/framework imports.
-- Widget extension has no code path that constructs or uses `DeviceTransport`, `DeviceSession`, or CoreBluetooth. A model-only indirect `WattlineCore` package dependency through `WattlineUI` is acceptable.
+- Widget extension has no code path that constructs or uses `DeviceTransport`, `DeviceSession`, or CoreBluetooth. A direct `WattlineCore` product dependency is permitted only for model/store APIs such as `SharedDeviceSnapshot` and `SharedSnapshotStore`; `WattlineUI` may also expose those model types indirectly. A source-level audit must prove that neither dependency path introduces a CoreBluetooth import or transport/session construction in the extension.
 - Capability-hidden elements are absent from the view tree.
 - Contract/OEM reference files remain unchanged.
 - No networking APIs, URL literals, ATS exceptions, or later-phase OTA implementation exist.

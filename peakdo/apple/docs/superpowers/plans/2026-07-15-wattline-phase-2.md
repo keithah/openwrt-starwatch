@@ -19,9 +19,11 @@
 - Use app IDs com.keithah.wattline and com.keithah.wattline.mac. The shared widget target uses com.keithah.wattline.widgets on iOS and com.keithah.wattline.mac.widgets on macOS. Use app group group.com.keithah.wattline.
 - Telemetry or confirmed readback is authoritative. Never update device state or snapshots optimistically.
 - Preserve bypass's 10-second reconciliation, Type-C mode reconciliation, power-limit readback, and disconnect-as-success including write-error-while-disconnecting.
+- AppModel is the sole caller of DeviceTransport.connect(). Notification coordinators and intents consume the one generation-tokened DeviceOperationBroker.withConnection path created in Milestone 1; they must not create a transport, BLE owner, continuation registry, or ad-hoc reconnect path.
 - Unsupported capability UI must be absent from composition, not disabled or hidden.
 - Use green for charging, orange for discharging, neutral for idle, and monospaced numeric telemetry.
 - Run focused red/green tests for every task. Run complete clean suites and audits after each milestone.
+- Parameterize simulator runs with IOS_SIMULATOR_DESTINATION (for example, platform=iOS Simulator,id=<available simulator UUID>); never hardcode a model name.
 - Stop after each milestone handoff and ask permission before starting the next milestone.
 
 ## File and Interface Map
@@ -67,6 +69,7 @@ New targets:
 
 **Files:**
 - Create: peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/CurrentTimeCodec.swift
+- Modify: peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/HandshakeCodec.swift
 - Modify: peakdo/apple/WattlineCore/Sources/WattlineCore/Device/Handshake.swift
 - Modify: peakdo/apple/WattlineCore/Sources/WattlineCore/Transport/DeviceTransport.swift
 - Modify: peakdo/apple/WattlineCore/Sources/WattlineCore/BLE/BLETransport.swift
@@ -75,6 +78,7 @@ New targets:
 - Modify: peakdo/apple/WattlineCore/Sources/WattlineCore/Transport/ReplayTransport.swift
 - Test: peakdo/apple/WattlineCore/Tests/WattlineCoreTests/CurrentTimeCodecTests.swift
 - Test: peakdo/apple/WattlineCore/Tests/WattlineCoreTests/ReplayTransportTests.swift
+- Test: peakdo/apple/WattlineCore/Tests/WattlineCoreTests/BluetoothDelegateBridgeTests.swift
 
 **Interfaces:**
 - Produces CurrentTimeCodec.encode, CurrentTimeCodec.decode, DeviceTransport.synchronizeDeviceTime, and DeviceTransport.readDeviceTimeIfSupported.
@@ -99,6 +103,10 @@ New targets:
         for length in 0..<10 {
             XCTAssertThrowsError(try CurrentTimeCodec.decode(valid.prefix(length)))
         }
+    }
+
+    func testCurrentTimeDecodeRejectsNormalizedOutOfRangeFields() {
+        XCTAssertThrowsError(try CurrentTimeCodec.decode(Data([0xEA, 0x07, 13, 32, 25, 61, 61, 2, 0, 0])))
     }
 
 - [ ] **Step 2: Run the focused test and verify RED**
@@ -129,13 +137,13 @@ Expected: compilation fails because the public codec API is absent.
         func readDeviceTimeIfSupported() async throws -> Date?
     }
 
-Move the handshake encoder into this type without changing its live vector. BLE methods must use SerializedTransactions. The bridge returns nil without issuing a read when 0x2A2B lacks the read property. Demo returns simulated time. Replay consumes explicit deviceTime(Date?) and timeSync steps so wrong order fails.
+Relocate the existing enum from HandshakeCodec.swift into this type; do not double-declare it. Keep Handshake.swift passing adjustReason: 1 so HandshakeTests preserves the live vector with byte 9 equal to 1. Manual BLE synchronizeDeviceTime passes adjustReason: 0. BLE methods must use SerializedTransactions. Extract or inject a bridge property-gating seam and use a spy to prove absent and write-only 0x2A2B characteristics register no pending read and issue zero CBPeripheral.readValue calls, while a readable characteristic issues exactly one read. Validate standard Current Time field ranges before Calendar can normalize malformed values. Demo returns simulated time. Replay consumes explicit deviceTime(Date?) and timeSync steps so wrong order fails.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
     swift test --package-path peakdo/apple/WattlineCore --filter 'CurrentTimeCodecTests|ReplayTransportTests'
 
-Expected: round-trip, truncation, optional-read, and serialization assertions pass.
+Expected: round-trip, malformed-range rejection, manual/external adjustment-reason wiring, zero-I/O unreadable behavior, optional-read, and serialization assertions pass.
 
 - [ ] **Step 5: Run Core and commit**
 
@@ -153,7 +161,7 @@ Expected: round-trip, truncation, optional-read, and serialization assertions pa
 
 **Interfaces:**
 - Consumes one attached DeviceSession, DeviceTransport, peripheral UUID, and AppModel generation.
-- Produces attach, detach, perform, syncClock, and readClock without constructing a transport.
+- Produces attach, detach, perform, syncClock, readClock, withConnection(to:timeout:operation:), and a generation-keyed connection-event handoff without constructing a transport.
 
 - [ ] **Step 1: Write ownership and stale-generation tests**
 
@@ -169,12 +177,25 @@ Expected: round-trip, truncation, optional-read, and serialization assertions pa
         ))
         _ = try await broker.perform(.setDC(true), generation: 4)
         await assertThrows { try await broker.perform(.setDC(false), generation: 3) }
-        XCTAssertEqual(await replay.maximumConcurrentTransactions, 1)
+        XCTAssertEqual(await replay.maximumInFlightCount, 1)
+    }
+
+    func testAttachOfNewGenerationSupersedesOlderConnectionWaiter() async {
+        let harness = makeBrokerReconnectHarness(startingGeneration: 8)
+        let old = Task {
+            try await harness.broker.withConnection(to: harness.peripheralID) { _ in true }
+        }
+        await harness.waitUntilReconnectIsRequested(generation: 8)
+        await harness.attachConnectedContext(generation: 9)
+        await assertThrows(BrokerError.superseded) { try await old.value }
+        XCTAssertEqual(await harness.resumeCount(generation: 8), 1)
+        XCTAssertEqual(await harness.resumeCount(generation: 9), 0)
+        XCTAssertEqual(harness.appModelConnectCallCount, 1)
     }
 
 - [ ] **Step 2: Run and verify RED**
 
-    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:WattlineTests/DeviceOperationBrokerTests
+    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "$IOS_SIMULATOR_DESTINATION" -only-testing:WattlineTests/DeviceOperationBrokerTests
 
 Expected: DeviceOperationBroker is undefined.
 
@@ -191,6 +212,7 @@ Expected: DeviceOperationBroker is undefined.
         enum BrokerError: Error, Equatable {
             case unavailable
             case superseded
+            case timedOut
         }
 
         private var context: Context?
@@ -213,13 +235,21 @@ Expected: DeviceOperationBroker is undefined.
             guard context.generation == generation else { throw BrokerError.superseded }
             return try await context.session.perform(command)
         }
+
+        func withConnection<T: Sendable>(
+            to peripheralID: UUID,
+            timeout: Duration = .seconds(10),
+            operation: @Sendable (Context) async throws -> T
+        ) async throws -> T
     }
 
-AppModel.attach supplies the existing transport/session. Teardown detaches only the matching generation. Add the WattlineShared synchronized source group to the iOS app and iOS unit-test targets; Milestone 4 adds the same group to macOS.
+AppModel supplies the existing transport/session and remains the sole caller of transport.connect(). The broker first reuses a matching connected context. Otherwise it registers one checked continuation keyed by the requested generation, then asks AppModel to reconnect that saved peripheral. AppModel.attach installs the new broker context before resolving the matching .connected event. The next matching connected or terminal lifecycle event removes and resumes the continuation exactly once. One ten-second timeout Task removes that same entry before resuming with timedOut; cancellation, detach, and a superseding generation do the same for only their matching entry. A late generation N-1 callback cannot resolve or mutate generation N. Do not hold a non-reentrant lock or await a lifecycle event on an executor that AppModel needs in order to deliver that event.
+
+Tests cover connected reuse, connection at 9.9 seconds, timeout at 10 seconds, cancellation, terminal failure, stale-callback quarantine, zero second-transport construction, and attach(generation: N) overlapping an in-flight withConnection(generation: N-1). AppModel's test spy, not the broker, records the sole transport.connect() call. Add the WattlineShared synchronized source group to the iOS app and iOS unit-test targets; Milestone 4 adds the same group to macOS.
 
 - [ ] **Step 4: Run broker and reconnect tests GREEN**
 
-    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:WattlineTests/DeviceOperationBrokerTests -only-testing:WattlineTests/AppModelReconnectTests
+    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "$IOS_SIMULATOR_DESTINATION" -only-testing:WattlineTests/DeviceOperationBrokerTests -only-testing:WattlineTests/AppModelReconnectTests
 
 - [ ] **Step 5: Commit**
 
@@ -332,7 +362,7 @@ ConnectedShellView must contain Home, Shortcuts, and Settings only. Settings ren
 
 - [ ] **Step 2: Run and verify RED**
 
-    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:WattlineTests/SettingsOperationTests
+    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "$IOS_SIMULATOR_DESTINATION" -only-testing:WattlineTests/SettingsOperationTests
 
 - [ ] **Step 3: Implement through the broker**
 
@@ -351,11 +381,12 @@ ConnectedShellView must contain Home, Shortcuts, and Settings only. Settings ren
     }
 
 Do not assign DC or bypass telemetry in these methods. Compute drift only after successful standard read.
+Settings pending presentation must use the target-agnostic DeviceSession query and match either `.dcEnabled(true)` or `.dcEnabled(false)`. Never derive pending from `model.state.dc?.enabled`; that value is confirmed telemetry and caused the Phase 1 dead-spinner regression when used as the requested target.
 
 - [ ] **Step 4: Run Settings and §5.7 regression tests GREEN**
 
     swift test --package-path peakdo/apple/WattlineCore --filter QuirkRegressionTests
-    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:WattlineTests/SettingsOperationTests
+    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "$IOS_SIMULATOR_DESTINATION" -only-testing:WattlineTests/SettingsOperationTests
 
 - [ ] **Step 5: Commit**
 
@@ -394,7 +425,7 @@ Do not assign DC or bypass telemetry in these methods. Compute drift only after 
 
 - [ ] **Step 2: Run and verify RED**
 
-    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:WattlineTests/SettingsLifecycleTests
+    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "$IOS_SIMULATOR_DESTINATION" -only-testing:WattlineTests/SettingsLifecycleTests
 
 - [ ] **Step 3: Implement exact states and flows**
 
@@ -413,7 +444,7 @@ Restart retries only the same peripheral until 30 seconds and then exposes Retry
 
 - [ ] **Step 4: Run unit and UI tests GREEN**
 
-    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:WattlineTests/SettingsLifecycleTests -only-testing:WattlineUITests/WattlineSettingsUITests
+    xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "$IOS_SIMULATOR_DESTINATION" -only-testing:WattlineTests/SettingsLifecycleTests -only-testing:WattlineUITests/WattlineSettingsUITests
 
 - [ ] **Step 5: Commit**
 
@@ -503,9 +534,9 @@ Restart retries only the same peripheral until 30 seconds and then exposes Retry
 **Interfaces:**
 - Produces LowBatteryPolicy, LowBatteryState, and evaluate(level:status:enabled:hasBattery:).
 
-- [ ] Write sequence tests for 21→20 alert, repeated 19/18 silence, charging/idle silence, preference/capability gates, 23% re-arm, and a later 20% alert.
+- [ ] Write sequence tests for 21→20 alert, repeated 19/18 silence, charging/idle silence, preference/capability gates, 23% re-arm, and a later 20% alert. Add separate first-sample tests proving enable/connect at 20% or below while discharging emits once immediately, while first-sample charging/idle or preference-disabled input stays silent; repeated already-low samples remain silent until re-armed.
 - [ ] Run focused tests; expect missing policy.
-- [ ] Implement downward crossing with default threshold 20 and hysteresis 3.
+- [ ] Implement downward crossing with default threshold 20 and hysteresis 3. Treat the first eligible discharging sample at or below threshold as an alert because no earlier crossing was observable; after emitting, use the same threshold + 3 re-arm rule.
 
     public struct LowBatteryPolicy: Equatable, Sendable {
         public init(threshold: Int = 20, hysteresis: Int = 3)
@@ -559,7 +590,7 @@ Restart retries only the same peripheral until 30 seconds and then exposes Retry
 **Interfaces:**
 - Produces lowBatteryEnabled, lowBatteryThreshold, NotificationCenterAdapter, category WATTLINE_LOW_BATTERY, and action WATTLINE_TURN_OFF_DC.
 
-- [ ] Write failing tests proving no permission request at launch, one request when enabled, action absence without DC control, and action success only after dcEnabled(false) telemetry.
+- [ ] Write failing tests proving no permission request at launch, one request when enabled, action absence without DC control, already-low enable/connect behavior follows Task 9 exactly, and action success only after dcEnabled(false) telemetry.
 - [ ] Run focused app tests; expect missing coordinator and preferences.
 - [ ] Implement an injected UserNotifications adapter; production wraps UNUserNotificationCenter and tests use a recorder.
 
@@ -575,7 +606,7 @@ Restart retries only the same peripheral until 30 seconds and then exposes Retry
         func receive(_ snapshot: SharedDeviceSnapshot) async
         func handleAction(identifier: String) async -> NotificationActionResult
     }
-- [ ] Route the action through DeviceOperationBroker with a 10-second timeout and no write-ack success.
+- [ ] Route the action exclusively through the Milestone 1 `DeviceOperationBroker.withConnection(to:timeout:operation:)` API with its default 10-second timeout and generation quarantine, then perform `.setDC(false)` and wait for authoritative `dcEnabled(false)` telemetry. The notification coordinator must not call `transport.connect()`, construct a transport/session/broker, or maintain another reconnect continuation or timeout.
 - [ ] Run app/UI tests and commit feat: add low battery notifications.
 
 ### Task 12: Milestone 2 verification and handoff
@@ -698,7 +729,7 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
 **Interfaces:**
 - Produces snapshot-only timeline provider, small/medium families, dashboard deep link, and WidgetReloadAdapter.
 
-- [ ] Write failing provider tests for fresh, stale as-of, unavailable, charging, discharging, and an initializer with no transport dependency.
+- [ ] Write failing provider tests for fresh, stale as-of, unavailable, charging, discharging, and an initializer with no transport dependency. Use a blocking/failing snapshot-store spy to prove `placeholder(in:)` never calls or awaits the actor store, while `getSnapshot` and `getTimeline` each perform the expected asynchronous read.
 - [ ] Run extension tests; expect missing provider.
 - [ ] Implement entries from SharedSnapshotStore.read only. Do not import CoreBluetooth or construct DeviceTransport.
 
@@ -708,7 +739,10 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
         func getSnapshot(in context: Context, completion: @escaping (WattlineWidgetEntry) -> Void)
         func getTimeline(in context: Context, completion: @escaping (Timeline<WattlineWidgetEntry>) -> Void)
     }
+
+`placeholder(in:)` returns an in-memory deterministic sample synchronously and never starts a Task. Only `getSnapshot` and `getTimeline` create asynchronous work to await `SharedSnapshotStore.read()` and invoke WidgetKit completion exactly once.
 - [ ] Add app-side WidgetCenter adapter driven by Task 8 decisions.
+- [ ] Audit the extension source and resolved dependency graph: a direct WattlineCore dependency is model-only for `SharedDeviceSnapshot`/`SharedSnapshotStore`, while WattlineUI may expose the same models indirectly. Prove no extension source imports CoreBluetooth or constructs `DeviceTransport`/`DeviceSession`.
 - [ ] Run extension/app tests and commit feat: add Wattline widgets.
 
 ### Task 17: Preferences and iOS acceptance
@@ -780,10 +814,11 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
 - Create: peakdo/apple/WattlineMac/MacAppModel.swift
 - Create: peakdo/apple/WattlineMac/MainWindowView.swift
 - Create: peakdo/apple/WattlineMacTests/MacAppModelTests.swift
+- Create: peakdo/apple/WattlineMacTests/MacDemoModeTests.swift
 
 - [ ] Extend configuration tests for macOS 14, bundle ID, app group, LSUIElement, packages, tests, and widget embedding.
 - [ ] Run tests; expect missing target failures.
-- [ ] Add macOS app/test targets, add the WattlineShared synchronized source group to both, and create one MacAppModel owning one BLE transport/session and snapshot coordinator.
+- [ ] Add macOS app/test targets, add the WattlineShared synchronized source group to both, and create one MacAppModel owning one BLE transport/session and snapshot coordinator. Write MacDemoModeTests first to prove Demo constructs `DemoTransport`, never constructs CoreBluetooth transport state, drives battery/port telemetry, and exits through one owner transition.
 
     @MainActor
     @Observable
@@ -791,12 +826,15 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
         let operationBroker: DeviceOperationBroker
         private(set) var state = DeviceState()
         private(set) var capabilities = DeviceCapabilities(features: [])
+        private(set) var isDemo = false
         func start()
+        func startDemo()
+        func connectRealDevice()
         func setDC(_ enabled: Bool)
         func setTypeCOutput(_ enabled: Bool)
     }
 - [ ] Implement menu-bar-only launch and Home/Shortcuts/Settings NavigationSplitView with no Timers.
-- [ ] Build/test macOS and commit build: add Wattline macOS app.
+- [ ] Build/test macOS including MacDemoModeTests and commit build: add Wattline macOS app.
 
 ### Task 21: Menu bar, popover, Dock, and launch at login
 
@@ -810,9 +848,9 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
 **Interfaces:**
 - Produces pure menu-title presentation, ActivationPolicyAdapter, LaunchAtLoginAdapter, and popover actions through the macOS session.
 
-- [ ] Write failing tests for charging title ⚡︎ 84%, noncharging 84%, unknown glyph, menu-only default, persisted Dock opt-in, login errors, and confirmed toggles.
+- [ ] Write failing tests for charging title ⚡︎ 84%, noncharging 84%, unknown glyph, menu-only default, persisted Dock opt-in, login errors, confirmed toggles, persistent `DEMO` badge composition, and the “Connect a real device” action exiting Demo through MacAppModel.
 - [ ] Run macOS tests; expect missing surfaces.
-- [ ] Implement MenuBarExtra, compact popover, injected NSApplication activation adapter, and injected SMAppService adapter.
+- [ ] Implement MenuBarExtra, compact popover, persistent `DEMO` badge and “Connect a real device” affordance, injected NSApplication activation adapter, and injected SMAppService adapter. Demo port commands use the same broker and telemetry reconciliation as real-device mode.
 
     protocol ActivationPolicyAdapter {
         func setShowsDock(_ showsDock: Bool) -> Bool
@@ -849,8 +887,8 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
 ### Task 23: Milestone 4 verification and handoff
 
 - [ ] Run fresh Core/UI/iOS/macOS/widget tests and generic builds.
-- [ ] Launch macOS, verify accessory default, Dock toggle, popover persistence, and login error UI.
-- [ ] Audit one BLE owner, app-group consistency, zero networking, and no Timers.
+- [ ] Launch macOS, verify accessory default, Dock toggle, popover persistence, login error UI, Demo entry/telemetry/controls, persistent `DEMO` badge, and “Connect a real device” exit.
+- [ ] Audit one BLE owner in both real and Demo modes, app-group consistency, zero networking, and no Timers.
 - [ ] Provide signpost measurement instructions; leave real-hardware <1.5-second evidence external when unavailable.
 - [ ] Stop for Milestone 5 approval.
 
@@ -858,41 +896,45 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
 
 # Milestone 5 — App Intents and Gallery
 
-### Task 24: Generation-tokened 10-second broker connection
+### Task 24: Intent operation results and snapshot fallback
 
 **Files:**
 - Modify: peakdo/apple/WattlineShared/Operations/DeviceOperationBroker.swift
-- Modify: peakdo/apple/Wattline/Wattline/AppModel.swift
+- Create: peakdo/apple/WattlineShared/Operations/DeviceOperationResult.swift
+- Modify: peakdo/apple/WattlineShared/Snapshots/SnapshotCoordinator.swift
 - Test: peakdo/apple/Wattline/WattlineTests/DeviceOperationBrokerTests.swift
 
 **Interfaces:**
-- Produces withConnection(to:timeout:operation:), stale-snapshot access, and DeviceOperationResult.
+- Consumes the one `withConnection(to:timeout:operation:)` implementation and generation-keyed AppModel handoff completed in Task 2.
+- Produces stale-snapshot access and DeviceOperationResult mapping for intents without adding another reconnect path or BLE owner.
 
-- [ ] Write failing tests for connected reuse, reconnect at 9.9 seconds, timeout at 10 seconds, cancellation, stale callback quarantine, and no second transport construction.
-- [ ] Run broker tests; expect missing reconnect API.
-- [ ] Implement reconnect through AppModel lifecycle callbacks and a continuation registry keyed by generation; resume exactly once on every terminal path.
+- [ ] Write failing tests proving Task 2's connected/reconnected result maps to live operation data, its timeout can fall back to the last valid snapshot with wall-clock `isStale`/age, corrupt or absent snapshots fail clearly, and unsupported capabilities do not attempt `withConnection`. Add a regression assertion that notification and intent adapters receive the same broker instance and the broker owns exactly one connection-wait registry.
+- [ ] Run broker tests; expect missing result/fallback mapping, not a missing reconnect API.
+- [ ] Implement only platform-neutral result and stale-snapshot mapping on top of Task 2's API. Do not add `transport.connect()`, another continuation dictionary, another timeout race, or a second broker.
 
-    func withConnection<T: Sendable>(
-        to peripheralID: UUID,
-        timeout: Duration = .seconds(10),
-        operation: @Sendable (Context) async throws -> T
-    ) async throws -> T
+    enum DeviceOperationResult<Value: Sendable>: Sendable {
+        case live(Value)
+        case stale(Value, age: Duration)
+    }
 - [ ] Run broker, reconnect, serialization, and expected-disconnect suites GREEN.
-- [ ] Commit feat: add bounded intent connections.
+- [ ] Commit feat: add intent operation results.
 
 ### Task 25: Three App Intents
 
 **Files:**
 - Create: peakdo/apple/Wattline/Wattline/Intents/WattlineIntents.swift
 - Create: peakdo/apple/Wattline/Wattline/Intents/WattlineIntentEntities.swift
+- Create: peakdo/apple/Wattline/Wattline/Intents/ProductionIntentBroker.swift
+- Modify: peakdo/apple/Wattline/Wattline/WattlineApp.swift
 - Test: peakdo/apple/Wattline/WattlineTests/WattlineIntentTests.swift
 
 **Interfaces:**
-- Produces ToggleDCPortIntent, GetBatteryLevelIntent, SetUSBCPowerLimitIntent, parameter entities, and IntentOperationAdapter.
+- Consumes the Task 2 bounded connection API and Task 24 result mapping.
+- Produces ToggleDCPortIntent, GetBatteryLevelIntent, SetUSBCPowerLimitIntent, parameter entities, IntentOperationAdapter, and an iOS-17-compatible production broker accessor.
 
-- [ ] Write failing adapter tests for toggle truth, DC confirmation, unsupported capability, live battery, stale snapshot plus age after timeout, no-snapshot failure, and SET-then-GET limit.
+- [ ] Write failing adapter tests for toggle truth, DC confirmation, unsupported capability, live battery, stale snapshot plus age after timeout, no-snapshot failure, and SET-then-GET limit. Add an object-identity test that launches the production registration path, system-constructs each intent with its default initializer, and proves both background and ForegroundContinuableIntent resolution return the exact `DeviceOperationBroker` instance owned by `WattlineApp`/`AppModel`.
 - [ ] Run app tests; expect missing intent types.
-- [ ] Implement AppIntent declarations and use ForegroundContinuableIntent only when app resume is required. Test the injected adapter without requiring Shortcuts runtime.
+- [ ] Implement AppIntent declarations and use ForegroundContinuableIntent only when app resume is required. On the iOS 17 floor, do not use `@Dependency`/`AppDependencyManager`; system-created intents resolve a launch-time shared accessor registered by WattlineApp before intent execution is enabled. The accessor stores the app-owned broker reference, never constructs a broker/transport/session, and is resolved by both background and foreground-continuable intents. Keep the injected adapter seam for unit tests without requiring Shortcuts runtime.
 
     protocol IntentOperationAdapter: Sendable {
         func toggleDC(deviceID: UUID, mode: DCToggleMode) async throws -> ConfirmedDCResult
@@ -907,7 +949,7 @@ Give WattlineActivityAttributes.swift explicit target membership in both the iOS
     struct ToggleDCPortIntent: AppIntent
     struct GetBatteryLevelIntent: AppIntent
     struct SetUSBCPowerLimitIntent: AppIntent
-- [ ] Restrict entity queries to eligible saved devices and repeat capability checks on direct invocation.
+- [ ] Restrict entity queries to eligible saved devices and repeat capability checks on direct invocation. Every live intent operation uses Task 2's `withConnection`; no intent calls `transport.connect()` or owns reconnect state.
 - [ ] Run app/Core suites and commit feat: add Wattline app intents.
 
 ### Task 26: Shortcuts gallery
