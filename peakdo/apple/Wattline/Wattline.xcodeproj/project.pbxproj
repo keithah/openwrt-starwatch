@@ -30,6 +30,7 @@
 		A10000000000000000000006 /* Wattline */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (A1000000000000000000000C /* Exceptions for Wattline folder in Wattline target */, ); path = Wattline; sourceTree = "<group>"; };
 		A10000000000000000000007 /* WattlineUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = WattlineUITests; sourceTree = "<group>"; };
 		A10000000000000000000064 /* WattlineTests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = WattlineTests; sourceTree = "<group>"; };
+		A10000000000000000000070 /* WattlineShared */ = {isa = PBXFileSystemSynchronizedRootGroup; path = ../WattlineShared; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -39,14 +40,14 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A1000000000000000000000A = {isa = PBXGroup; children = (A10000000000000000000006 /* Wattline */, A10000000000000000000064 /* WattlineTests */, A10000000000000000000007 /* WattlineUITests */, A1000000000000000000000B /* Products */, ); sourceTree = "<group>"; };
+		A1000000000000000000000A = {isa = PBXGroup; children = (A10000000000000000000006 /* Wattline */, A10000000000000000000070 /* WattlineShared */, A10000000000000000000064 /* WattlineTests */, A10000000000000000000007 /* WattlineUITests */, A1000000000000000000000B /* Products */, ); sourceTree = "<group>"; };
 		A1000000000000000000000B /* Products */ = {isa = PBXGroup; children = (A10000000000000000000004 /* Wattline.app */, A10000000000000000000063 /* WattlineTests.xctest */, A10000000000000000000005 /* WattlineUITests.xctest */, ); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A10000000000000000000020 /* Wattline */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000040; buildPhases = (A10000000000000000000021, A10000000000000000000008, A10000000000000000000022, ); buildRules = (); dependencies = (); fileSystemSynchronizedGroups = (A10000000000000000000006 /* Wattline */, ); name = Wattline; packageProductDependencies = (A10000000000000000000031 /* WattlineCore */, A10000000000000000000032 /* WattlineUI */, ); productName = Wattline; productReference = A10000000000000000000004 /* Wattline.app */; productType = "com.apple.product-type.application"; };
+		A10000000000000000000020 /* Wattline */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000040; buildPhases = (A10000000000000000000021, A10000000000000000000008, A10000000000000000000022, ); buildRules = (); dependencies = (); fileSystemSynchronizedGroups = (A10000000000000000000006 /* Wattline */, A10000000000000000000070 /* WattlineShared */, ); name = Wattline; packageProductDependencies = (A10000000000000000000031 /* WattlineCore */, A10000000000000000000032 /* WattlineUI */, ); productName = Wattline; productReference = A10000000000000000000004 /* Wattline.app */; productType = "com.apple.product-type.application"; };
 		A10000000000000000000023 /* WattlineUITests */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000041; buildPhases = (A10000000000000000000024, A10000000000000000000009, A10000000000000000000025, ); buildRules = (); dependencies = (A10000000000000000000026, ); fileSystemSynchronizedGroups = (A10000000000000000000007 /* WattlineUITests */, ); name = WattlineUITests; packageProductDependencies = (); productName = WattlineUITests; productReference = A10000000000000000000005 /* WattlineUITests.xctest */; productType = "com.apple.product-type.bundle.ui-testing"; };
-		A10000000000000000000066 /* WattlineTests */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000067; buildPhases = (A10000000000000000000068, A10000000000000000000065, A10000000000000000000069, ); buildRules = (); dependencies = (A1000000000000000000006A, ); fileSystemSynchronizedGroups = (A10000000000000000000064 /* WattlineTests */, ); name = WattlineTests; packageProductDependencies = (A10000000000000000000061 /* WattlineCore */, ); productName = WattlineTests; productReference = A10000000000000000000063 /* WattlineTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
+		A10000000000000000000066 /* WattlineTests */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000067; buildPhases = (A10000000000000000000068, A10000000000000000000065, A10000000000000000000069, ); buildRules = (); dependencies = (A1000000000000000000006A, ); fileSystemSynchronizedGroups = (A10000000000000000000064 /* WattlineTests */, A10000000000000000000070 /* WattlineShared */, ); name = WattlineTests; packageProductDependencies = (A10000000000000000000061 /* WattlineCore */, ); productName = WattlineTests; productReference = A10000000000000000000063 /* WattlineTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */

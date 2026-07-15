@@ -303,6 +303,44 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(model.route, .scan)
     }
 
+    func testBrokerReconnectRoutesThroughAppModelAsSoleConnectOwner() async throws {
+        let transport = RecordingTransport(connectResult: .success)
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        var factoryCallCount = 0
+        let model = AppModel(persistence: AppPersistence(defaults: defaults)) {
+            factoryCallCount += 1
+            return transport
+        }
+        let peripheralID = UUID()
+
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(
+            id: peripheralID,
+            localName: "Link-Power 2",
+            rssi: -45,
+            mode: .application
+        ))
+        try await eventually {
+            await transport.connectedIDs.count == 1 && model.connectionStatus == .connected
+        }
+        await transport.emit(.disconnected(TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+
+        let result = Task {
+            try await model.deviceOperationBroker.withConnection(to: peripheralID) { context in
+                context.generation
+            }
+        }
+
+        try await eventually { await transport.connectedIDs.count == 2 }
+        _ = try await result.value
+        let connectedIDs = await transport.connectedIDs
+        XCTAssertEqual(connectedIDs, [peripheralID, peripheralID])
+        XCTAssertEqual(factoryCallCount, 1, "Broker reconnect must reuse AppModel's transport")
+    }
+
     func testSetFailureUsesSuccessfulRecoveryGetAsConfirmedLimit() async {
         let transport = MutationTransport(steps: [
             .failure,
@@ -785,6 +823,8 @@ private actor MutationTransport: DeviceTransport {
     func connect(to id: UUID) async throws { continuation.yield(.connected(id)) }
     func disconnect() async {}
     func refreshTelemetry() async throws {}
+    func synchronizeDeviceTime() async throws {}
+    func readDeviceTimeIfSupported() async throws -> Date? { nil }
     func emit(_ event: DeviceEvent) { continuation.yield(event) }
     func releaseSuspendedReply() {
         guard let suspendedReply else { return }
@@ -867,4 +907,6 @@ private actor RecordingTransport: DeviceTransport {
     func disconnect() async { disconnectCount += 1 }
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
     func refreshTelemetry() async throws {}
+    func synchronizeDeviceTime() async throws {}
+    func readDeviceTimeIfSupported() async throws -> Date? { nil }
 }

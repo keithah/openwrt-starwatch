@@ -159,6 +159,11 @@ final class AppModel {
     private var selectedPeripheralID: UUID?
     private var otaRecoveryPeripheralID: UUID?
 
+    @ObservationIgnored
+    private(set) lazy var deviceOperationBroker = DeviceOperationBroker { [weak self] id, generation in
+        await self?.requestBrokerReconnect(to: id, generation: generation)
+    }
+
     init(
         persistence: AppPersistence = AppPersistence(),
         transportFactory: @escaping TransportFactory = { BLETransport() }
@@ -258,8 +263,13 @@ final class AppModel {
         guard let context = beginOperationForCurrentTransport() else { return }
         operationTask = Task { [weak self] in
             do {
-                await context.transport.stopScan()
+                await self?.attachBrokerContext(
+                    peripheralID: device.id,
+                    generation: context.transportGeneration
+                )
                 guard let self, self.isCurrent(context) else { return }
+                await context.transport.stopScan()
+                guard self.isCurrent(context) else { return }
                 try await context.transport.connect(to: device.id)
             } catch {
                 guard let self, self.isCurrent(context) else { return }
@@ -276,6 +286,11 @@ final class AppModel {
         connectionStatus = .reconnecting
         operationTask = Task { [weak self] in
             do {
+                await self?.attachBrokerContext(
+                    peripheralID: selectedPeripheralID,
+                    generation: context.transportGeneration
+                )
+                guard let self, self.isCurrent(context) else { return }
                 try await context.transport.connect(to: selectedPeripheralID)
             } catch {
                 guard let self, self.isCurrent(context) else { return }
@@ -288,6 +303,9 @@ final class AppModel {
         selectedPeripheralID = nil
         route = .scan
         connectionStatus = .disconnected(nil)
+        let broker = deviceOperationBroker
+        let generation = transportGeneration
+        Task { await broker.detach(generation: generation) }
         guard let context = beginOperationForCurrentTransport() else { return }
         operationTask = Task { [weak self] in
             await context.transport.disconnect()
@@ -403,7 +421,8 @@ final class AppModel {
         let generation = attach(
             transport: restoredTransport,
             initialState: restoredState,
-            initialCapabilities: restoredCapabilities
+            initialCapabilities: restoredCapabilities,
+            peripheralID: storedID
         )
 
         selectedPeripheralID = storedID
@@ -434,7 +453,8 @@ final class AppModel {
     private func attach(
         transport: any DeviceTransport,
         initialState: DeviceState = DeviceState(),
-        initialCapabilities: DeviceCapabilities = DeviceCapabilities(features: [])
+        initialCapabilities: DeviceCapabilities = DeviceCapabilities(features: []),
+        peripheralID: UUID? = nil
     ) -> UInt {
         flushPendingTelemetryPersistence()
         telemetryPersistenceTask?.cancel()
@@ -447,12 +467,30 @@ final class AppModel {
         if let previousTransport {
             Task { await previousTransport.disconnect() }
         }
+        let previousGeneration = transportGeneration
         transportGeneration &+= 1
         operationGeneration &+= 1
         let generation = transportGeneration
         self.transport = transport
         let session = DeviceSession(transport: transport, initialState: initialState)
         self.session = session
+        let broker = deviceOperationBroker
+        let brokerContext = peripheralID.map {
+            DeviceOperationBroker.Context(
+                generation: generation,
+                peripheralID: $0,
+                transport: transport,
+                session: session
+            )
+        }
+        Task {
+            if previousGeneration != 0 {
+                await broker.detach(generation: previousGeneration)
+            }
+            if let brokerContext {
+                await broker.attach(brokerContext)
+            }
+        }
         state = initialState
         capabilities = initialCapabilities
         limits.removeAll()
@@ -482,13 +520,47 @@ final class AppModel {
                 else { return }
                 await session.receive(event)
                 guard self.transportGeneration == generation else { return }
-                self.receive(event, generation: generation)
+                await self.receive(event, generation: generation)
             }
         }
         return generation
     }
 
-    private func receive(_ event: DeviceEvent, generation: UInt) {
+    private func attachBrokerContext(peripheralID: UUID, generation: UInt) async {
+        guard transportGeneration == generation,
+              let transport,
+              let session
+        else { return }
+        await deviceOperationBroker.attach(.init(
+            generation: generation,
+            peripheralID: peripheralID,
+            transport: transport,
+            session: session
+        ))
+    }
+
+    private func requestBrokerReconnect(to peripheralID: UUID, generation: UInt) async {
+        guard transportGeneration == generation,
+              selectedPeripheralID == peripheralID,
+              let transport
+        else {
+            await deviceOperationBroker.handleConnectionEvent(.terminal, generation: generation)
+            return
+        }
+
+        await attachBrokerContext(peripheralID: peripheralID, generation: generation)
+        connectionStatus = .reconnecting
+        route = .connected
+        do {
+            try await transport.connect(to: peripheralID)
+        } catch {
+            guard transportGeneration == generation else { return }
+            connectionStatus = .disconnected(String(describing: error))
+            await deviceOperationBroker.handleConnectionEvent(.terminal, generation: generation)
+        }
+    }
+
+    private func receive(_ event: DeviceEvent, generation: UInt) async {
         guard transportGeneration == generation else { return }
         switch event {
         case let .discovered(device):
@@ -503,6 +575,8 @@ final class AppModel {
                 route = .scan
                 return
             }
+            await attachBrokerContext(peripheralID: id, generation: generation)
+            await deviceOperationBroker.handleConnectionEvent(.connected(id), generation: generation)
             if !isDemo {
                 persistence.lastSuccessfulPeripheralID = id
                 selectedPeripheralID = id
@@ -534,6 +608,7 @@ final class AppModel {
             connectionStatus = .reconnecting
             route = .connected
         case let .disconnected(failure):
+            await deviceOperationBroker.handleConnectionEvent(.terminal, generation: generation)
             flushPendingTelemetryPersistence()
             connectionStatus = .disconnected(failure?.message)
             if otaRecoveryPeripheralID != nil {
