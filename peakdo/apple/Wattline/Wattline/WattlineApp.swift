@@ -7,7 +7,7 @@ struct WattlineApp: App {
     init() {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-resetOnboarding") {
-            UserDefaults.standard.removeObject(forKey: AppModel.onboardingCompleteKey)
+            AppPersistence().resetOnboarding()
         }
         #endif
         _model = State(initialValue: AppModel())

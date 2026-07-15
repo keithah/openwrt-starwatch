@@ -6,7 +6,9 @@ import WattlineCore
 @MainActor
 @Observable
 final class AppModel {
-    enum Route {
+    typealias TransportFactory = @MainActor () -> any DeviceTransport
+
+    enum Route: Equatable {
         case onboarding
         case scan
         case connected
@@ -24,8 +26,39 @@ final class AppModel {
     }
 
     struct CachedIdentity: Codable, Equatable, Sendable {
-        let name: String
+        let advertisedName: String
+        let deviceInformationName: String?
         let macAddress: String?
+
+        var name: String { deviceInformationName ?? advertisedName }
+
+        init(advertisedName: String, deviceInformationName: String?, macAddress: String?) {
+            self.advertisedName = advertisedName
+            self.deviceInformationName = deviceInformationName
+            self.macAddress = macAddress
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case advertisedName
+            case deviceInformationName
+            case macAddress
+            case legacyName = "name"
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            advertisedName = try container.decodeIfPresent(String.self, forKey: .advertisedName)
+                ?? container.decode(String.self, forKey: .legacyName)
+            deviceInformationName = try container.decodeIfPresent(String.self, forKey: .deviceInformationName)
+            macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(advertisedName, forKey: .advertisedName)
+            try container.encodeIfPresent(deviceInformationName, forKey: .deviceInformationName)
+            try container.encodeIfPresent(macAddress, forKey: .macAddress)
+        }
     }
 
     struct KnownDevice: Codable, Equatable, Sendable {
@@ -33,8 +66,8 @@ final class AppModel {
         let identity: CachedIdentity
     }
 
-    static let onboardingCompleteKey = "onboardingComplete"
-    static let knownDevicesKey = "knownDevices"
+    static let onboardingCompleteKey = AppPersistence.onboardingCompleteKey
+    static let knownDevicesKey = AppPersistence.knownDevicesKey
 
     var route: Route
     var isDemo = false
@@ -43,26 +76,27 @@ final class AppModel {
     var otaRecoveryDevice: DiscoveredDevice?
     var connectionStatus: ConnectionStatus = .disconnected(nil)
     var connectedName: String?
+    var scanMessage: String?
 
     private(set) var knownDevices: [UUID: CachedIdentity]
+    private let persistence: AppPersistence
+    private let transportFactory: TransportFactory
     private var transport: (any DeviceTransport)?
     private var eventTask: Task<Void, Never>?
-    private var selectedDevice: DiscoveredDevice?
+    private var selectedPeripheralID: UUID?
 
-    init(defaults: UserDefaults = .standard) {
-        let onboardingComplete = defaults.bool(forKey: Self.onboardingCompleteKey)
+    init(
+        persistence: AppPersistence = AppPersistence(),
+        transportFactory: @escaping TransportFactory = { BLETransport() }
+    ) {
+        self.persistence = persistence
+        self.transportFactory = transportFactory
+        let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
-        if let data = defaults.data(forKey: Self.knownDevicesKey),
-           let records = try? JSONDecoder().decode([KnownDevice].self, from: data) {
-            knownDevices = Dictionary(uniqueKeysWithValues: records.map { ($0.identifier, $0.identity) })
-        } else {
-            knownDevices = [:]
-        }
+        knownDevices = persistence.loadKnownDevices()
 
         if onboardingComplete {
-            let ble = BLETransport()
-            attach(transport: ble)
-            startScanning()
+            startReturningSession()
         }
     }
 
@@ -95,14 +129,12 @@ final class AppModel {
     }
 
     func requestBluetoothAfterPriming() {
-        UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey)
+        persistence.onboardingComplete = true
         isDemo = false
         bluetoothIssue = nil
 
-        // Constructing this transport creates the CBCentralManager and is intentionally
-        // reachable only after the explicit permission-priming action.
-        let ble = BLETransport()
-        attach(transport: ble)
+        // This factory reaches BLETransport only after explicit permission priming on first use.
+        attach(transport: transportFactory())
         route = .scan
         startScanning()
     }
@@ -123,6 +155,7 @@ final class AppModel {
         guard let transport else { return }
         await transport.stopScan()
         discoveredDevices.removeAll()
+        scanMessage = nil
         do {
             try await transport.startScan()
         } catch {
@@ -135,7 +168,7 @@ final class AppModel {
             otaRecoveryDevice = device
             return
         }
-        selectedDevice = device
+        selectedPeripheralID = device.id
         connectedName = knownDevices[device.id]?.name ?? device.localName
         guard let transport else { return }
         Task {
@@ -150,11 +183,11 @@ final class AppModel {
     }
 
     func retryConnection() {
-        guard let transport, let selectedDevice else { return }
+        guard let transport, let selectedPeripheralID else { return }
         connectionStatus = .reconnecting
         Task {
             do {
-                try await transport.connect(to: selectedDevice.id)
+                try await transport.connect(to: selectedPeripheralID)
             } catch {
                 connectionStatus = .disconnected(String(describing: error))
             }
@@ -167,11 +200,49 @@ final class AppModel {
         startScanning()
     }
 
-    /// Future DIS/MAC handshake code must call this only after it validates a device identity.
-    /// A CoreBluetooth connection event alone deliberately does not persist identity data.
-    func recordSuccessfulHandshake(deviceID: UUID, identity: CachedIdentity) {
-        knownDevices[deviceID] = identity
-        persistKnownDevices()
+    /// Records only fields actually observed by the completed setup/identity flow.
+    /// DIS name and MAC stay nil until a later handshake exposes them.
+    func recordSuccessfulHandshake(
+        deviceID: UUID,
+        advertisedName: String,
+        deviceInformationName: String? = nil,
+        macAddress: String? = nil
+    ) {
+        knownDevices[deviceID] = CachedIdentity(
+            advertisedName: advertisedName,
+            deviceInformationName: deviceInformationName,
+            macAddress: macAddress
+        )
+        persistence.saveKnownDevices(knownDevices)
+    }
+
+    private func startReturningSession() {
+        let restoredTransport = transportFactory()
+        attach(transport: restoredTransport)
+
+        guard let storedID = persistence.lastSuccessfulPeripheralID else {
+            startScanning()
+            return
+        }
+
+        selectedPeripheralID = storedID
+        connectedName = knownDevices[storedID]?.name
+        connectionStatus = .reconnecting
+        route = .connected
+        Task {
+            do {
+                try await restoredTransport.connect(to: storedID)
+            } catch {
+                connectionStatus = .disconnected(String(describing: error))
+                scanMessage = "Couldn’t reconnect. Scanning for nearby devices."
+                route = .scan
+                do {
+                    try await restoredTransport.startScan()
+                } catch {
+                    presentBluetoothFailure(error)
+                }
+            }
+        }
     }
 
     private func attach(transport: any DeviceTransport) {
@@ -194,15 +265,32 @@ final class AppModel {
             } else {
                 discoveredDevices.append(device)
             }
-        case .connected:
+        case let .connected(id):
+            if !isDemo {
+                persistence.lastSuccessfulPeripheralID = id
+                selectedPeripheralID = id
+                if let advertisedName = discoveredDevices.first(where: { $0.id == id })?.localName
+                    ?? knownDevices[id]?.advertisedName {
+                    let existing = knownDevices[id]
+                    recordSuccessfulHandshake(
+                        deviceID: id,
+                        advertisedName: advertisedName,
+                        deviceInformationName: existing?.deviceInformationName,
+                        macAddress: existing?.macAddress
+                    )
+                    connectedName = knownDevices[id]?.name
+                }
+            }
+            scanMessage = nil
             connectionStatus = .connected
             route = .connected
-        case .reconnecting:
+        case let .reconnecting(id):
+            selectedPeripheralID = id
             connectionStatus = .reconnecting
             route = .connected
         case let .disconnected(failure):
             connectionStatus = .disconnected(failure?.message)
-            if selectedDevice != nil || isDemo { route = .connected }
+            if selectedPeripheralID != nil || isDemo { route = .connected }
         case .battery, .dc, .typeC, .transactionDepth:
             break
         }
@@ -216,13 +304,6 @@ final class AppModel {
             bluetoothIssue = .unavailable(String(describing: error))
         @unknown default:
             bluetoothIssue = .unavailable(String(describing: error))
-        }
-    }
-
-    private func persistKnownDevices() {
-        let records = knownDevices.map { KnownDevice(identifier: $0.key, identity: $0.value) }
-        if let data = try? JSONEncoder().encode(records) {
-            UserDefaults.standard.set(data, forKey: Self.knownDevicesKey)
         }
     }
 }

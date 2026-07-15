@@ -42,6 +42,15 @@ struct ScanView: View {
                 }
             }
             .navigationTitle("Devices")
+            .safeAreaInset(edge: .top) {
+                if let message = model.scanMessage {
+                    Text(message)
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity)
+                        .padding(10)
+                        .background(.orange.opacity(0.15))
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Demo") { model.enterDemo() }

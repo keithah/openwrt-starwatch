@@ -8,15 +8,18 @@
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* WattlineCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000031 /* WattlineCore */; };
 		A10000000000000000000002 /* WattlineUI in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000032 /* WattlineUI */; };
+		A10000000000000000000060 /* WattlineCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000061 /* WattlineCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
 		A10000000000000000000003 = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000010 /* Project object */; proxyType = 1; remoteGlobalIDString = A10000000000000000000020; remoteInfo = Wattline; };
+		A10000000000000000000062 = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000010 /* Project object */; proxyType = 1; remoteGlobalIDString = A10000000000000000000020; remoteInfo = Wattline; };
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000000004 /* Wattline.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = Wattline.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000005 /* WattlineUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = WattlineUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000063 /* WattlineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = WattlineTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -26,39 +29,45 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A10000000000000000000006 /* Wattline */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (A1000000000000000000000C /* Exceptions for Wattline folder in Wattline target */, ); path = Wattline; sourceTree = "<group>"; };
 		A10000000000000000000007 /* WattlineUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = WattlineUITests; sourceTree = "<group>"; };
+		A10000000000000000000064 /* WattlineTests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = WattlineTests; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000008 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* WattlineCore in Frameworks */, A10000000000000000000002 /* WattlineUI in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000009 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000065 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000060 /* WattlineCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A1000000000000000000000A = {isa = PBXGroup; children = (A10000000000000000000006 /* Wattline */, A10000000000000000000007 /* WattlineUITests */, A1000000000000000000000B /* Products */, ); sourceTree = "<group>"; };
-		A1000000000000000000000B /* Products */ = {isa = PBXGroup; children = (A10000000000000000000004 /* Wattline.app */, A10000000000000000000005 /* WattlineUITests.xctest */, ); name = Products; sourceTree = "<group>"; };
+		A1000000000000000000000A = {isa = PBXGroup; children = (A10000000000000000000006 /* Wattline */, A10000000000000000000064 /* WattlineTests */, A10000000000000000000007 /* WattlineUITests */, A1000000000000000000000B /* Products */, ); sourceTree = "<group>"; };
+		A1000000000000000000000B /* Products */ = {isa = PBXGroup; children = (A10000000000000000000004 /* Wattline.app */, A10000000000000000000063 /* WattlineTests.xctest */, A10000000000000000000005 /* WattlineUITests.xctest */, ); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
 		A10000000000000000000020 /* Wattline */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000040; buildPhases = (A10000000000000000000021, A10000000000000000000008, A10000000000000000000022, ); buildRules = (); dependencies = (); fileSystemSynchronizedGroups = (A10000000000000000000006 /* Wattline */, ); name = Wattline; packageProductDependencies = (A10000000000000000000031 /* WattlineCore */, A10000000000000000000032 /* WattlineUI */, ); productName = Wattline; productReference = A10000000000000000000004 /* Wattline.app */; productType = "com.apple.product-type.application"; };
 		A10000000000000000000023 /* WattlineUITests */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000041; buildPhases = (A10000000000000000000024, A10000000000000000000009, A10000000000000000000025, ); buildRules = (); dependencies = (A10000000000000000000026, ); fileSystemSynchronizedGroups = (A10000000000000000000007 /* WattlineUITests */, ); name = WattlineUITests; packageProductDependencies = (); productName = WattlineUITests; productReference = A10000000000000000000005 /* WattlineUITests.xctest */; productType = "com.apple.product-type.bundle.ui-testing"; };
+		A10000000000000000000066 /* WattlineTests */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000067; buildPhases = (A10000000000000000000068, A10000000000000000000065, A10000000000000000000069, ); buildRules = (); dependencies = (A1000000000000000000006A, ); fileSystemSynchronizedGroups = (A10000000000000000000064 /* WattlineTests */, ); name = WattlineTests; packageProductDependencies = (A10000000000000000000061 /* WattlineCore */, ); productName = WattlineTests; productReference = A10000000000000000000063 /* WattlineTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		A10000000000000000000010 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2660; LastUpgradeCheck = 2660; TargetAttributes = {A10000000000000000000020 = {CreatedOnToolsVersion = 26.6; }; A10000000000000000000023 = {CreatedOnToolsVersion = 26.6; TestTargetID = A10000000000000000000020; }; }; }; buildConfigurationList = A10000000000000000000042; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, ); mainGroup = A1000000000000000000000A; minimizedProjectReferenceProxies = 1; packageReferences = (A10000000000000000000033 /* XCLocalSwiftPackageReference ../WattlineCore */, A10000000000000000000034 /* XCLocalSwiftPackageReference ../WattlineUI */, ); preferredProjectObjectVersion = 77; productRefGroup = A1000000000000000000000B /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000020 /* Wattline */, A10000000000000000000023 /* WattlineUITests */, ); };
+		A10000000000000000000010 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2660; LastUpgradeCheck = 2660; TargetAttributes = {A10000000000000000000020 = {CreatedOnToolsVersion = 26.6; }; A10000000000000000000023 = {CreatedOnToolsVersion = 26.6; TestTargetID = A10000000000000000000020; }; A10000000000000000000066 = {CreatedOnToolsVersion = 26.6; TestTargetID = A10000000000000000000020; }; }; }; buildConfigurationList = A10000000000000000000042; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, ); mainGroup = A1000000000000000000000A; minimizedProjectReferenceProxies = 1; packageReferences = (A10000000000000000000033 /* XCLocalSwiftPackageReference ../WattlineCore */, A10000000000000000000034 /* XCLocalSwiftPackageReference ../WattlineUI */, ); preferredProjectObjectVersion = 77; productRefGroup = A1000000000000000000000B /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000020 /* Wattline */, A10000000000000000000066 /* WattlineTests */, A10000000000000000000023 /* WattlineUITests */, ); };
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000022 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000025 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000069 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A10000000000000000000021 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000024 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000068 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
 		A10000000000000000000026 = {isa = PBXTargetDependency; target = A10000000000000000000020 /* Wattline */; targetProxy = A10000000000000000000003; };
+		A1000000000000000000006A = {isa = PBXTargetDependency; target = A10000000000000000000020 /* Wattline */; targetProxy = A10000000000000000000062; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -68,12 +77,15 @@
 		A10000000000000000000053 = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = NO; CODE_SIGN_ENTITLEMENTS = Wattline/Wattline.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Wattline/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.keithah.wattline; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
 		A10000000000000000000054 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.keithah.wattline.UITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_TARGET_NAME = Wattline; }; name = Debug; };
 		A10000000000000000000055 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.keithah.wattline.UITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_TARGET_NAME = Wattline; }; name = Release; };
+		A1000000000000000000006B = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.keithah.wattline.Tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wattline.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wattline"; }; name = Debug; };
+		A1000000000000000000006C = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.keithah.wattline.Tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wattline.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wattline"; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
 		A10000000000000000000040 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000052, A10000000000000000000053, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		A10000000000000000000041 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000054, A10000000000000000000055, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		A10000000000000000000042 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000050, A10000000000000000000051, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000067 = {isa = XCConfigurationList; buildConfigurations = (A1000000000000000000006B, A1000000000000000000006C, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -84,6 +96,7 @@
 /* Begin XCSwiftPackageProductDependency section */
 		A10000000000000000000031 /* WattlineCore */ = {isa = XCSwiftPackageProductDependency; package = A10000000000000000000033 /* XCLocalSwiftPackageReference ../WattlineCore */; productName = WattlineCore; };
 		A10000000000000000000032 /* WattlineUI */ = {isa = XCSwiftPackageProductDependency; package = A10000000000000000000034 /* XCLocalSwiftPackageReference ../WattlineUI */; productName = WattlineUI; };
+		A10000000000000000000061 /* WattlineCore */ = {isa = XCSwiftPackageProductDependency; package = A10000000000000000000033 /* XCLocalSwiftPackageReference ../WattlineCore */; productName = WattlineCore; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A10000000000000000000010 /* Project object */;
