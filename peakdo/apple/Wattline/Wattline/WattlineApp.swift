@@ -1,4 +1,5 @@
 import SwiftUI
+import WattlineUI
 
 @main
 struct WattlineApp: App {
@@ -9,6 +10,9 @@ struct WattlineApp: App {
         if ProcessInfo.processInfo.arguments.contains("-resetOnboarding") {
             AppPersistence().resetOnboarding()
         }
+        if ProcessInfo.processInfo.arguments.contains("-resetHeroStyle") {
+            UserDefaults.standard.set("segmented", forKey: "batteryHeroStyle")
+        }
         #endif
         _model = State(initialValue: AppModel())
     }
@@ -17,6 +21,8 @@ struct WattlineApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                .preferredColorScheme(.dark)
+                .tint(WattlineTheme.accent)
         }
     }
 }

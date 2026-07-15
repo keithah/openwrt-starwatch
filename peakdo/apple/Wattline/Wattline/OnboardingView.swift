@@ -1,4 +1,5 @@
 import SwiftUI
+import WattlineUI
 
 struct OnboardingView: View {
     @Environment(AppModel.self) private var model
@@ -9,7 +10,7 @@ struct OnboardingView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "bolt.horizontal.circle.fill")
                         .font(.system(size: 64))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(WattlineTheme.accent)
                     Text("Your power, at a glance")
                         .font(.largeTitle.bold())
                         .multilineTextAlignment(.center)
@@ -30,7 +31,7 @@ struct OnboardingView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .tint(.orange)
+                    .tint(WattlineTheme.accent)
 
                     Button("Try Demo Mode") {
                         model.enterDemo()
@@ -41,6 +42,8 @@ struct OnboardingView: View {
             }
             .padding(28)
         }
+        .background(WattlineTheme.surface.ignoresSafeArea())
+        .foregroundStyle(.white)
     }
 }
 
@@ -54,7 +57,7 @@ private struct FeaturePane: View {
             Image(systemName: icon)
                 .font(.title2)
                 .frame(width: 36)
-                .foregroundStyle(.orange)
+                .foregroundStyle(WattlineTheme.accent)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.headline)
                 Text(detail).font(.subheadline).foregroundStyle(.secondary)
@@ -62,6 +65,6 @@ private struct FeaturePane: View {
             Spacer()
         }
         .padding(16)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+        .background(WattlineTheme.raisedSurface, in: RoundedRectangle(cornerRadius: 16))
     }
 }

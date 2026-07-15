@@ -31,6 +31,8 @@
 	<array>
 		<string>bluetooth-central</string>
 	</array>
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

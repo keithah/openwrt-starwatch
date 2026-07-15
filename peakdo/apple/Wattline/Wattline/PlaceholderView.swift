@@ -13,7 +13,7 @@ struct PlaceholderView: View {
                 .foregroundStyle(.secondary)
             Text(title)
                 .font(.title2.bold())
-            Text("Coming in a future Wattline release.")
+            Text("Coming in Phase 2")
                 .foregroundStyle(.secondary)
             if let actionTitle, let action {
                 Button(actionTitle, action: action)

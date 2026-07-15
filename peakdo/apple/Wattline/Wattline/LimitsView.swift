@@ -42,6 +42,7 @@ struct LimitsView: View {
         .background(WattlineTheme.surface.ignoresSafeArea())
         .foregroundStyle(.white)
         .navigationTitle("USB-C Power Limits")
+        .toolbar(.hidden, for: .tabBar)
         .task {
             await model.loadLimits()
             selections = model.limits

@@ -5,6 +5,10 @@ import XCTest
 
 @MainActor
 final class AppModelReconnectTests: XCTestCase {
+    func testAppDeclaresGlobalDarkAppearance() {
+        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "UIUserInterfaceStyle") as? String, "Dark")
+    }
+
     func testHandshakeAppliesAuthoritativeCapabilitiesAndPersistsFullIdentity() async throws {
         let fixture = makeFixture(onboardingComplete: true)
         let id = UUID()

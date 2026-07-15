@@ -41,9 +41,18 @@ struct DashboardView: View {
         switch section {
         case .batteryHero:
             if let battery = model.state.battery {
-                BatteryHero(status: battery, style: heroStyle, freshness: model.state.freshness)
-                    .onLongPressGesture { toggleHeroStyle() }
-                    .accessibilityIdentifier("Battery hero")
+                VStack(alignment: .leading, spacing: 6) {
+                    BatteryHero(status: battery, style: heroStyle, freshness: model.state.freshness)
+                        .onLongPressGesture { toggleHeroStyle() }
+                        .accessibilityIdentifier("Battery hero")
+                    Label(
+                        heroStyle == .segmented ? "Segmented battery meter" : "Gauge battery meter",
+                        systemImage: heroStyle == .segmented ? "rectangle.split.3x1" : "gauge.with.dots.needle.67percent"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(WattlineTheme.secondaryText)
+                    .padding(.leading, 4)
+                }
             } else {
                 ProgressView("Loading battery…")
                     .frame(maxWidth: .infinity, minHeight: 120)

@@ -77,6 +77,7 @@ public struct LimitSlider: View {
                 Button("Reset to default", action: { onReset() })
                     .font(.subheadline.weight(.medium))
                     .disabled(isPending)
+                    .accessibilityIdentifier("Reset \(label) limit")
             }
         }
         .wattlinePanel()
