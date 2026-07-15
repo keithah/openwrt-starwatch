@@ -23,7 +23,8 @@ This is a scoped deviation from the written Phase 2 feature list; the contract d
 - Bundle identifiers:
   - iOS app: `com.keithah.wattline`
   - macOS app: `com.keithah.wattline.mac`
-  - widget extension: `com.keithah.wattline.widgets`
+  - widget extension on iOS: `com.keithah.wattline.widgets`
+  - widget extension on macOS: `com.keithah.wattline.mac.widgets`
   - app group: `group.com.keithah.wattline`
 - Restart is available for every connected application-mode Link-Power device. Only Shut Down is gated by `FF_SHUTDOWN`, because the protocol defines no restart feature bit.
 - Low-battery alerts are opt-in, default to a 20% threshold, fire once per downward crossing during discharge, and re-arm after the battery rises three percentage points above the threshold.
@@ -78,9 +79,9 @@ The Xcode project contains:
 
 - The existing iOS 17+ app, expanded with Settings, snapshot fan-out, notifications, Live Activity coordination, and in-process App Intents.
 - A macOS 14+ app with `MenuBarExtra`, optional main `NavigationSplitView` window, launch-at-login support, and menu-bar-only default behavior.
-- One iOS/macOS WidgetKit extension with small and medium widgets. On iOS it also hosts `ActivityConfiguration` for the Live Activity.
+- One multi-platform WidgetKit source target with small and medium widgets. It uses platform-conditional bundle identifiers derived from each containing app (`com.keithah.wattline.widgets` on iOS and `com.keithah.wattline.mac.widgets` on macOS). On iOS it also hosts `ActivityConfiguration` for the Live Activity.
 
-The iOS app and macOS app each own exactly one BLE transport/session within their own process. Widgets never construct or import a BLE transport. In-process intents and notification actions enter through the app's actor-isolated device-operation broker rather than creating a competing owner.
+The iOS app and macOS app each own exactly one BLE transport/session within their own process. Shared application-layer sources such as the device-operation broker and snapshot coordinator have explicit membership in both app targets without forming another package. Widgets never construct or import a BLE transport. In-process intents and notification actions enter through the app's actor-isolated device-operation broker rather than creating a competing owner. Activity attributes have explicit membership in the iOS app and widget extension so both sides use one wire-compatible content-state definition.
 
 ## 6. Capability Composition
 
@@ -197,7 +198,7 @@ The intent supports Global, Input, and Output with exactly 30/45/60/65/100/140 W
 
 ### 12.4 Discovery and Capability Behavior
 
-The in-app gallery structurally omits unsupported cards. App Intent types are statically registered by iOS and cannot be dynamically removed, so direct Shortcuts invocations repeat the capability check and return an explicit unsupported-device error. Per-intent device queries list only eligible saved devices.
+Before any device has connected, the in-app gallery shows the three device-operation cards disabled with the Screen 8 explanation. Once a saved device has authoritative capabilities, the gallery structurally omits unsupported cards. App Intent types are statically registered by iOS and cannot be dynamically removed, so direct Shortcuts invocations repeat the capability check and return an explicit unsupported-device error. Per-intent device queries list only eligible saved devices.
 
 `ForegroundContinuableIntent` is used when Wattline must open or resume for Bluetooth access. Already-connected operations remain background-capable where the OS permits. Demo execution uses `DemoTransport` and labels its result as simulated. The low-battery gallery card accurately describes local notifications and a time-based Get Battery Level recipe; it does not claim a third-party event trigger.
 
