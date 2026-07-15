@@ -83,6 +83,10 @@ final class AppModel {
     private let transportFactory: TransportFactory
     private var transport: (any DeviceTransport)?
     private var eventTask: Task<Void, Never>?
+    private var operationTask: Task<Void, Never>?
+    private var supersededOperationTask: Task<Void, Never>?
+    private var transportGeneration: UInt = 0
+    private var operationGeneration: UInt = 0
     private var selectedPeripheralID: UUID?
 
     init(
@@ -115,14 +119,17 @@ final class AppModel {
         isDemo = true
         connectedName = DemoTransport.identity.name
         connectionStatus = .connected
-        attach(transport: demo)
+        let generation = attach(transport: demo)
         route = .connected
 
-        Task {
+        let operation = beginOperation(for: generation, transport: demo)
+        operationTask = Task { [weak self] in
             do {
                 let identity = try await demo.connectDemo()
+                guard let self, self.isCurrent(operation) else { return }
                 connectedName = identity.name
             } catch {
+                guard let self, self.isCurrent(operation) else { return }
                 connectionStatus = .disconnected(String(describing: error))
             }
         }
@@ -140,27 +147,34 @@ final class AppModel {
     }
 
     func startScanning() {
-        guard let transport else { return }
+        guard let context = beginOperationForCurrentTransport() else { return }
         bluetoothIssue = nil
-        Task {
+        operationTask = Task { [weak self] in
             do {
-                try await transport.startScan()
+                try await context.transport.startScan()
             } catch {
+                guard let self, self.isCurrent(context) else { return }
                 presentBluetoothFailure(error)
             }
         }
     }
 
     func refreshScan() async {
-        guard let transport else { return }
-        await transport.stopScan()
+        guard let context = beginOperationForCurrentTransport() else { return }
         discoveredDevices.removeAll()
         scanMessage = nil
-        do {
-            try await transport.startScan()
-        } catch {
-            presentBluetoothFailure(error)
+        let task = Task { [weak self] in
+            await context.transport.stopScan()
+            guard let self, self.isCurrent(context) else { return }
+            do {
+                try await context.transport.startScan()
+            } catch {
+                guard self.isCurrent(context) else { return }
+                self.presentBluetoothFailure(error)
+            }
         }
+        operationTask = task
+        await task.value
     }
 
     func choose(_ device: DiscoveredDevice) {
@@ -170,12 +184,14 @@ final class AppModel {
         }
         selectedPeripheralID = device.id
         connectedName = knownDevices[device.id]?.name ?? device.localName
-        guard let transport else { return }
-        Task {
+        guard let context = beginOperationForCurrentTransport() else { return }
+        operationTask = Task { [weak self] in
             do {
-                await transport.stopScan()
-                try await transport.connect(to: device.id)
+                await context.transport.stopScan()
+                guard let self, self.isCurrent(context) else { return }
+                try await context.transport.connect(to: device.id)
             } catch {
+                guard let self, self.isCurrent(context) else { return }
                 connectionStatus = .disconnected(String(describing: error))
                 route = .connected
             }
@@ -183,21 +199,29 @@ final class AppModel {
     }
 
     func retryConnection() {
-        guard let transport, let selectedPeripheralID else { return }
+        guard let selectedPeripheralID,
+              let context = beginOperationForCurrentTransport()
+        else { return }
         connectionStatus = .reconnecting
-        Task {
+        operationTask = Task { [weak self] in
             do {
-                try await transport.connect(to: selectedPeripheralID)
+                try await context.transport.connect(to: selectedPeripheralID)
             } catch {
+                guard let self, self.isCurrent(context) else { return }
                 connectionStatus = .disconnected(String(describing: error))
             }
         }
     }
 
     func returnToScan() {
+        selectedPeripheralID = nil
         route = .scan
         connectionStatus = .disconnected(nil)
         startScanning()
+    }
+
+    func waitForSupersededLifecycleOperation() async {
+        await supersededOperationTask?.value
     }
 
     /// Records only fields actually observed by the completed setup/identity flow.
@@ -218,7 +242,7 @@ final class AppModel {
 
     private func startReturningSession() {
         let restoredTransport = transportFactory()
-        attach(transport: restoredTransport)
+        let generation = attach(transport: restoredTransport)
 
         guard let storedID = persistence.lastSuccessfulPeripheralID else {
             startScanning()
@@ -229,35 +253,49 @@ final class AppModel {
         connectedName = knownDevices[storedID]?.name
         connectionStatus = .reconnecting
         route = .connected
-        Task {
+        let operation = beginOperation(for: generation, transport: restoredTransport)
+        operationTask = Task { [weak self] in
             do {
                 try await restoredTransport.connect(to: storedID)
             } catch {
+                guard let self, self.isCurrent(operation) else { return }
+                selectedPeripheralID = nil
                 connectionStatus = .disconnected(String(describing: error))
                 scanMessage = "Couldn’t reconnect. Scanning for nearby devices."
                 route = .scan
                 do {
                     try await restoredTransport.startScan()
                 } catch {
+                    guard self.isCurrent(operation) else { return }
                     presentBluetoothFailure(error)
                 }
             }
         }
     }
 
-    private func attach(transport: any DeviceTransport) {
+    @discardableResult
+    private func attach(transport: any DeviceTransport) -> UInt {
+        supersedeCurrentOperation()
         eventTask?.cancel()
+        transportGeneration &+= 1
+        operationGeneration &+= 1
+        let generation = transportGeneration
         self.transport = transport
         let events = transport.events
         eventTask = Task { [weak self] in
             for await event in events {
-                guard !Task.isCancelled else { return }
-                self?.receive(event)
+                guard !Task.isCancelled,
+                      let self,
+                      self.transportGeneration == generation
+                else { return }
+                self.receive(event, generation: generation)
             }
         }
+        return generation
     }
 
-    private func receive(_ event: DeviceEvent) {
+    private func receive(_ event: DeviceEvent, generation: UInt) {
+        guard transportGeneration == generation else { return }
         switch event {
         case let .discovered(device):
             if let index = discoveredDevices.firstIndex(where: { $0.id == device.id }) {
@@ -294,6 +332,43 @@ final class AppModel {
         case .battery, .dc, .typeC, .transactionDepth:
             break
         }
+    }
+
+    private struct OperationContext {
+        let transportGeneration: UInt
+        let operationGeneration: UInt
+        let transport: any DeviceTransport
+    }
+
+    private func beginOperationForCurrentTransport() -> OperationContext? {
+        guard let transport else { return nil }
+        return beginOperation(for: transportGeneration, transport: transport)
+    }
+
+    private func beginOperation(
+        for generation: UInt,
+        transport: any DeviceTransport
+    ) -> OperationContext {
+        supersedeCurrentOperation()
+        operationGeneration &+= 1
+        return OperationContext(
+            transportGeneration: generation,
+            operationGeneration: operationGeneration,
+            transport: transport
+        )
+    }
+
+    private func isCurrent(_ operation: OperationContext) -> Bool {
+        !Task.isCancelled
+            && operation.transportGeneration == transportGeneration
+            && operation.operationGeneration == operationGeneration
+    }
+
+    private func supersedeCurrentOperation() {
+        guard let operationTask else { return }
+        operationTask.cancel()
+        supersededOperationTask = operationTask
+        self.operationTask = nil
     }
 
     private func presentBluetoothFailure(_ error: any Error) {

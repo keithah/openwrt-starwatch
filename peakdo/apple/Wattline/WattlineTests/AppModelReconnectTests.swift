@@ -24,23 +24,68 @@ final class AppModelReconnectTests: XCTestCase {
     func testReturningUserReconnectsStoredPeripheralWithoutScanningOnSuccess() async throws {
         let id = UUID()
         let fixture = makeFixture(onboardingComplete: true, lastPeripheralID: id, connectResult: .success)
-        _ = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
 
-        try await eventually { await fixture.transport.connectedIDs == [id] }
+        try await eventually {
+            await fixture.transport.connectedIDs == [id]
+                && model.route == .connected
+                && model.connectionStatus == .connected
+                && fixture.persistence.lastSuccessfulPeripheralID == id
+        }
         let scanCount = await fixture.transport.scanCount
         XCTAssertEqual(scanCount, 0)
     }
 
-    func testReturningUserFallsBackToScanWhenReconnectFails() async throws {
-        let id = UUID()
-        let fixture = makeFixture(onboardingComplete: true, lastPeripheralID: id, connectResult: .failure)
-        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+    func testReturningUserFailureFallbackWinsForBothDisconnectOrderings() async throws {
+        for ordering in RecordingTransport.FailureOrdering.allCases {
+            let id = UUID()
+            let fixture = makeFixture(
+                onboardingComplete: true,
+                lastPeripheralID: id,
+                connectResult: .failure(ordering)
+            )
+            let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
 
-        try await eventually { await fixture.transport.scanCount == 1 }
-        let connectedIDs = await fixture.transport.connectedIDs
-        XCTAssertEqual(connectedIDs, [id])
-        XCTAssertEqual(model.route, .scan)
-        XCTAssertEqual(model.scanMessage, "Couldn’t reconnect. Scanning for nearby devices.")
+            try await eventually { await fixture.transport.scanCount == 1 }
+            await fixture.transport.releasePostThrowDisconnectIfNeeded()
+            if ordering == .afterThrow {
+                try await eventually {
+                    model.connectionStatus == .disconnected("reconnect failed")
+                }
+            }
+
+            XCTAssertEqual(model.route, .scan, "ordering: \(ordering)")
+            XCTAssertEqual(model.scanMessage, "Couldn’t reconnect. Scanning for nearby devices.")
+            XCTAssertEqual(fixture.persistence.lastSuccessfulPeripheralID, id)
+
+            model.retryConnection()
+            let connectedIDs = await fixture.transport.connectedIDs
+            let scanCount = await fixture.transport.scanCount
+            XCTAssertEqual(connectedIDs, [id], "cleared attempt must not retry: \(ordering)")
+            XCTAssertEqual(scanCount, 1, "fallback scan starts once: \(ordering)")
+        }
+    }
+
+    func testSupersededStoredReconnectCannotMutateDemoSession() async throws {
+        let storedID = UUID()
+        let fixture = makeFixture(
+            onboardingComplete: true,
+            lastPeripheralID: storedID,
+            connectResult: .suspended
+        )
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        try await eventually { await fixture.transport.connectedIDs == [storedID] }
+
+        model.enterDemo()
+        await fixture.transport.failSuspendedConnect(ordering: .beforeThrow)
+        await model.waitForSupersededLifecycleOperation()
+
+        XCTAssertTrue(model.isDemo)
+        XCTAssertEqual(model.route, .connected)
+        XCTAssertEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(fixture.persistence.lastSuccessfulPeripheralID, storedID)
+        let scanCount = await fixture.transport.scanCount
+        XCTAssertEqual(scanCount, 0)
     }
 
     func testFirstLaunchDoesNotConstructTransport() {
@@ -60,10 +105,10 @@ final class AppModelReconnectTests: XCTestCase {
         let realID = UUID()
         let fixture = makeFixture(onboardingComplete: false, lastPeripheralID: realID)
         let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        model.scanMessage = "waiting for Demo connected event"
 
         model.enterDemo()
-        try await eventually { model.connectionStatus == .connected }
-        try await Task.sleep(for: .milliseconds(50))
+        try await eventually { model.scanMessage == nil }
 
         XCTAssertEqual(fixture.persistence.lastSuccessfulPeripheralID, realID)
     }
@@ -96,12 +141,15 @@ final class AppModelReconnectTests: XCTestCase {
 }
 
 private actor RecordingTransport: DeviceTransport {
-    enum ConnectResult { case success, failure }
+    enum FailureOrdering: CaseIterable { case beforeThrow, afterThrow }
+    enum ConnectResult { case success, failure(FailureOrdering), suspended }
     enum Failure: Error { case reconnectFailed }
 
     nonisolated let events: AsyncStream<DeviceEvent>
     private let continuation: AsyncStream<DeviceEvent>.Continuation
     private let connectResult: ConnectResult
+    private var suspendedConnect: CheckedContinuation<Void, Error>?
+    private var postThrowDisconnectPending = false
     private(set) var connectedIDs: [UUID] = []
     private(set) var scanCount = 0
 
@@ -118,8 +166,35 @@ private actor RecordingTransport: DeviceTransport {
 
     func connect(to id: UUID) async throws {
         connectedIDs.append(id)
-        if connectResult == .failure { throw Failure.reconnectFailed }
-        continuation.yield(.connected(id))
+        switch connectResult {
+        case .success:
+            continuation.yield(.connected(id))
+        case .failure(.beforeThrow):
+            continuation.yield(.disconnected(TransportFailure(message: "reconnect failed")))
+            throw Failure.reconnectFailed
+        case .failure(.afterThrow):
+            postThrowDisconnectPending = true
+            throw Failure.reconnectFailed
+        case .suspended:
+            try await withCheckedThrowingContinuation { suspendedConnect = $0 }
+        }
+    }
+
+    func releasePostThrowDisconnectIfNeeded() {
+        guard postThrowDisconnectPending else { return }
+        postThrowDisconnectPending = false
+        continuation.yield(.disconnected(TransportFailure(message: "reconnect failed")))
+    }
+
+    func failSuspendedConnect(ordering: FailureOrdering) {
+        guard let suspendedConnect else { return }
+        self.suspendedConnect = nil
+        if ordering == .beforeThrow {
+            continuation.yield(.disconnected(TransportFailure(message: "stale reconnect failed")))
+        } else {
+            postThrowDisconnectPending = true
+        }
+        suspendedConnect.resume(throwing: Failure.reconnectFailed)
     }
 
     func disconnect() async {}
