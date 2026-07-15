@@ -19,17 +19,20 @@ public struct LimitSlider: View {
     @Binding public var selection: PowerLimitLevel
     public let isPending: Bool
     public let onReset: (@MainActor @Sendable () -> Void)?
+    public let onEditingChanged: (@MainActor @Sendable (Bool) -> Void)?
 
     public init(
         _ label: String,
         selection: Binding<PowerLimitLevel>,
         isPending: Bool = false,
-        onReset: (@MainActor @Sendable () -> Void)? = nil
+        onReset: (@MainActor @Sendable () -> Void)? = nil,
+        onEditingChanged: (@MainActor @Sendable (Bool) -> Void)? = nil
     ) {
         self.label = label
         _selection = selection
         self.isPending = isPending
         self.onReset = onReset
+        self.onEditingChanged = onEditingChanged
     }
 
     public var body: some View {
@@ -49,12 +52,15 @@ public struct LimitSlider: View {
                     .foregroundStyle(WattlineTheme.accent)
             }
 
-            Slider(value: sliderValue, in: 0...5, step: 1) {
+            Slider(value: sliderValue, in: 0...5, step: 1, onEditingChanged: { editing in
+                onEditingChanged?(editing)
+            }) {
                 Text("\(label) power limit")
             }
             .tint(WattlineTheme.accent)
             .disabled(isPending)
             .accessibilityValue("\(selection.watts) watts")
+            .accessibilityIdentifier("\(label) limit")
 
             HStack(spacing: 0) {
                 ForEach(PowerLimitLevel.allCases, id: \.rawValue) { level in

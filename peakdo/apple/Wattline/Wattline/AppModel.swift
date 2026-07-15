@@ -77,12 +77,22 @@ final class AppModel {
     var connectionStatus: ConnectionStatus = .disconnected(nil)
     var connectedName: String?
     var scanMessage: String?
+    var state = DeviceState()
+    var capabilities = DeviceCapabilities(features: [])
+    var limits: [PowerLimitType: PowerLimitLevel] = [:]
+    var limitsLoading = false
+    var pendingLimits: [PowerLimitType] = []
+    var toastMessage: String?
+    var demoChargerConnected = false
 
     private(set) var knownDevices: [UUID: CachedIdentity]
     private let persistence: AppPersistence
     private let transportFactory: TransportFactory
     private var transport: (any DeviceTransport)?
+    private var session: DeviceSession?
+    private var demoTransport: DemoTransport?
     private var eventTask: Task<Void, Never>?
+    private var freshnessTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var supersededOperationTask: Task<Void, Never>?
     private var transportGeneration: UInt = 0
@@ -116,7 +126,9 @@ final class AppModel {
 
     func enterDemo() {
         let demo = DemoTransport(seed: 0x57415454)
+        demoTransport = demo
         isDemo = true
+        capabilities = DeviceCapabilities(features: DemoTransport.identity.features)
         connectedName = DemoTransport.identity.name
         connectionStatus = .connected
         let generation = attach(transport: demo)
@@ -138,6 +150,8 @@ final class AppModel {
     func requestBluetoothAfterPriming() {
         persistence.onboardingComplete = true
         isDemo = false
+        demoTransport = nil
+        capabilities = DeviceCapabilities(features: [])
         bluetoothIssue = nil
 
         // This factory reaches BLETransport only after explicit permission priming on first use.
@@ -220,6 +234,46 @@ final class AppModel {
         startScanning()
     }
 
+    func setDC(_ enabled: Bool) {
+        performPortMutation(.setDC(enabled))
+    }
+
+    func setTypeCOutput(_ enabled: Bool) {
+        performPortMutation(.setTypeCOutput(enabled))
+    }
+
+    func refreshTelemetry() async {
+        guard let transport else { return }
+        do {
+            try await transport.refreshTelemetry()
+        } catch {
+            showToast(String(describing: error))
+        }
+    }
+
+    func loadLimits() async {
+        guard capabilities.hasPowerLimits else { return }
+        limitsLoading = true
+        defer { limitsLoading = false }
+        for type in PowerLimitType.allCases {
+            await readLimit(type)
+        }
+    }
+
+    func setLimit(_ type: PowerLimitType, level: PowerLimitLevel) async {
+        await mutateLimit(type, command: .setPowerLimit(type, level: level))
+    }
+
+    func resetLimit(_ type: PowerLimitType) async {
+        await mutateLimit(type, command: .clearPowerLimit(type))
+    }
+
+    func setDemoChargerConnected(_ connected: Bool) {
+        guard let demoTransport else { return }
+        demoChargerConnected = connected
+        Task { await demoTransport.setChargerConnected(connected) }
+    }
+
     func waitForSupersededLifecycleOperation() async {
         await supersededOperationTask?.value
     }
@@ -277,10 +331,14 @@ final class AppModel {
     private func attach(transport: any DeviceTransport) -> UInt {
         supersedeCurrentOperation()
         eventTask?.cancel()
+        freshnessTask?.cancel()
         transportGeneration &+= 1
         operationGeneration &+= 1
         let generation = transportGeneration
         self.transport = transport
+        let session = DeviceSession(transport: transport)
+        self.session = session
+        state = DeviceState()
         let events = transport.events
         eventTask = Task { [weak self] in
             for await event in events {
@@ -288,6 +346,10 @@ final class AppModel {
                       let self,
                       self.transportGeneration == generation
                 else { return }
+                await session.receive(event)
+                guard self.transportGeneration == generation else { return }
+                self.state = await session.state
+                self.scheduleFreshnessSnapshot(for: event, session: session, generation: generation)
                 self.receive(event, generation: generation)
             }
         }
@@ -331,6 +393,92 @@ final class AppModel {
             if selectedPeripheralID != nil || isDemo { route = .connected }
         case .battery, .dc, .typeC, .transactionDepth:
             break
+        }
+    }
+
+    private func scheduleFreshnessSnapshot(
+        for event: DeviceEvent,
+        session: DeviceSession,
+        generation: UInt
+    ) {
+        switch event {
+        case .battery, .dc, .typeC:
+            freshnessTask?.cancel()
+            freshnessTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(10.05))
+                guard !Task.isCancelled,
+                      let self,
+                      transportGeneration == generation
+                else { return }
+                state = await session.state
+            }
+        default:
+            break
+        }
+    }
+
+    private func performPortMutation(_ command: DeviceCommand) {
+        guard let session else { return }
+        Task { [weak self] in
+            do {
+                async let outcome = session.perform(command)
+                await Task.yield()
+                guard let self else { return }
+                state = await session.state
+                _ = try await outcome
+                state = await session.state
+                try? await Task.sleep(for: .seconds(3.05))
+                let latest = await session.state
+                state = latest
+                if let error = latest.lastError { showToast(error) }
+            } catch {
+                guard let self else { return }
+                state = await session.state
+                showToast(String(describing: error))
+            }
+        }
+    }
+
+    private func readLimit(_ type: PowerLimitType) async {
+        guard let session else { return }
+        do {
+            let outcome = try await session.perform(.getPowerLimit(type))
+            applyLimitReply(outcome, type: type)
+            state = await session.state
+        } catch {
+            showToast(String(describing: error))
+        }
+    }
+
+    private func mutateLimit(_ type: PowerLimitType, command: DeviceCommand) async {
+        guard let session else { return }
+        if !pendingLimits.contains(type) { pendingLimits.append(type) }
+        defer { pendingLimits.removeAll { $0 == type } }
+        do {
+            let outcome = try await session.perform(command)
+            applyLimitReply(outcome, type: type)
+            state = await session.state
+        } catch {
+            showToast(String(describing: error))
+            await readLimit(type)
+        }
+    }
+
+    private func applyLimitReply(_ outcome: CommandOutcome, type: PowerLimitType) {
+        guard case let .reply(reply) = outcome else { return }
+        if reply.result == 0xFF {
+            limits[type] = nil
+        } else if let raw = reply.payload.first, let level = PowerLimitLevel(rawValue: raw) {
+            limits[type] = level
+        }
+    }
+
+    private func showToast(_ message: String) {
+        toastMessage = message
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard self?.toastMessage == message else { return }
+            self?.toastMessage = nil
         }
     }
 

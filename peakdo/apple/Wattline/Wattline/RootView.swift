@@ -5,14 +5,23 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        switch model.route {
-        case .onboarding:
-            OnboardingView()
-        case .scan:
-            ScanView()
-        case .connected:
-            ConnectedShellView()
+        ZStack(alignment: .bottom) {
+            switch model.route {
+            case .onboarding:
+                OnboardingView()
+            case .scan:
+                ScanView()
+            case .connected:
+                ConnectedShellView()
+            }
+
+            if let message = model.toastMessage {
+                ToastView(message: message)
+                    .padding(.bottom, 72)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+        .animation(.easeInOut, value: model.toastMessage)
     }
 }
 
@@ -20,55 +29,53 @@ private struct ConnectedShellView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 24) {
+        TabView {
+            demoSurface {
+                NavigationStack {
+                    DashboardView()
+                        .toolbar {
+                            if !model.isDemo {
+                                Button("Devices") { model.returnToScan() }
+                            }
+                        }
+                }
+            }
+            .tabItem { Label("Home", systemImage: "house.fill") }
+
+            demoSurface {
+                NavigationStack { PlaceholderView(title: "Timers", symbol: "timer") }
+            }
+            .tabItem { Label("Timers", systemImage: "timer") }
+
+            demoSurface {
+                NavigationStack { PlaceholderView(title: "Shortcuts", symbol: "wand.and.stars") }
+            }
+            .tabItem { Label("Shortcuts", systemImage: "square.grid.2x2") }
+
+            demoSurface {
+                NavigationStack {
+                    PlaceholderView(
+                        title: "Settings",
+                        symbol: "gearshape",
+                        actionTitle: model.isDemo ? "Connect a real device" : nil,
+                        action: model.isDemo ? { model.requestBluetoothAfterPriming() } : nil
+                    )
+                }
+            }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+        }
+        .tint(.indigo)
+    }
+
+    private func demoSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .overlay(alignment: .topTrailing) {
                 if model.isDemo {
                     DemoBadge()
                         .accessibilityLabel("DEMO")
-                }
-
-                Image(systemName: statusSymbol)
-                    .font(.system(size: 52))
-                    .foregroundStyle(.orange)
-
-                Text(model.connectedName ?? "Wattline device")
-                    .font(.title2.bold())
-
-                switch model.connectionStatus {
-                case .connected:
-                    Text(model.isDemo ? "Demo telemetry is connected." : "Connected. Device details will appear after the identity handshake.")
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.secondary)
-                case .reconnecting:
-                    ProgressView("Reconnecting…")
-                case let .disconnected(message):
-                    VStack(spacing: 12) {
-                        Text(message ?? "Device disconnected")
-                            .foregroundStyle(.secondary)
-                        if !model.isDemo {
-                            Button("Reconnect") { model.retryConnection() }
-                                .buttonStyle(.borderedProminent)
-                        }
-                    }
-                }
-
-                Spacer()
-            }
-            .padding(28)
-            .navigationTitle("Wattline")
-            .toolbar {
-                if !model.isDemo {
-                    Button("Devices") { model.returnToScan() }
+                        .padding(.top, 8)
+                        .padding(.trailing, 12)
                 }
             }
-        }
-    }
-
-    private var statusSymbol: String {
-        switch model.connectionStatus {
-        case .connected: "bolt.circle.fill"
-        case .reconnecting: "arrow.triangle.2.circlepath.circle"
-        case .disconnected: "bolt.slash.circle"
-        }
     }
 }

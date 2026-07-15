@@ -14,6 +14,7 @@ public struct PortCard: View {
     public let canToggle: Bool
     public let isPending: Bool
     public let freshness: TelemetryFreshness
+    public let toggleLabel: String?
     public let onToggle: (@MainActor @Sendable (Bool) -> Void)?
     public let onSelect: (@MainActor @Sendable () -> Void)?
 
@@ -30,6 +31,7 @@ public struct PortCard: View {
         canToggle: Bool = true,
         isPending: Bool = false,
         freshness: TelemetryFreshness = .live,
+        toggleLabel: String? = nil,
         onToggle: (@MainActor @Sendable (Bool) -> Void)? = nil,
         onSelect: (@MainActor @Sendable () -> Void)? = nil
     ) {
@@ -45,6 +47,7 @@ public struct PortCard: View {
         self.canToggle = canToggle
         self.isPending = isPending
         self.freshness = freshness
+        self.toggleLabel = toggleLabel
         self.onToggle = onToggle
         self.onSelect = onSelect
     }
@@ -71,6 +74,7 @@ public struct PortCard: View {
             canToggle: canToggle,
             isPending: isPending,
             freshness: freshness,
+            toggleLabel: "DC Port",
             onToggle: onToggle,
             onSelect: onSelect
         )
@@ -98,6 +102,7 @@ public struct PortCard: View {
             canToggle: canToggle,
             isPending: isPending,
             freshness: freshness,
+            toggleLabel: "USB-C Output",
             onToggle: onToggle,
             onSelect: onSelect
         )
@@ -137,7 +142,7 @@ public struct PortCard: View {
 
                 if let onToggle, canToggle {
                     Toggle(
-                        "\(title) power",
+                        toggleLabel ?? "\(title) power",
                         isOn: Binding(
                             get: { enabled },
                             set: { newValue in onToggle(newValue) }
@@ -147,6 +152,7 @@ public struct PortCard: View {
                     .tint(WattlineTheme.accent)
                     .disabled(isPending)
                     .accessibilityValue(toggleAccessibilityValue)
+                    .accessibilityIdentifier(toggleLabel ?? "\(title) power")
                     .accessibilityHint(isPending ? "Update in progress" : "Changes \(title) power")
                 } else {
                     statusPill
