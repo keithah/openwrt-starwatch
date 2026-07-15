@@ -5,6 +5,174 @@ import XCTest
 
 @MainActor
 final class AppModelReconnectTests: XCTestCase {
+    func testHandshakeAppliesAuthoritativeCapabilitiesAndPersistsFullIdentity() async throws {
+        let fixture = makeFixture(onboardingComplete: true)
+        let id = UUID()
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        let snapshot = DeviceIdentitySnapshot(
+            peripheralID: id,
+            advertisedName: "Link-Power 2",
+            mode: .application,
+            modelNumber: "BP4SL3V2",
+            hardwareRevision: "V5#0305",
+            otaFirmwareRevision: "2.0.2",
+            appFirmwareRevision: "1.4.9",
+            cid: 0x0305,
+            rawFeatures: 0,
+            macAddress: "DC:04:5A:EB:72:2B",
+            capabilities: DeviceCapabilities(features: [])
+        )
+
+        await fixture.transport.emit(.handshakeCompleted(snapshot))
+        await fixture.transport.emit(.connected(id))
+
+        try await eventually { model.state.identity == snapshot }
+        XCTAssertEqual(model.capabilities.features.rawValue, 0, "empty FEATURES stays authoritative")
+        let persisted = try XCTUnwrap(model.knownDevices[id])
+        XCTAssertEqual(persisted.advertisedName, "Link-Power 2")
+        XCTAssertEqual(persisted.deviceInformationName, "BP4SL3V2")
+        XCTAssertEqual(persisted.modelNumber, "BP4SL3V2")
+        XCTAssertEqual(persisted.hardwareRevision, "V5#0305")
+        XCTAssertEqual(persisted.otaFirmwareRevision, "2.0.2")
+        XCTAssertEqual(persisted.appFirmwareRevision, "1.4.9")
+        XCTAssertEqual(persisted.cid, 0x0305)
+        XCTAssertEqual(persisted.rawFeatures, 0)
+        XCTAssertEqual(persisted.macAddress, "DC:04:5A:EB:72:2B")
+        XCTAssertEqual(persisted.isOTAMode, false)
+    }
+
+    func testLegacyKnownDeviceIdentityStillDecodes() throws {
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let id = UUID()
+        let legacyJSON = """
+        [{"identifier":"\(id.uuidString)","identity":{"name":"Link-Power 1"}}]
+        """
+        defaults.set(try XCTUnwrap(legacyJSON.data(using: .utf8)), forKey: AppPersistence.knownDevicesKey)
+
+        let identity = try XCTUnwrap(AppPersistence(defaults: defaults).loadKnownDevices()[id])
+
+        XCTAssertEqual(identity.advertisedName, "Link-Power 1")
+        XCTAssertEqual(identity.name, "Link-Power 1")
+        XCTAssertNil(identity.rawFeatures)
+        XCTAssertNil(identity.isOTAMode)
+    }
+
+    func testAttachingRealTransportClearsDemoScopedPresentationState() {
+        let fixture = makeFixture(onboardingComplete: false)
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        model.enterDemo()
+        model.limits[.global] = .watts140
+        model.pendingLimits = [.global]
+        model.toastMessage = "old"
+        model.demoChargerConnected = true
+
+        model.requestBluetoothAfterPriming()
+
+        XCTAssertEqual(model.capabilities.features.rawValue, 0)
+        XCTAssertNil(model.state.identity)
+        XCTAssertTrue(model.limits.isEmpty)
+        XCTAssertTrue(model.pendingLimits.isEmpty)
+        XCTAssertFalse(model.limitsLoading)
+        XCTAssertNil(model.toastMessage)
+        XCTAssertFalse(model.demoChargerConnected)
+    }
+
+    func testSetFailureUsesSuccessfulRecoveryGetAsConfirmedLimit() async {
+        let transport = MutationTransport(steps: [
+            .failure,
+            .reply(Data([0x02, 0x80, 0x00, PowerLimitLevel.watts100.rawValue])),
+        ])
+        let model = makeMutationModel(transport: transport)
+        model.limits[.global] = .watts65
+        let originalRevision = model.limitsRevision
+
+        await model.setLimit(.global, level: .watts140)
+
+        XCTAssertEqual(model.limits[.global], .watts100)
+        XCTAssertGreaterThan(model.limitsRevision, originalRevision)
+        XCTAssertNotNil(model.toastMessage)
+    }
+
+    func testSetAndBothGetFailuresRestoreLastConfirmedLimit() async {
+        let transport = MutationTransport(steps: [
+            .reply(Data([0x02, 0x81, 0x00])),
+            .failure,
+            .failure,
+        ])
+        let model = makeMutationModel(transport: transport)
+        model.limits[.global] = .watts65
+        let originalRevision = model.limitsRevision
+
+        await model.setLimit(.global, level: .watts140)
+
+        XCTAssertEqual(model.limits[.global], .watts65)
+        XCTAssertGreaterThan(model.limitsRevision, originalRevision)
+        XCTAssertNotNil(model.toastMessage)
+    }
+
+    func testDeleteAndBothGetFailuresRestoreLastConfirmedLimit() async {
+        let transport = MutationTransport(steps: [
+            .reply(Data([0x02, 0x82, 0x00])),
+            .failure,
+            .failure,
+        ])
+        let model = makeMutationModel(transport: transport)
+        model.limits[.output] = .watts45
+        let originalRevision = model.limitsRevision
+
+        await model.resetLimit(.output)
+
+        XCTAssertEqual(model.limits[.output], .watts45)
+        XCTAssertGreaterThan(model.limitsRevision, originalRevision)
+        XCTAssertNotNil(model.toastMessage)
+    }
+
+    func testHandshakeUsesResolvedCIDAndModelCapabilityVariants() async throws {
+        let fixture = makeFixture(onboardingComplete: true)
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        let lpp = DeviceIdentitySnapshot(
+            peripheralID: UUID(), advertisedName: "Link-Power Plus", mode: .application,
+            modelNumber: "BP4SL3", cid: 0x0201,
+            capabilities: CapabilityResolver.resolve(features: nil, cid: 0x0201, model: "BP4SL3")
+        )
+
+        await fixture.transport.emit(.handshakeCompleted(lpp))
+        try await eventually { model.capabilities == lpp.capabilities }
+        XCTAssertTrue(model.capabilities.hasDCPort)
+        XCTAssertFalse(model.capabilities.hasBattery)
+
+        let lp2 = DeviceIdentitySnapshot(
+            peripheralID: UUID(), advertisedName: "Link-Power 2", mode: .application,
+            modelNumber: "BP4SL3V2",
+            capabilities: CapabilityResolver.resolve(features: nil, cid: nil, model: "BP4SL3V2")
+        )
+        await fixture.transport.emit(.handshakeCompleted(lp2))
+        try await eventually { model.capabilities == lp2.capabilities }
+        XCTAssertTrue(model.capabilities.hasBattery)
+        XCTAssertTrue(model.capabilities.hasUSBPort)
+    }
+
+    func testPortMutationImmediatelyPublishesPendingAndTelemetryConfirmation() async throws {
+        let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
+        let transport = MutationTransport(steps: [.suspendedReply(reply)])
+        let model = makeMutationModel(transport: transport)
+        let off = try DCPortStatus(frame: Data([0, 0, 0, 0, 0, 0, 0, 0]))
+        await transport.emit(.dc(off, timestamp: .zero))
+        try await eventually { model.state.dc == off }
+
+        model.setDC(true)
+        try await eventually { model.state.pendingMutations.count == 1 }
+        XCTAssertEqual(model.state.dc, off)
+
+        await transport.releaseSuspendedReply()
+        let on = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+        await transport.emit(.dc(on, timestamp: .seconds(1)))
+        try await eventually { model.state.dc == on && model.state.pendingMutations.isEmpty }
+        XCTAssertNil(model.state.lastError)
+    }
+
     func testConnectedEventPersistsPeripheralAndAdvertisedNameWithoutInventingIdentity() async throws {
         let fixture = makeFixture(onboardingComplete: true)
         let id = UUID()
@@ -127,6 +295,16 @@ final class AppModelReconnectTests: XCTestCase {
         return (persistence, RecordingTransport(connectResult: connectResult))
     }
 
+    private func makeMutationModel(transport: MutationTransport) -> AppModel {
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let persistence = AppPersistence(defaults: defaults)
+        let model = AppModel(persistence: persistence, transportFactory: { transport })
+        model.requestBluetoothAfterPriming()
+        return model
+    }
+
     private func eventually(
         timeout: Duration = .seconds(2),
         condition: @escaping () async -> Bool
@@ -136,6 +314,48 @@ final class AppModelReconnectTests: XCTestCase {
         while !(await condition()) {
             if clock.now >= deadline { XCTFail("Condition was not met before timeout"); return }
             try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+private actor MutationTransport: DeviceTransport {
+    enum Step: Sendable { case reply(Data), suspendedReply(Data), failure }
+    enum Failure: Error { case expected }
+
+    nonisolated let events: AsyncStream<DeviceEvent>
+    private let continuation: AsyncStream<DeviceEvent>.Continuation
+    private var steps: [Step]
+    private var suspendedReply: (Data, CheckedContinuation<Data, Never>)?
+
+    init(steps: [Step]) {
+        let pair = AsyncStream<DeviceEvent>.makeStream()
+        events = pair.stream
+        continuation = pair.continuation
+        self.steps = steps
+    }
+
+    func startScan() async throws {}
+    func stopScan() async {}
+    func connect(to id: UUID) async throws { continuation.yield(.connected(id)) }
+    func disconnect() async {}
+    func refreshTelemetry() async throws {}
+    func emit(_ event: DeviceEvent) { continuation.yield(event) }
+    func releaseSuspendedReply() {
+        guard let suspendedReply else { return }
+        self.suspendedReply = nil
+        suspendedReply.1.resume(returning: suspendedReply.0)
+    }
+
+    func perform(_ command: DeviceCommand) async throws -> CommandOutcome {
+        guard !steps.isEmpty else { throw Failure.expected }
+        switch steps.removeFirst() {
+        case let .reply(data): return .reply(try command.validate(data))
+        case let .suspendedReply(data):
+            let resumed = await withCheckedContinuation { continuation in
+                suspendedReply = (data, continuation)
+            }
+            return .reply(try command.validate(resumed))
+        case .failure: throw Failure.expected
         }
     }
 }

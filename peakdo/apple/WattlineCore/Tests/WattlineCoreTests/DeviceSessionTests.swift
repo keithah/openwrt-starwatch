@@ -4,6 +4,54 @@ import XCTest
 
 @MainActor
 final class DeviceSessionTests: XCTestCase {
+    func testStateStreamPublishesPendingConfirmationAndClearsStaleError() async throws {
+        let clock = TestDeviceClock()
+        let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
+        let session = DeviceSession(
+            transport: ReplayTransport(steps: [.reply(bytes: reply)]),
+            clock: clock
+        )
+        var iterator = session.states.makeAsyncIterator()
+        _ = await iterator.next()
+
+        let operation = Task { try await session.perform(.setDC(true)) }
+        let nextState = await iterator.next()
+        let pending = try XCTUnwrap(nextState)
+        XCTAssertEqual(pending.pendingMutations.count, 1)
+        XCTAssertNil(pending.lastError)
+        _ = try await operation.value
+
+        let confirmed = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+        await session.receive(.dc(confirmed, timestamp: await clock.now))
+        var confirmation: DeviceState?
+        while confirmation?.pendingMutations.isEmpty != true {
+            confirmation = await iterator.next()
+        }
+        XCTAssertNil(confirmation?.lastError)
+    }
+
+    func testLateConfirmationAfterTimeoutClearsMutationError() async throws {
+        let clock = TestDeviceClock()
+        let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
+        let session = DeviceSession(
+            transport: ReplayTransport(steps: [.reply(bytes: reply)]),
+            clock: clock
+        )
+
+        _ = try await session.perform(.setDC(true))
+        await clock.waitForSleepers(1)
+        await clock.advance(by: .seconds(3))
+        await Task.yield()
+        let timedOut = await session.state
+        XCTAssertEqual(timedOut.lastError, "Device did not confirm the requested change.")
+
+        let confirmed = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+        await session.receive(.dc(confirmed, timestamp: await clock.now))
+
+        let lateConfirmation = await session.state
+        XCTAssertNil(lateConfirmation.lastError)
+    }
+
     func testTelemetryBecomesStaleAfterTenSeconds() async throws {
         let clock = TestDeviceClock()
         let session = DeviceSession(transport: ReplayTransport(), clock: clock)

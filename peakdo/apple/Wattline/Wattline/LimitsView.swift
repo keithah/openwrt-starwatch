@@ -47,6 +47,7 @@ struct LimitsView: View {
             selections = model.limits
         }
         .onChange(of: model.limits) { _, values in selections = values }
+        .onChange(of: model.limitsRevision) { _, _ in selections = model.limits }
         .accessibilityIdentifier("Limits screen")
     }
 

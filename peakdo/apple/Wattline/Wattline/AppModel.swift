@@ -29,19 +29,51 @@ final class AppModel {
         let advertisedName: String
         let deviceInformationName: String?
         let macAddress: String?
+        let modelNumber: String?
+        let hardwareRevision: String?
+        let otaFirmwareRevision: String?
+        let appFirmwareRevision: String?
+        let cid: UInt16?
+        let rawFeatures: UInt32?
+        let isOTAMode: Bool?
 
         var name: String { deviceInformationName ?? advertisedName }
 
-        init(advertisedName: String, deviceInformationName: String?, macAddress: String?) {
+        init(
+            advertisedName: String,
+            deviceInformationName: String?,
+            macAddress: String?,
+            modelNumber: String? = nil,
+            hardwareRevision: String? = nil,
+            otaFirmwareRevision: String? = nil,
+            appFirmwareRevision: String? = nil,
+            cid: UInt16? = nil,
+            rawFeatures: UInt32? = nil,
+            isOTAMode: Bool? = nil
+        ) {
             self.advertisedName = advertisedName
             self.deviceInformationName = deviceInformationName
             self.macAddress = macAddress
+            self.modelNumber = modelNumber
+            self.hardwareRevision = hardwareRevision
+            self.otaFirmwareRevision = otaFirmwareRevision
+            self.appFirmwareRevision = appFirmwareRevision
+            self.cid = cid
+            self.rawFeatures = rawFeatures
+            self.isOTAMode = isOTAMode
         }
 
         private enum CodingKeys: String, CodingKey {
             case advertisedName
             case deviceInformationName
             case macAddress
+            case modelNumber
+            case hardwareRevision
+            case otaFirmwareRevision
+            case appFirmwareRevision
+            case cid
+            case rawFeatures
+            case isOTAMode
             case legacyName = "name"
         }
 
@@ -51,6 +83,13 @@ final class AppModel {
                 ?? container.decode(String.self, forKey: .legacyName)
             deviceInformationName = try container.decodeIfPresent(String.self, forKey: .deviceInformationName)
             macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
+            modelNumber = try container.decodeIfPresent(String.self, forKey: .modelNumber)
+            hardwareRevision = try container.decodeIfPresent(String.self, forKey: .hardwareRevision)
+            otaFirmwareRevision = try container.decodeIfPresent(String.self, forKey: .otaFirmwareRevision)
+            appFirmwareRevision = try container.decodeIfPresent(String.self, forKey: .appFirmwareRevision)
+            cid = try container.decodeIfPresent(UInt16.self, forKey: .cid)
+            rawFeatures = try container.decodeIfPresent(UInt32.self, forKey: .rawFeatures)
+            isOTAMode = try container.decodeIfPresent(Bool.self, forKey: .isOTAMode)
         }
 
         func encode(to encoder: any Encoder) throws {
@@ -58,6 +97,13 @@ final class AppModel {
             try container.encode(advertisedName, forKey: .advertisedName)
             try container.encodeIfPresent(deviceInformationName, forKey: .deviceInformationName)
             try container.encodeIfPresent(macAddress, forKey: .macAddress)
+            try container.encodeIfPresent(modelNumber, forKey: .modelNumber)
+            try container.encodeIfPresent(hardwareRevision, forKey: .hardwareRevision)
+            try container.encodeIfPresent(otaFirmwareRevision, forKey: .otaFirmwareRevision)
+            try container.encodeIfPresent(appFirmwareRevision, forKey: .appFirmwareRevision)
+            try container.encodeIfPresent(cid, forKey: .cid)
+            try container.encodeIfPresent(rawFeatures, forKey: .rawFeatures)
+            try container.encodeIfPresent(isOTAMode, forKey: .isOTAMode)
         }
     }
 
@@ -80,6 +126,7 @@ final class AppModel {
     var state = DeviceState()
     var capabilities = DeviceCapabilities(features: [])
     var limits: [PowerLimitType: PowerLimitLevel] = [:]
+    var limitsRevision: UInt = 0
     var limitsLoading = false
     var pendingLimits: [PowerLimitType] = []
     var toastMessage: String?
@@ -92,7 +139,7 @@ final class AppModel {
     private var session: DeviceSession?
     private var demoTransport: DemoTransport?
     private var eventTask: Task<Void, Never>?
-    private var freshnessTask: Task<Void, Never>?
+    private var sessionStateTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var supersededOperationTask: Task<Void, Never>?
     private var transportGeneration: UInt = 0
@@ -128,10 +175,10 @@ final class AppModel {
         let demo = DemoTransport(seed: 0x57415454)
         demoTransport = demo
         isDemo = true
-        capabilities = DeviceCapabilities(features: DemoTransport.identity.features)
         connectedName = DemoTransport.identity.name
         connectionStatus = .connected
         let generation = attach(transport: demo)
+        capabilities = DeviceCapabilities(features: DemoTransport.identity.features)
         route = .connected
 
         let operation = beginOperation(for: generation, transport: demo)
@@ -284,12 +331,26 @@ final class AppModel {
         deviceID: UUID,
         advertisedName: String,
         deviceInformationName: String? = nil,
-        macAddress: String? = nil
+        macAddress: String? = nil,
+        modelNumber: String? = nil,
+        hardwareRevision: String? = nil,
+        otaFirmwareRevision: String? = nil,
+        appFirmwareRevision: String? = nil,
+        cid: UInt16? = nil,
+        rawFeatures: UInt32? = nil,
+        isOTAMode: Bool? = nil
     ) {
         knownDevices[deviceID] = CachedIdentity(
             advertisedName: advertisedName,
             deviceInformationName: deviceInformationName,
-            macAddress: macAddress
+            macAddress: macAddress,
+            modelNumber: modelNumber,
+            hardwareRevision: hardwareRevision,
+            otaFirmwareRevision: otaFirmwareRevision,
+            appFirmwareRevision: appFirmwareRevision,
+            cid: cid,
+            rawFeatures: rawFeatures,
+            isOTAMode: isOTAMode
         )
         persistence.saveKnownDevices(knownDevices)
     }
@@ -331,7 +392,7 @@ final class AppModel {
     private func attach(transport: any DeviceTransport) -> UInt {
         supersedeCurrentOperation()
         eventTask?.cancel()
-        freshnessTask?.cancel()
+        sessionStateTask?.cancel()
         transportGeneration &+= 1
         operationGeneration &+= 1
         let generation = transportGeneration
@@ -339,6 +400,22 @@ final class AppModel {
         let session = DeviceSession(transport: transport)
         self.session = session
         state = DeviceState()
+        capabilities = DeviceCapabilities(features: [])
+        limits.removeAll()
+        limitsRevision = 0
+        limitsLoading = false
+        pendingLimits.removeAll()
+        toastMessage = nil
+        demoChargerConnected = false
+        sessionStateTask = Task { [weak self] in
+            for await nextState in session.states {
+                guard !Task.isCancelled,
+                      let self,
+                      transportGeneration == generation
+                else { return }
+                applySessionState(nextState)
+            }
+        }
         let events = transport.events
         eventTask = Task { [weak self] in
             for await event in events {
@@ -348,8 +425,6 @@ final class AppModel {
                 else { return }
                 await session.receive(event)
                 guard self.transportGeneration == generation else { return }
-                self.state = await session.state
-                self.scheduleFreshnessSnapshot(for: event, session: session, generation: generation)
                 self.receive(event, generation: generation)
             }
         }
@@ -369,14 +444,22 @@ final class AppModel {
             if !isDemo {
                 persistence.lastSuccessfulPeripheralID = id
                 selectedPeripheralID = id
-                if let advertisedName = discoveredDevices.first(where: { $0.id == id })?.localName
+                if state.identity?.peripheralID != id,
+                   let advertisedName = discoveredDevices.first(where: { $0.id == id })?.localName
                     ?? knownDevices[id]?.advertisedName {
                     let existing = knownDevices[id]
                     recordSuccessfulHandshake(
                         deviceID: id,
                         advertisedName: advertisedName,
                         deviceInformationName: existing?.deviceInformationName,
-                        macAddress: existing?.macAddress
+                        macAddress: existing?.macAddress,
+                        modelNumber: existing?.modelNumber,
+                        hardwareRevision: existing?.hardwareRevision,
+                        otaFirmwareRevision: existing?.otaFirmwareRevision,
+                        appFirmwareRevision: existing?.appFirmwareRevision,
+                        cid: existing?.cid,
+                        rawFeatures: existing?.rawFeatures,
+                        isOTAMode: existing?.isOTAMode
                     )
                     connectedName = knownDevices[id]?.name
                 }
@@ -391,67 +474,67 @@ final class AppModel {
         case let .disconnected(failure):
             connectionStatus = .disconnected(failure?.message)
             if selectedPeripheralID != nil || isDemo { route = .connected }
+        case let .handshakeCompleted(snapshot):
+            capabilities = snapshot.capabilities
+            selectedPeripheralID = snapshot.peripheralID
+            let advertisedName = snapshot.advertisedName
+                ?? knownDevices[snapshot.peripheralID]?.advertisedName
+                ?? "Wattline device"
+            recordSuccessfulHandshake(
+                deviceID: snapshot.peripheralID,
+                advertisedName: advertisedName,
+                deviceInformationName: snapshot.modelNumber,
+                macAddress: snapshot.macAddress,
+                modelNumber: snapshot.modelNumber,
+                hardwareRevision: snapshot.hardwareRevision,
+                otaFirmwareRevision: snapshot.otaFirmwareRevision,
+                appFirmwareRevision: snapshot.appFirmwareRevision,
+                cid: snapshot.cid,
+                rawFeatures: snapshot.rawFeatures,
+                isOTAMode: snapshot.mode == .ota
+            )
+            connectedName = knownDevices[snapshot.peripheralID]?.name
         case .battery, .dc, .typeC, .transactionDepth:
             break
         }
     }
 
-    private func scheduleFreshnessSnapshot(
-        for event: DeviceEvent,
-        session: DeviceSession,
-        generation: UInt
-    ) {
-        switch event {
-        case .battery, .dc, .typeC:
-            freshnessTask?.cancel()
-            freshnessTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(10.05))
-                guard !Task.isCancelled,
-                      let self,
-                      transportGeneration == generation
-                else { return }
-                state = await session.state
-            }
-        default:
-            break
-        }
+    private func applySessionState(_ nextState: DeviceState) {
+        let newError = nextState.lastError
+        let shouldToast = newError != nil && newError != state.lastError
+        state = nextState
+        if shouldToast, let newError { showToast(newError) }
     }
 
     private func performPortMutation(_ command: DeviceCommand) {
         guard let session else { return }
         Task { [weak self] in
             do {
-                async let outcome = session.perform(command)
-                await Task.yield()
-                guard let self else { return }
-                state = await session.state
-                _ = try await outcome
-                state = await session.state
-                try? await Task.sleep(for: .seconds(3.05))
-                let latest = await session.state
-                state = latest
-                if let error = latest.lastError { showToast(error) }
+                _ = try await session.perform(command)
             } catch {
                 guard let self else { return }
-                state = await session.state
                 showToast(String(describing: error))
             }
         }
     }
 
-    private func readLimit(_ type: PowerLimitType) async {
-        guard let session else { return }
+    @discardableResult
+    private func readLimit(_ type: PowerLimitType, showError: Bool = true) async -> Bool {
+        guard let session else { return false }
         do {
             let outcome = try await session.perform(.getPowerLimit(type))
-            applyLimitReply(outcome, type: type)
+            guard applyLimitReply(outcome, type: type) else { return false }
             state = await session.state
+            return true
         } catch {
-            showToast(String(describing: error))
+            if showError { showToast(String(describing: error)) }
+            return false
         }
     }
 
     private func mutateLimit(_ type: PowerLimitType, command: DeviceCommand) async {
         guard let session else { return }
+        let confirmedValue = limits[type]
         if !pendingLimits.contains(type) { pendingLimits.append(type) }
         defer { pendingLimits.removeAll { $0 == type } }
         do {
@@ -460,17 +543,26 @@ final class AppModel {
             state = await session.state
         } catch {
             showToast(String(describing: error))
-            await readLimit(type)
+            if !(await readLimit(type, showError: false)) {
+                limits[type] = confirmedValue
+                limitsRevision &+= 1
+            }
         }
     }
 
-    private func applyLimitReply(_ outcome: CommandOutcome, type: PowerLimitType) {
-        guard case let .reply(reply) = outcome else { return }
+    @discardableResult
+    private func applyLimitReply(_ outcome: CommandOutcome, type: PowerLimitType) -> Bool {
+        guard case let .reply(reply) = outcome else { return false }
         if reply.result == 0xFF {
             limits[type] = nil
+            limitsRevision &+= 1
+            return true
         } else if let raw = reply.payload.first, let level = PowerLimitLevel(rawValue: raw) {
             limits[type] = level
+            limitsRevision &+= 1
+            return true
         }
+        return false
     }
 
     private func showToast(_ message: String) {

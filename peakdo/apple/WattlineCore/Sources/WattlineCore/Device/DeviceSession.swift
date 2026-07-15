@@ -59,13 +59,16 @@ public struct DeviceState: Equatable, Sendable {
 
 public actor DeviceSession {
     public private(set) var state = DeviceState()
+    public nonisolated let states: AsyncStream<DeviceState>
 
     private let transport: any DeviceTransport
     private let clock: any DeviceClock
+    private let stateContinuation: AsyncStream<DeviceState>.Continuation
     private let logicalOperations = SerializedTransactions()
     private var eventTask: Task<Void, Never>?
     private var freshnessGeneration: UInt64 = 0
     private var telemetryTimestamps: [TelemetryChannel: DeviceTimestamp] = [:]
+    private var timedOutReconcilers: [MutationReconciler] = []
     private(set) var logicalOperationDepth = 0
 
     var isEventConsumerRunning: Bool { eventTask != nil }
@@ -74,12 +77,17 @@ public actor DeviceSession {
         transport: any DeviceTransport,
         clock: any DeviceClock = ContinuousDeviceClock()
     ) {
+        let pair = AsyncStream<DeviceState>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        states = pair.stream
+        stateContinuation = pair.continuation
         self.transport = transport
         self.clock = clock
+        stateContinuation.yield(state)
     }
 
     deinit {
         eventTask?.cancel()
+        stateContinuation.finish()
     }
 
     public func start() {
@@ -134,6 +142,7 @@ public actor DeviceSession {
         case let .transactionDepth(depth):
             state.transactionDepth = depth
         }
+        publishState()
     }
 
     @discardableResult
@@ -141,8 +150,11 @@ public actor DeviceSession {
         logicalOperationDepth += 1
         let mutation = await makePendingMutation(for: command)
         if let mutation {
+            state.lastError = nil
+            timedOutReconcilers.removeAll()
             state.pendingMutations.append(mutation)
             scheduleTimeout(for: mutation)
+            publishState()
         }
 
         do {
@@ -155,6 +167,7 @@ public actor DeviceSession {
             if let mutation { removePendingMutation(id: mutation.id) }
             state.lastError = String(describing: error)
             logicalOperationDepth -= 1
+            publishState()
             throw error
         }
     }
@@ -213,7 +226,11 @@ public actor DeviceSession {
 
     private func finishTelemetry(_ update: TelemetryUpdate?, timing: TelemetryTiming) {
         if let update {
+            let hadConfirmation = state.pendingMutations.contains { $0.reconciler.matches(update) }
+            let hadLateConfirmation = timedOutReconcilers.contains { $0.matches(update) }
             state.pendingMutations.removeAll { $0.reconciler.matches(update) }
+            timedOutReconcilers.removeAll { $0.matches(update) }
+            if hadConfirmation || hadLateConfirmation { state.lastError = nil }
         }
 
         guard let remaining = timing.remainingFreshness, remaining > .zero else { return }
@@ -232,6 +249,7 @@ public actor DeviceSession {
     private func markStale(ifGenerationIs generation: UInt64) {
         guard freshnessGeneration == generation, state.freshness == .live else { return }
         state.freshness = .stale
+        publishState()
     }
 
     private func scheduleTimeout(for mutation: PendingMutation) {
@@ -254,12 +272,18 @@ public actor DeviceSession {
     }
 
     private func timeOutMutation(id: UUID) {
-        guard state.pendingMutations.contains(where: { $0.id == id }) else { return }
+        guard let mutation = state.pendingMutations.first(where: { $0.id == id }) else { return }
+        timedOutReconcilers.append(mutation.reconciler)
         removePendingMutation(id: id)
         state.lastError = "Device did not confirm the requested change."
+        publishState()
     }
 
     private func removePendingMutation(id: UUID) {
         state.pendingMutations.removeAll { $0.id == id }
+    }
+
+    private func publishState() {
+        stateContinuation.yield(state)
     }
 }
