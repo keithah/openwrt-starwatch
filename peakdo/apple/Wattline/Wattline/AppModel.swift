@@ -564,8 +564,10 @@ final class AppModel {
                     rawFeatures: snapshot.rawFeatures,
                     isOTAMode: isOTAMode
                 )
-                persistence.saveResolvedFeatures(capabilities.features.rawValue, for: snapshot.peripheralID)
-                flushPendingTelemetryPersistence()
+                if !isOTAMode {
+                    persistence.saveResolvedFeatures(capabilities.features.rawValue, for: snapshot.peripheralID)
+                    flushPendingTelemetryPersistence()
+                }
                 connectedName = knownDevices[snapshot.peripheralID]?.name
             }
             if isOTAMode {
@@ -835,13 +837,25 @@ final class AppModel {
     }
 
     private func presentBluetoothFailure(_ error: any Error) {
-        switch CBManager.authorization {
+        bluetoothIssue = BluetoothFailurePolicy.issue(
+            authorization: CBManager.authorization,
+            errorDescription: String(describing: error)
+        )
+    }
+}
+
+enum BluetoothFailurePolicy {
+    static func issue(
+        authorization: CBManagerAuthorization,
+        errorDescription: String
+    ) -> AppModel.BluetoothIssue {
+        switch authorization {
         case .denied, .restricted:
-            bluetoothIssue = .deniedOrRestricted
+            .deniedOrRestricted
         case .allowedAlways, .notDetermined:
-            bluetoothIssue = .unavailable(String(describing: error))
+            .unavailable(errorDescription)
         @unknown default:
-            bluetoothIssue = .unavailable(String(describing: error))
+            .unavailable(errorDescription)
         }
     }
 }

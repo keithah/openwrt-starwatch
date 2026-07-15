@@ -64,17 +64,18 @@ struct DashboardView: View {
         case .batteryStats:
             if let battery = model.state.battery {
                 HStack(spacing: 10) {
-                    StatTile(label: "Capacity", value: "\(Int(battery.capacity)) / \(Int(battery.maxCapacity))", unit: "Wh")
-                    StatTile(label: "Runtime", value: runtime(battery.remainingMinutes))
-                    StatTile(label: "Voltage", value: formatted(battery.voltage), unit: "V")
+                    StatTile(label: "Capacity", value: "\(Int(battery.capacity)) / \(Int(battery.maxCapacity))", unit: "Wh", freshness: model.state.freshness)
+                    StatTile(label: "Runtime", value: runtime(battery.remainingMinutes), freshness: model.state.freshness)
+                    StatTile(label: "Voltage", value: formatted(battery.voltage), unit: "V", freshness: model.state.freshness)
                 }
             }
         case .dcCard:
             if let dc = model.state.dc {
                 PortCard(
                     dcStatus: dc,
+                    showsBypass: dashboardCapabilities.hasBypass,
                     canToggle: DashboardSections(capabilities: model.capabilities).controlPresentation(for: .dc) == .toggle,
-                    isPending: isPending(.dcEnabled(dc.enabled)),
+                    isPending: DashboardPendingPresentation.isDCPending(model.state.pendingMutations),
                     freshness: model.state.freshness,
                     onToggle: { model.setDC($0) }
                 )
@@ -90,7 +91,7 @@ struct DashboardView: View {
                     voltage: typeC.voltage,
                     current: typeC.current,
                     power: typeC.power,
-                    detail: typeC.isDCInput == true ? "DC input" : nil,
+                    detail: dashboardCapabilities.showsDCInput && typeC.isDCInput == true ? "DC input" : nil,
                     canToggle: DashboardSections(capabilities: model.capabilities).controlPresentation(for: .usb) == .toggle,
                     isPending: model.state.pendingMutations.contains { mutation in
                         mutation.reconciler == .typeCOutput(true) || mutation.reconciler == .typeCOutput(false)
@@ -131,12 +132,12 @@ struct DashboardView: View {
         }
     }
 
-    private func isPending(_ reconciler: MutationReconciler) -> Bool {
-        model.state.pendingMutations.contains { $0.reconciler == reconciler }
-    }
-
     private func toggleHeroStyle() {
         heroStyleRaw = heroStyle == .segmented ? BatteryHeroStyle.gauge.rawValue : BatteryHeroStyle.segmented.rawValue
+    }
+
+    private var dashboardCapabilities: DashboardCapabilities {
+        DashboardCapabilities(model.capabilities)
     }
 
     private func runtime(_ minutes: UInt16) -> String {
@@ -145,5 +146,13 @@ struct DashboardView: View {
 
     private func formatted(_ value: Double) -> String {
         value.isFinite ? value.formatted(.number.precision(.fractionLength(1))) : "—"
+    }
+}
+
+enum DashboardPendingPresentation {
+    static func isDCPending(_ mutations: [PendingMutation]) -> Bool {
+        mutations.contains { mutation in
+            mutation.reconciler == .dcEnabled(true) || mutation.reconciler == .dcEnabled(false)
+        }
     }
 }

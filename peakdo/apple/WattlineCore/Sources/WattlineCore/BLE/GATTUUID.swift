@@ -324,6 +324,18 @@ public struct BLEExpectedDisconnectStateMachine: Sendable {
         return policy == .none ? .ignored : .waitingForDisconnect
     }
 
+    public mutating func didWriteFail(
+        scope: BLEConnectionScope,
+        isDisconnecting: Bool
+    ) -> BLEExpectedDisconnectAction {
+        guard isActive, scope == self.scope else { return .ignored }
+        guard policy != .none, isDisconnecting else {
+            isActive = false
+            return .failed
+        }
+        return .waitingForDisconnect
+    }
+
     public mutating func didDisconnect(scope: BLEConnectionScope) -> BLEExpectedDisconnectAction {
         guard isActive, scope == self.scope else { return .ignored }
         isActive = false

@@ -1,7 +1,29 @@
 import XCTest
+import WattlineCore
 @testable import WattlineUI
 
 final class CapabilityCompositionTests: XCTestCase {
+    @MainActor
+    func testOptionalTelemetryIndicatorsRequireTheirFeatureBits() throws {
+        let withoutIndicators = DashboardCapabilities(DeviceCapabilities(features: [.dcPort, .usbPort]))
+        XCTAssertFalse(withoutIndicators.hasBypass)
+        XCTAssertFalse(withoutIndicators.showsDCInput)
+
+        let withIndicators = DashboardCapabilities(DeviceCapabilities(features: [
+            .dcPort, .dcBypass, .usbPort, .usbDCInput,
+        ]))
+        XCTAssertTrue(withIndicators.hasBypass)
+        XCTAssertTrue(withIndicators.showsDCInput)
+
+        let dc = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0, 1]))
+        XCTAssertNil(PortCard(dcStatus: dc, showsBypass: false).detail)
+        XCTAssertEqual(PortCard(dcStatus: dc, showsBypass: true).detail, "Bypass")
+
+        let typeC = try TypeCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]))
+        XCTAssertFalse(PortCard(typeCStatus: typeC, showsDCInput: false).detail?.contains("DC input") == true)
+        XCTAssertTrue(PortCard(typeCStatus: typeC, showsDCInput: true).detail?.contains("DC input") == true)
+    }
+
     func testUSBRemovalRemovesCardLimitsAndToggle() {
         let sections = DashboardSections(
             capabilities: .init(

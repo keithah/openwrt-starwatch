@@ -68,6 +68,31 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertEqual(state.freshness, .stale)
     }
 
+    func testFreshnessUsesSessionReceiptTimeWhenTransportClockHasDifferentOrigin() async throws {
+        let transportClock = TestDeviceClock()
+        let sessionClock = TestDeviceClock()
+        await sessionClock.advance(by: .seconds(100))
+        let session = DeviceSession(transport: ReplayTransport(clock: transportClock), clock: sessionClock)
+        let battery = try BatteryStatus(frame: Data(repeating: 0, count: 16))
+
+        await session.receive(.battery(battery, timestamp: await transportClock.now))
+        var state = await session.state
+        guard state.freshness == .live else {
+            return XCTFail("Fresh telemetry was treated as old because clock origins differ")
+        }
+        await sessionClock.waitForSleepers(1)
+
+        await sessionClock.advance(by: .seconds(9))
+        await Task.yield()
+        state = await session.state
+        XCTAssertEqual(state.freshness, .live)
+
+        await sessionClock.advance(by: .seconds(2))
+        await Task.yield()
+        state = await session.state
+        XCTAssertEqual(state.freshness, .stale)
+    }
+
     func testNewTelemetrySupersedesEarlierStalenessDeadline() async throws {
         let clock = TestDeviceClock()
         let session = DeviceSession(transport: ReplayTransport(), clock: clock)
@@ -101,6 +126,20 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertEqual(state.lastError, "link lost")
     }
 
+    func testConnectedEventCannotDowngradeTelemetryThatIsAlreadyLive() async throws {
+        let clock = TestDeviceClock()
+        let session = DeviceSession(transport: ReplayTransport(), clock: clock)
+        let battery = try BatteryStatus(frame: Data(repeating: 0, count: 16))
+        await session.receive(.battery(battery, timestamp: .zero))
+
+        await session.receive(.connected(UUID()))
+
+        let state = await session.state
+        XCTAssertEqual(state.connection, .live)
+        XCTAssertEqual(state.freshness, .live)
+        XCTAssertEqual(state.battery, battery)
+    }
+
     func testPendingMutationClearsOnlyWhenTelemetryConfirmsIt() async throws {
         let clock = TestDeviceClock()
         let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
@@ -117,6 +156,42 @@ final class DeviceSessionTests: XCTestCase {
         await session.receive(.dc(on, timestamp: await clock.now))
         state = await session.state
         XCTAssertTrue(state.pendingMutations.isEmpty)
+    }
+
+    func testBypassNonstandardReplyWaitsForTelemetryAndTimesOutAfterTenSeconds() async throws {
+        let clock = TestDeviceClock()
+        let replay = ReplayTransport(steps: [
+            .reply(bytes: Data([0x14, 0x81, 0xFD])),
+        ])
+        let session = DeviceSession(transport: replay, clock: clock)
+
+        _ = try await session.perform(.setBypass(true))
+        var state = await session.state
+        XCTAssertEqual(state.pendingMutations.map(\.reconciler), [.bypass(true)])
+        XCTAssertNil(state.lastError)
+
+        let bypassOff = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0, 0]))
+        await session.receive(.dc(bypassOff, timestamp: await clock.now))
+        state = await session.state
+        XCTAssertEqual(state.pendingMutations.map(\.reconciler), [.bypass(true)])
+
+        await clock.waitForSleepers(2)
+        await clock.advance(by: .seconds(9))
+        await Task.yield()
+        state = await session.state
+        XCTAssertEqual(state.pendingMutations.map(\.reconciler), [.bypass(true)])
+        XCTAssertNil(state.lastError)
+
+        await clock.advance(by: .seconds(2))
+        await Task.yield()
+        state = await session.state
+        XCTAssertTrue(state.pendingMutations.isEmpty)
+        XCTAssertEqual(state.lastError, "Device did not confirm the requested change.")
+
+        let bypassOn = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0, 1]))
+        await session.receive(.dc(bypassOn, timestamp: await clock.now))
+        state = await session.state
+        XCTAssertNil(state.lastError, "Late authoritative telemetry must reconcile the timeout")
     }
 
     func testMutationTimeoutClearsPendingAndPreservesTelemetryTruth() async throws {
@@ -175,21 +250,22 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertEqual(finalDepth, 0)
     }
 
-    func testAlreadyExpiredTelemetryIsImmediatelyStale() async throws {
+    func testTransportTimestampDoesNotMakeFreshReceiptImmediatelyStale() async throws {
         let clock = TestDeviceClock()
         await clock.advance(by: .seconds(20))
         let session = DeviceSession(transport: ReplayTransport(), clock: clock)
         let status = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
 
         await session.receive(.dc(status, timestamp: .zero))
+        await clock.waitForSleepers(1)
 
         let state = await session.state
         let sleeperCount = await clock.sleeperCount
-        XCTAssertEqual(state.freshness, .stale)
-        XCTAssertEqual(sleeperCount, 0)
+        XCTAssertEqual(state.freshness, .live)
+        XCTAssertEqual(sleeperCount, 1)
     }
 
-    func testBufferedTelemetryUsesOnlyItsRemainingFreshLifetime() async throws {
+    func testFreshnessDeadlineStartsWhenSessionReceivesTelemetry() async throws {
         let clock = TestDeviceClock()
         await clock.advance(by: .seconds(9))
         let session = DeviceSession(transport: ReplayTransport(), clock: clock)
@@ -200,7 +276,12 @@ final class DeviceSessionTests: XCTestCase {
         await clock.advance(by: .seconds(1))
         await Task.yield()
 
-        let state = await session.state
+        var state = await session.state
+        XCTAssertEqual(state.freshness, .live)
+
+        await clock.advance(by: .seconds(9))
+        await Task.yield()
+        state = await session.state
         XCTAssertEqual(state.freshness, .stale)
     }
 
@@ -243,7 +324,9 @@ final class DeviceSessionTests: XCTestCase {
         let operation = Task { try await session.perform(.setDC(true)) }
         await clock.waitForSleepers(2)
         await clock.advance(by: .seconds(3))
-        await Task.yield()
+        for _ in 0..<100 where !(await session.state.pendingMutations.isEmpty) {
+            await Task.yield()
+        }
 
         var state = await session.state
         XCTAssertTrue(state.pendingMutations.isEmpty)

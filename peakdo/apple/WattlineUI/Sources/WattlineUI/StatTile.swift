@@ -1,4 +1,5 @@
 import SwiftUI
+import WattlineCore
 
 public struct StatTile: View {
     public let label: String
@@ -6,19 +7,22 @@ public struct StatTile: View {
     public let unit: String?
     public let symbol: String?
     public let compact: Bool
+    public let freshness: TelemetryFreshness
 
     public init(
         label: String,
         value: String,
         unit: String? = nil,
         symbol: String? = nil,
-        compact: Bool = false
+        compact: Bool = false,
+        freshness: TelemetryFreshness = .live
     ) {
         self.label = label
         self.value = value
         self.unit = unit
         self.symbol = symbol
         self.compact = compact
+        self.freshness = freshness
     }
 
     public var body: some View {
@@ -52,5 +56,8 @@ public struct StatTile: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue([value, unit].compactMap { $0 }.joined(separator: " "))
+        .opacity(telemetryOpacity)
     }
+
+    var telemetryOpacity: Double { freshness.wattlineIsStale ? 0.58 : 1 }
 }

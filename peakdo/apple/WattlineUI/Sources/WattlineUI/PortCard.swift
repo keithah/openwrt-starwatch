@@ -54,6 +54,7 @@ public struct PortCard: View {
 
     public init(
         dcStatus status: DCPortStatus,
+        showsBypass: Bool = false,
         compact: Bool = false,
         canToggle: Bool = true,
         isPending: Bool = false,
@@ -69,7 +70,7 @@ public struct PortCard: View {
             voltage: status.voltage,
             current: status.current,
             power: status.power,
-            detail: status.bypassOn == true ? "Bypass" : nil,
+            detail: showsBypass && status.bypassOn == true ? "Bypass" : nil,
             compact: compact,
             canToggle: canToggle,
             isPending: isPending,
@@ -82,6 +83,7 @@ public struct PortCard: View {
 
     public init(
         typeCStatus status: TypeCPortStatus,
+        showsDCInput: Bool = false,
         compact: Bool = false,
         canToggle: Bool = true,
         isPending: Bool = false,
@@ -97,7 +99,7 @@ public struct PortCard: View {
             voltage: status.voltage,
             current: status.current,
             power: status.power,
-            detail: Self.typeCDetail(status),
+            detail: Self.typeCDetail(status, showsDCInput: showsDCInput),
             compact: compact,
             canToggle: canToggle,
             isPending: isPending,
@@ -233,7 +235,7 @@ public struct PortCard: View {
         .accessibilityValue("\(value.wattlineFormatted()) \(unit), \(freshness.wattlineAccessibilityDescription)")
     }
 
-    private static func typeCDetail(_ status: TypeCPortStatus) -> String? {
+    private static func typeCDetail(_ status: TypeCPortStatus, showsDCInput: Bool) -> String? {
         var details: [String] = []
         if let mode = status.mode {
             switch mode {
@@ -243,7 +245,7 @@ public struct PortCard: View {
             case .inputAndOutput: details.append("In · Out")
             }
         }
-        if status.isDCInput == true {
+        if showsDCInput && status.isDCInput == true {
             details.append("DC input")
         }
         return details.isEmpty ? nil : details.joined(separator: " · ")

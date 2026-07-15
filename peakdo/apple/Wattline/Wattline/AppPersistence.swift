@@ -27,6 +27,7 @@ struct PersistedDeviceState: Codable, Equatable, Sendable {
 
 @MainActor
 final class AppPersistence {
+    private static let schemaVersion = 1
     static let onboardingCompleteKey = "onboardingComplete"
     static let knownDevicesKey = "knownDevices"
     static let lastSuccessfulPeripheralIDKey = "lastSuccessfulPeripheralID"
@@ -124,14 +125,18 @@ final class AppPersistence {
     }
 
     private func loadRecords() -> [AppModel.KnownDevice] {
-        guard let data = defaults.data(forKey: Self.knownDevicesKey),
-              let records = try? decoder.decode([AppModel.KnownDevice].self, from: data)
-        else { return [] }
-        return records
+        guard let data = defaults.data(forKey: Self.knownDevicesKey) else { return [] }
+        if let store = try? decoder.decode(PersistedDeviceStore.self, from: data),
+           store.schemaVersion == Self.schemaVersion {
+            return store.devices
+        }
+        return (try? decoder.decode([LossyKnownDevice].self, from: data))?
+            .compactMap(\.value) ?? []
     }
 
     private func saveRecords(_ records: [AppModel.KnownDevice]) {
-        if let data = try? encoder.encode(records) {
+        let store = PersistedDeviceStore(schemaVersion: Self.schemaVersion, devices: records)
+        if let data = try? encoder.encode(store) {
             defaults.set(data, forKey: Self.knownDevicesKey)
         }
     }
@@ -154,5 +159,34 @@ final class AppPersistence {
             nan: "NaN"
         )
         return decoder
+    }
+}
+
+private struct PersistedDeviceStore: Codable {
+    let schemaVersion: Int
+    let devices: [AppModel.KnownDevice]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case devices
+    }
+
+    init(schemaVersion: Int, devices: [AppModel.KnownDevice]) {
+        self.schemaVersion = schemaVersion
+        self.devices = devices
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        devices = try container.decode([LossyKnownDevice].self, forKey: .devices).compactMap(\.value)
+    }
+}
+
+private struct LossyKnownDevice: Decodable {
+    let value: AppModel.KnownDevice?
+
+    init(from decoder: any Decoder) throws {
+        value = try? AppModel.KnownDevice(from: decoder)
     }
 }

@@ -115,7 +115,9 @@ public actor DeviceSession {
         case let .handshakeCompleted(snapshot):
             state.identity = snapshot
         case .connected:
-            state.connection = .loading
+            if state.connection != .live {
+                state.connection = .loading
+            }
             state.lastError = nil
         case .reconnecting:
             state.connection = .reconnecting
@@ -208,22 +210,16 @@ public actor DeviceSession {
         timestamp: DeviceTimestamp
     ) async -> TelemetryTiming? {
         if let latest = telemetryTimestamps[channel], timestamp < latest { return nil }
-        let now = await clock.now
+        let receivedAt = await clock.now
         // The clock access above is an actor suspension point, so validate ordering again.
         if let latest = telemetryTimestamps[channel], timestamp < latest { return nil }
         telemetryTimestamps[channel] = timestamp
 
-        guard state.lastTelemetryAt.map({ timestamp >= $0 }) ?? true else {
-            return TelemetryTiming(remainingFreshness: nil, generation: freshnessGeneration)
-        }
-
-        let age = max(now - timestamp, .zero)
-        let remaining = .seconds(10) - age
         state.connection = .live
-        state.freshness = remaining > .zero ? .live : .stale
-        state.lastTelemetryAt = timestamp
+        state.freshness = .live
+        state.lastTelemetryAt = receivedAt
         freshnessGeneration &+= 1
-        return TelemetryTiming(remainingFreshness: remaining, generation: freshnessGeneration)
+        return TelemetryTiming(remainingFreshness: .seconds(10), generation: freshnessGeneration)
     }
 
     private func finishTelemetry(_ update: TelemetryUpdate?, timing: TelemetryTiming) {

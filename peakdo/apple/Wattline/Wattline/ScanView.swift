@@ -70,25 +70,22 @@ private struct DeviceRow: View {
     let identity: AppModel.CachedIdentity?
 
     var body: some View {
+        let presentation = DeviceRowPresentation(device: device, identity: identity)
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(device.localName).font(.headline)
-                if device.mode == .ota {
+                if presentation.isOTARecovery {
                     Label("In firmware-update mode", systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption)
                         .foregroundStyle(.orange)
-                } else if let identity {
-                    Text(identity.macAddress.map { "\(identity.name) · \($0)" } ?? identity.name)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 } else {
-                    Text("New device")
+                    Text(presentation.secondaryText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             Spacer()
-            RSSIBars(rssi: device.rssi)
+            RSSIBars(strength: presentation.signalStrength)
         }
         .contentShape(Rectangle())
         .padding(.vertical, 5)
@@ -96,14 +93,7 @@ private struct DeviceRow: View {
 }
 
 private struct RSSIBars: View {
-    let rssi: Int
-
-    private var strength: Int {
-        if rssi >= -54 { return 4 }
-        if rssi >= -67 { return 3 }
-        if rssi >= -78 { return 2 }
-        return 1
-    }
+    let strength: Int
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 2) {
@@ -115,6 +105,27 @@ private struct RSSIBars: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Signal strength \(strength) of 4")
+    }
+}
+
+struct DeviceRowPresentation: Equatable {
+    let secondaryText: String
+    let signalStrength: Int
+    let isOTARecovery: Bool
+
+    init(device: DiscoveredDevice, identity: AppModel.CachedIdentity?) {
+        isOTARecovery = device.mode == .ota
+        secondaryText = identity.map { cached in
+            cached.macAddress.map { "\(cached.name) · \($0)" } ?? cached.name
+        } ?? "New device"
+        signalStrength = Self.signalStrength(for: device.rssi)
+    }
+
+    private static func signalStrength(for rssi: Int) -> Int {
+        if rssi >= -54 { return 4 }
+        if rssi >= -67 { return 3 }
+        if rssi >= -78 { return 2 }
+        return 1
     }
 }
 

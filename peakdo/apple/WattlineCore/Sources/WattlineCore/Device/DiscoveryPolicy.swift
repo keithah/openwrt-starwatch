@@ -1,4 +1,27 @@
+public struct DiscoveryIdentity: Equatable, Sendable {
+    public let localName: String
+    public let mode: DeviceMode
+
+    public init(localName: String, mode: DeviceMode) {
+        self.localName = localName
+        self.mode = mode
+    }
+}
+
 public enum DiscoveryPolicy {
+    public static func resolve(
+        advertisementLocalName: String?,
+        cachedPeripheralName: String?
+    ) -> DiscoveryIdentity? {
+        guard let advertisementLocalName,
+              let mode = classify(
+                  localName: advertisementLocalName,
+                  cachedPeripheralName: cachedPeripheralName
+              )
+        else { return nil }
+        return DiscoveryIdentity(localName: advertisementLocalName, mode: mode)
+    }
+
     public static func classify(
         localName: String?,
         cachedPeripheralName _: String?

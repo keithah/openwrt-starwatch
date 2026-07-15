@@ -2,13 +2,28 @@ import XCTest
 @testable import WattlineCore
 
 final class DiscoveryPolicyTests: XCTestCase {
+    func testScanFilterAdmitsOnlyApplicationAndOTAAdvertisements() {
+        XCTAssertEqual(
+            DiscoveryPolicy.resolve(advertisementLocalName: "Link-Power 2", cachedPeripheralName: nil)?.mode,
+            .application
+        )
+        XCTAssertEqual(
+            DiscoveryPolicy.resolve(advertisementLocalName: "PeakDo-OTA", cachedPeripheralName: nil)?.mode,
+            .ota
+        )
+        XCTAssertNil(
+            DiscoveryPolicy.resolve(advertisementLocalName: "Unrelated", cachedPeripheralName: "Link-Power 2")
+        )
+    }
+
     func testFreshAdvertisementNameWinsOverStalePeripheralName() {
-        let result = DiscoveryPolicy.classify(
-            localName: "PeakDo-OTA",
+        let result = DiscoveryPolicy.resolve(
+            advertisementLocalName: "PeakDo-OTA",
             cachedPeripheralName: "Link-Power-2"
         )
 
-        XCTAssertEqual(result, .ota)
+        XCTAssertEqual(result?.localName, "PeakDo-OTA")
+        XCTAssertEqual(result?.mode, .ota)
     }
 
     func testCachedNameCannotAdmitUnrelatedAdvertisement() {

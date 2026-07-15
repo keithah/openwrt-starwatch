@@ -7,6 +7,8 @@ public struct DashboardCapabilities: Equatable, Sendable {
     public let hasUSBPort: Bool
     public let hasUSBOutputControl: Bool
     public let hasPowerLimits: Bool
+    public let hasBypass: Bool
+    public let showsDCInput: Bool
 
     public init(
         hasBattery: Bool,
@@ -14,7 +16,9 @@ public struct DashboardCapabilities: Equatable, Sendable {
         hasDCControl: Bool,
         hasUSBPort: Bool,
         hasUSBOutputControl: Bool,
-        hasPowerLimits: Bool
+        hasPowerLimits: Bool,
+        hasBypass: Bool = false,
+        showsDCInput: Bool = false
     ) {
         self.hasBattery = hasBattery
         self.hasDCPort = hasDCPort
@@ -22,6 +26,8 @@ public struct DashboardCapabilities: Equatable, Sendable {
         self.hasUSBPort = hasUSBPort
         self.hasUSBOutputControl = hasUSBOutputControl
         self.hasPowerLimits = hasPowerLimits
+        self.hasBypass = hasBypass
+        self.showsDCInput = showsDCInput
     }
 
     public init(_ capabilities: DeviceCapabilities) {
@@ -31,7 +37,9 @@ public struct DashboardCapabilities: Equatable, Sendable {
             hasDCControl: capabilities.hasDCControl,
             hasUSBPort: capabilities.hasUSBPort,
             hasUSBOutputControl: capabilities.hasUSBOutputControl,
-            hasPowerLimits: capabilities.hasPowerLimits
+            hasPowerLimits: capabilities.hasPowerLimits,
+            hasBypass: capabilities.hasBypass,
+            showsDCInput: capabilities.showsDCInput
         )
     }
 
@@ -41,7 +49,9 @@ public struct DashboardCapabilities: Equatable, Sendable {
         hasDCControl: true,
         hasUSBPort: true,
         hasUSBOutputControl: true,
-        hasPowerLimits: true
+        hasPowerLimits: true,
+        hasBypass: true,
+        showsDCInput: true
     )
 
     public static let dcOnly = DashboardCapabilities(

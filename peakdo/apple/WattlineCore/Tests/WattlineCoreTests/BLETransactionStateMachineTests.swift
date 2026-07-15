@@ -159,6 +159,34 @@ final class BLETransactionStateMachineTests: XCTestCase {
         }
     }
 
+    func testWriteErrorDuringExpectedDisconnectWaitsForDisconnectCallback() {
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var machine = BLEExpectedDisconnectStateMachine(
+            policy: .successThenReconnect,
+            scope: scope
+        )
+
+        XCTAssertEqual(
+            machine.didWriteFail(scope: scope, isDisconnecting: true),
+            .waitingForDisconnect
+        )
+        XCTAssertEqual(machine.didDisconnect(scope: scope), .succeeded(.armed))
+    }
+
+    func testWriteErrorWithoutDisconnectFailsExpectedCommand() {
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var machine = BLEExpectedDisconnectStateMachine(
+            policy: .successThenReconnect,
+            scope: scope
+        )
+
+        XCTAssertEqual(
+            machine.didWriteFail(scope: scope, isDisconnecting: false),
+            .failed
+        )
+        XCTAssertEqual(machine.didDisconnect(scope: scope), .ignored)
+    }
+
     func testOrdinaryCommandDisconnectFails() {
         let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
         var machine = BLEExpectedDisconnectStateMachine(policy: .none, scope: scope)

@@ -1,10 +1,169 @@
 import Foundation
+import CoreBluetooth
 @testable import Wattline
 import WattlineCore
 import XCTest
 
 @MainActor
 final class AppModelReconnectTests: XCTestCase {
+    func testPermissionDeniedAndRestrictedFailuresUseSettingsRecoveryPath() {
+        XCTAssertEqual(
+            BluetoothFailurePolicy.issue(authorization: .denied, errorDescription: "scan failed"),
+            .deniedOrRestricted
+        )
+        XCTAssertEqual(
+            BluetoothFailurePolicy.issue(authorization: .restricted, errorDescription: "scan failed"),
+            .deniedOrRestricted
+        )
+        XCTAssertEqual(
+            BluetoothFailurePolicy.issue(authorization: .allowedAlways, errorDescription: "radio unavailable"),
+            .unavailable("radio unavailable")
+        )
+    }
+
+    func testDeviceRowPresentationShowsSignalNewDeviceAndKnownMAC() {
+        let id = UUID()
+        let device = DiscoveredDevice(id: id, localName: "Link-Power 2", rssi: -60, mode: .application)
+        let newPresentation = DeviceRowPresentation(device: device, identity: nil)
+        XCTAssertEqual(newPresentation.secondaryText, "New device")
+        XCTAssertEqual(newPresentation.signalStrength, 3)
+        XCTAssertFalse(newPresentation.isOTARecovery)
+
+        let identity = AppModel.CachedIdentity(
+            advertisedName: "Link-Power 2",
+            deviceInformationName: "BP4SL3V2",
+            macAddress: "DC:04:5A:EB:72:2B"
+        )
+        let knownPresentation = DeviceRowPresentation(device: device, identity: identity)
+        XCTAssertEqual(knownPresentation.secondaryText, "BP4SL3V2 · DC:04:5A:EB:72:2B")
+
+        let ota = DiscoveredDevice(id: id, localName: "PeakDo-OTA", rssi: -90, mode: .ota)
+        let otaPresentation = DeviceRowPresentation(device: ota, identity: identity)
+        XCTAssertTrue(otaPresentation.isOTARecovery)
+        XCTAssertEqual(otaPresentation.signalStrength, 1)
+    }
+
+    func testOTAModeHandshakePreservesApplicationResolvedFeatures() async throws {
+        let fixture = makeFixture(onboardingComplete: false)
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        model.requestBluetoothAfterPriming()
+        let id = UUID()
+        await fixture.transport.emit(.handshakeCompleted(makeIdentity(id: id, features: 0x7FFF)))
+        try await eventually {
+            fixture.persistence.loadPersistedDeviceState(for: id)?.resolvedFeaturesRawValue == 0x7FFF
+        }
+
+        let ota = DeviceIdentitySnapshot(
+            peripheralID: id,
+            advertisedName: "PeakDo-OTA",
+            mode: .ota,
+            capabilities: DeviceCapabilities(features: [])
+        )
+        await fixture.transport.emit(.handshakeCompleted(ota))
+        try await eventually { model.otaRecoveryDevice?.id == id }
+
+        XCTAssertEqual(
+            fixture.persistence.loadPersistedDeviceState(for: id)?.resolvedFeaturesRawValue,
+            0x7FFF
+        )
+    }
+
+    func testPersistenceRoundTripsNaNTelemetryAndRejectsMalformedJSON() throws {
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let persistence = AppPersistence(defaults: defaults)
+        let id = UUID()
+        let identity = AppModel.CachedIdentity(
+            advertisedName: "Link-Power 2",
+            deviceInformationName: nil,
+            macAddress: nil
+        )
+        persistence.saveKnownDevices([id: identity])
+        var frame = Data(repeating: 0, count: 16)
+        frame[8] = 0xFF
+        frame[9] = 0x07
+        let battery = try BatteryStatus(frame: frame)
+        XCTAssertTrue(battery.voltage.isNaN)
+
+        XCTAssertTrue(persistence.saveTelemetry(
+            battery: PersistedObservation(value: battery, observedAt: Date(timeIntervalSince1970: 1)),
+            dc: nil,
+            typeC: nil,
+            for: id
+        ))
+        let restored = try XCTUnwrap(persistence.loadPersistedDeviceState(for: id)?.battery?.value)
+        XCTAssertTrue(restored.voltage.isNaN)
+
+        defaults.set(Data("{not-json".utf8), forKey: AppPersistence.knownDevicesKey)
+        XCTAssertTrue(AppPersistence(defaults: defaults).loadKnownDevices().isEmpty)
+    }
+
+    func testPersistenceDropsOnlyCorruptDeviceRecords() throws {
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let validID = UUID()
+        let identity = AppModel.CachedIdentity(
+            advertisedName: "Link-Power 2",
+            deviceInformationName: "BP4SL3V2",
+            macAddress: "DC:04:5A:EB:72:2B"
+        )
+        let validRecord = AppModel.KnownDevice(identifier: validID, identity: identity)
+        let validObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(validRecord))
+        let corruptObject: [String: Any] = [
+            "identifier": "not-a-uuid",
+            "identity": ["advertisedName": 42],
+        ]
+        let payload: [String: Any] = [
+            "schemaVersion": 1,
+            "devices": [validObject, corruptObject],
+        ]
+        defaults.set(try JSONSerialization.data(withJSONObject: payload), forKey: AppPersistence.knownDevicesKey)
+
+        let loaded = AppPersistence(defaults: defaults).loadKnownDevices()
+
+        XCTAssertEqual(loaded, [validID: identity])
+    }
+
+    func testPersistenceWritesVersionedDeviceEnvelope() throws {
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let persistence = AppPersistence(defaults: defaults)
+        let id = UUID()
+        let identity = AppModel.CachedIdentity(
+            advertisedName: "Link-Power 2",
+            deviceInformationName: nil,
+            macAddress: nil
+        )
+
+        persistence.saveKnownDevices([id: identity])
+
+        let data = try XCTUnwrap(defaults.data(forKey: AppPersistence.knownDevicesKey))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["schemaVersion"] as? Int, 1)
+        XCTAssertEqual((object["devices"] as? [Any])?.count, 1)
+    }
+
+    func testDCCardPendingPresentationFollowsRequestedTargetUntilTelemetryConfirms() async throws {
+        let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
+        let session = DeviceSession(transport: ReplayTransport(steps: [.reply(bytes: reply)]))
+
+        _ = try await session.perform(.setDC(true))
+
+        var state = await session.state
+        XCTAssertTrue(DashboardPendingPresentation.isDCPending(state.pendingMutations))
+        XCTAssertNil(state.dc, "Pending UI must not optimistically alter telemetry")
+
+        let confirmed = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
+        await session.receive(.dc(confirmed, timestamp: .zero))
+
+        state = await session.state
+        XCTAssertFalse(DashboardPendingPresentation.isDCPending(state.pendingMutations))
+        XCTAssertEqual(state.dc, confirmed)
+    }
+
     func testAppDeclaresGlobalDarkAppearance() {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "UIUserInterfaceStyle") as? String, "Dark")
     }

@@ -791,17 +791,18 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         rssi RSSI: NSNumber
     ) {
         let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
-        guard let mode = DiscoveryPolicy.classify(localName: localName, cachedPeripheralName: nil),
-              let localName
-        else { return }
+        guard let identity = DiscoveryPolicy.resolve(
+            advertisementLocalName: localName,
+            cachedPeripheralName: peripheral.name
+        ) else { return }
         discoveredPeripherals[peripheral.identifier] = peripheral
-        discoveredModes[peripheral.identifier] = mode
-        discoveredLocalNames[peripheral.identifier] = localName
+        discoveredModes[peripheral.identifier] = identity.mode
+        discoveredLocalNames[peripheral.identifier] = identity.localName
         eventSink(.discovered(DiscoveredDevice(
             id: peripheral.identifier,
-            localName: localName,
+            localName: identity.localName,
             rssi: RSSI.intValue,
-            mode: mode
+            mode: identity.mode
         )))
     }
 
@@ -1049,6 +1050,22 @@ private extension BluetoothDelegateBridge {
               callbackState.didWrite(scope: scope, characteristic: uuid) == .accepted
         else { return }
         if let error {
+            if case let .write(operationID, scope, characteristic, expectation?, continuation) = pendingIO {
+                var expectation = expectation
+                let isDisconnecting = peripheral.state == .disconnecting || peripheral.state == .disconnected
+                if expectation.didWriteFail(scope: scope, isDisconnecting: isDisconnecting)
+                    == .waitingForDisconnect
+                {
+                    self.pendingIO = .write(
+                        operationID: operationID,
+                        scope: scope,
+                        characteristic: characteristic,
+                        expectation: expectation,
+                        continuation: continuation
+                    )
+                    return
+                }
+            }
             self.pendingIO = nil
             resume(pendingIO, throwing: error)
             return
