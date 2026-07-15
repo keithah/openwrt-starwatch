@@ -38,7 +38,7 @@ final class HandshakeTests: XCTestCase {
         )))
 
         XCTAssertEqual(
-            CurrentTimeCodec.encode(date, calendar: calendar),
+            CurrentTimeCodec.encode(date, calendar: calendar, adjustReason: 1),
             Data([0xEA, 0x07, 7, 14, 15, 4, 5, 2, 128, 1])
         )
     }

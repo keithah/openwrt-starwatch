@@ -407,6 +407,30 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         }
     }
 
+    func readIfSupported(_ uuid: GATTUUID) async throws -> Data? {
+        let isSupported = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Bool, Error>) in
+            queue.async { [self] in
+                guard pendingIO == nil else {
+                    continuation.resume(throwing: BLETransportError.operationInProgress)
+                    return
+                }
+                guard let session else {
+                    continuation.resume(throwing: BLETransportError.notReady)
+                    return
+                }
+                guard lifecycle.externalIOAdmission(scope: session.scope) == .allowed else {
+                    continuation.resume(throwing: BLETransportError.notReady)
+                    return
+                }
+                let characteristic = session.characteristics[uuid.bluetoothUUID]
+                continuation.resume(returning: characteristic?.properties.contains(.read) == true)
+            }
+        }
+        guard isSupported else { return nil }
+        return try await read(uuid)
+    }
+
     private func cancel(operationID: UUID) {
         queue.async { [self] in
             if let pendingConnect, pendingConnect.operationID == operationID {

@@ -6,11 +6,14 @@ public enum ReplayStep: Sendable {
     case delay(Duration)
     case writeFailure(any Error & Sendable)
     case disconnect(error: any Error & Sendable)
+    case deviceTime(Date?)
+    case timeSync
 }
 public enum ReplayTransportError: Error, Equatable, Sendable {
     case exhausted
     case disconnected(String)
     case writeFailed(String)
+    case unexpectedStep
 }
 
 public enum ReconnectPolicy: Equatable, Sendable {
@@ -89,6 +92,33 @@ public actor ReplayTransport: DeviceTransport {
         }
     }
 
+    public func synchronizeDeviceTime() async throws {
+        beginTransaction()
+        do {
+            try await transactions.enqueue { [self] in
+                try await executeTimeSync()
+            }
+            endTransaction()
+        } catch {
+            endTransaction()
+            throw error
+        }
+    }
+
+    public func readDeviceTimeIfSupported() async throws -> Date? {
+        beginTransaction()
+        do {
+            let date = try await transactions.enqueue { [self] in
+                try await executeDeviceTimeRead()
+            }
+            endTransaction()
+            return date
+        } catch {
+            endTransaction()
+            throw error
+        }
+    }
+
     private func beginTransaction() {
         pendingTransactionCount += 1
         maximumPendingTransactionCount = max(
@@ -134,6 +164,8 @@ public actor ReplayTransport: DeviceTransport {
                     reconnectPolicy = .disarmed
                 }
                 return .sent
+            case .deviceTime, .timeSync:
+                throw ReplayTransportError.unexpectedStep
             }
         }
     }
@@ -149,9 +181,41 @@ public actor ReplayTransport: DeviceTransport {
                 continuation.yield(event)
             case let .delay(duration):
                 try await clock.sleep(for: duration)
-            case .reply, .writeFailure, .disconnect:
+            case .reply, .writeFailure, .disconnect, .deviceTime, .timeSync:
                 steps.insert(step, at: 0)
                 return
+            }
+        }
+    }
+
+    private func executeTimeSync() async throws {
+        beginExecution()
+        defer { endExecution() }
+
+        while true {
+            switch try nextStep() {
+            case let .delay(duration):
+                try await clock.sleep(for: duration)
+            case .timeSync:
+                return
+            case .reply, .telemetry, .writeFailure, .disconnect, .deviceTime:
+                throw ReplayTransportError.unexpectedStep
+            }
+        }
+    }
+
+    private func executeDeviceTimeRead() async throws -> Date? {
+        beginExecution()
+        defer { endExecution() }
+
+        while true {
+            switch try nextStep() {
+            case let .delay(duration):
+                try await clock.sleep(for: duration)
+            case let .deviceTime(date):
+                return date
+            case .reply, .telemetry, .writeFailure, .disconnect, .timeSync:
+                throw ReplayTransportError.unexpectedStep
             }
         }
     }

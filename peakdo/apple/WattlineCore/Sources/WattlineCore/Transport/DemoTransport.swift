@@ -87,6 +87,7 @@ public actor DemoTransport: DeviceTransport {
     private var bypassEnabled = false
     private var chargerConnected = false
     private var limits = DemoTransport.initialLimits
+    private var simulatedDeviceTime = Date()
 
     public private(set) var snapshot: DemoSnapshot
     public private(set) var pendingTransactionCount = 0
@@ -182,12 +183,47 @@ public actor DemoTransport: DeviceTransport {
         }
     }
 
+    public func synchronizeDeviceTime() async throws {
+        beginTransaction()
+        do {
+            try await transactions.enqueue { [self] in
+                await updateSimulatedDeviceTime()
+            }
+            endTransaction()
+        } catch {
+            endTransaction()
+            throw error
+        }
+    }
+
+    public func readDeviceTimeIfSupported() async throws -> Date? {
+        beginTransaction()
+        do {
+            let date = try await transactions.enqueue { [self] in
+                await currentSimulatedDeviceTime()
+            }
+            endTransaction()
+            return date
+        } catch {
+            endTransaction()
+            throw error
+        }
+    }
+
     public func setChargerConnected(_ connected: Bool) async {
         beginTransaction()
         _ = try? await transactions.enqueue { [self] in
             await executeChargerConnection(connected)
         }
         endTransaction()
+    }
+
+    private func updateSimulatedDeviceTime() {
+        simulatedDeviceTime = Date()
+    }
+
+    private func currentSimulatedDeviceTime() -> Date {
+        simulatedDeviceTime
     }
 
     private func execute(_ command: DeviceCommand) async throws -> CommandOutcome {

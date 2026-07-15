@@ -280,7 +280,7 @@ struct BLEHandshakeDriver: Sendable {
                 }
                 return write(
                     step,
-                    bytes: CurrentTimeCodec.encode(now(), calendar: calendar),
+                    bytes: CurrentTimeCodec.encode(now(), calendar: calendar, adjustReason: 1),
                     to: .currentTime,
                     readAfterWrite: false
                 )

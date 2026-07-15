@@ -125,6 +125,57 @@ final class ReplayTransportTests: XCTestCase {
         XCTAssertEqual(finalPending, 0)
         XCTAssertEqual(maximumInFlight, 1)
     }
+
+    func testManualTimeOperationsConsumeExplicitReplaySteps() async throws {
+        let date = Date(timeIntervalSince1970: 1_720_951_445.5)
+        let replay = ReplayTransport(steps: [
+            .timeSync,
+            .deviceTime(date),
+            .deviceTime(nil),
+        ])
+
+        try await replay.synchronizeDeviceTime()
+        let supportedTime = try await replay.readDeviceTimeIfSupported()
+        let unsupportedTime = try await replay.readDeviceTimeIfSupported()
+
+        XCTAssertEqual(supportedTime, date)
+        XCTAssertNil(unsupportedTime)
+    }
+
+    func testManualTimeOperationFailsWhenReplayStepIsOutOfOrder() async {
+        let replay = ReplayTransport(steps: [.deviceTime(Date(timeIntervalSince1970: 0))])
+
+        do {
+            try await replay.synchronizeDeviceTime()
+            XCTFail("Expected out-of-order replay step to throw")
+        } catch {
+            XCTAssertEqual(error as? ReplayTransportError, .unexpectedStep)
+        }
+    }
+
+    func testManualTimeOperationsShareSerializedTransactionQueue() async throws {
+        let clock = TestDeviceClock()
+        let date = Date(timeIntervalSince1970: 1_720_951_445.5)
+        let replay = ReplayTransport(
+            steps: [.delay(.seconds(1)), .timeSync, .deviceTime(date)],
+            clock: clock
+        )
+
+        let sync = Task { try await replay.synchronizeDeviceTime() }
+        await clock.waitForSleepers(1)
+        let read = Task { try await replay.readDeviceTimeIfSupported() }
+        while await replay.pendingTransactionCount < 2 { await Task.yield() }
+
+        await clock.advance(by: .seconds(1))
+        try await sync.value
+        let readTime = try await read.value
+        let maximumInFlightCount = await replay.maximumInFlightCount
+        let pendingTransactionCount = await replay.pendingTransactionCount
+
+        XCTAssertEqual(readTime, date)
+        XCTAssertEqual(maximumInFlightCount, 1)
+        XCTAssertEqual(pendingTransactionCount, 0)
+    }
 }
 
 private enum ReplayTestError: Error, Sendable {

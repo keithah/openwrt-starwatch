@@ -69,6 +69,27 @@ public actor BLETransport: DeviceTransport {
         }
     }
 
+    public func synchronizeDeviceTime() async throws {
+        beginTransaction()
+        defer { endTransaction() }
+        try await transactions.enqueue { [bridge] in
+            try await bridge.write(
+                CurrentTimeCodec.encode(Date(), adjustReason: 1),
+                to: .currentTime,
+                disconnectPolicy: .none
+            )
+        }
+    }
+
+    public func readDeviceTimeIfSupported() async throws -> Date? {
+        beginTransaction()
+        defer { endTransaction() }
+        return try await transactions.enqueue { [bridge] in
+            guard let bytes = try await bridge.readIfSupported(.currentTime) else { return nil }
+            return try CurrentTimeCodec.decode(bytes)
+        }
+    }
+
     private func beginTransaction() {
         pendingTransactionCount += 1
         eventContinuation.yield(.transactionDepth(pendingTransactionCount))

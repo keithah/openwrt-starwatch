@@ -53,6 +53,8 @@ public protocol DeviceTransport: Sendable {
     func disconnect() async
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome
     func refreshTelemetry() async throws
+    func synchronizeDeviceTime() async throws
+    func readDeviceTimeIfSupported() async throws -> Date?
 }
 
 public protocol DeviceClock: Sendable {
