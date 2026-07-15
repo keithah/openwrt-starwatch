@@ -452,7 +452,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
             driver: BLEHandshakeDriver(
                 scope: scope,
                 advertisedName: advertisedName,
-                now: now()
+                now: now
             )
         )
         discoveredPeripherals[peripheral.identifier] = peripheral

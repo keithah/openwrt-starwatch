@@ -45,9 +45,11 @@ final class HandshakeTests: XCTestCase {
 
     func testScriptedDriverRunsExactApplicationHandshakeThroughSubscriptionAcknowledgements() throws {
         let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        let date = fixedDate
+        let calendar = utcGregorian
         var driver = BLEHandshakeDriver(
             scope: scope, advertisedName: "Link-Power-1",
-            now: fixedDate, calendar: utcGregorian
+            now: { date }, calendar: calendar
         )
         let all = Set(GATTUUID.allCases)
 
@@ -129,7 +131,9 @@ final class HandshakeTests: XCTestCase {
 
     func testOTADriverPublishesWithoutAppCharacteristicAccess() {
         let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
-        var driver = BLEHandshakeDriver(scope: scope, advertisedName: nil, now: fixedDate, calendar: utcGregorian)
+        let date = fixedDate
+        let calendar = utcGregorian
+        var driver = BLEHandshakeDriver(scope: scope, advertisedName: nil, now: { date }, calendar: calendar)
         XCTAssertEqual(driver.start(), .settle)
         XCTAssertEqual(driver.settleCompleted(scope: scope), .discoverServices)
         XCTAssertEqual(driver.characteristicsDiscovered(scope: scope, available: [.ota]), .write(Data([0x84]), to: .ota, readAfterWrite: true))
@@ -170,7 +174,9 @@ final class HandshakeTests: XCTestCase {
     func testCancelledHandshakeGenerationCannotCompleteNewConnection() {
         let current = BLEConnectionScope(peripheralID: UUID(), generation: 2)
         let stale = BLEConnectionScope(peripheralID: current.peripheralID, generation: 1)
-        var driver = BLEHandshakeDriver(scope: current, advertisedName: nil, now: fixedDate, calendar: utcGregorian)
+        let date = fixedDate
+        let calendar = utcGregorian
+        var driver = BLEHandshakeDriver(scope: current, advertisedName: nil, now: { date }, calendar: calendar)
         XCTAssertEqual(driver.start(), .settle)
         XCTAssertNil(driver.settleCompleted(scope: stale))
         XCTAssertEqual(driver.settleCompleted(scope: current), .discoverServices)
@@ -193,6 +199,42 @@ final class HandshakeTests: XCTestCase {
         XCTAssertNil(HandshakeAdvertisementPolicy.advertisedName(freshLocalName: nil))
     }
 
+    func testCurrentTimeSamplesProviderOnlyWhenWriteActionIsEnacted() {
+        let provider = LockedDateProvider(initial: Date(timeIntervalSince1970: 0))
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var driver = BLEHandshakeDriver(
+            scope: scope,
+            advertisedName: nil,
+            now: { provider.current() },
+            calendar: utcGregorian
+        )
+
+        _ = driver.start()
+        _ = driver.settleCompleted(scope: scope)
+        _ = driver.characteristicsDiscovered(
+            scope: scope,
+            available: [.ota, .command, .currentTime]
+        )
+        _ = driver.writeCompleted(scope: scope, uuid: .ota, succeeded: true)
+        _ = driver.readCompleted(scope: scope, uuid: .ota, value: appInfo)
+        _ = driver.writeCompleted(scope: scope, uuid: .command, succeeded: true)
+
+        XCTAssertEqual(provider.callCount, 0)
+        provider.set(fixedDate)
+        let action = driver.readCompleted(
+            scope: scope,
+            uuid: .command,
+            value: Data([0xFE, 0x80, 0, 0, 0, 0, 0])
+        )
+        _ = driver.writeCompleted(scope: scope, uuid: .command, succeeded: true)
+        XCTAssertEqual(action, .write(Data([0x10, 0x00]), to: .command, readAfterWrite: true))
+        XCTAssertEqual(
+            driver.readCompleted(scope: scope, uuid: .command, value: nil),
+            .write(Data([0xEA, 0x07, 7, 14, 15, 4, 5, 2, 128, 1]), to: .currentTime, readAfterWrite: false)
+        )
+        XCTAssertEqual(provider.callCount, 1)
+    }
+
     private var fixedDate: Date { utcGregorian.date(from: DateComponents(year: 2026, month: 7, day: 14, hour: 15, minute: 4, second: 5, nanosecond: 500_000_000))! }
     private var utcGregorian: Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -210,7 +252,7 @@ private struct DriverHarness {
     init(features: FeatureFlags) {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        driver = BLEHandshakeDriver(scope: scope, advertisedName: nil, now: Date(timeIntervalSince1970: 0), calendar: calendar)
+        driver = BLEHandshakeDriver(scope: scope, advertisedName: nil, now: { Date(timeIntervalSince1970: 0) }, calendar: calendar)
         _ = driver.start()
         _ = driver.settleCompleted(scope: scope)
         _ = driver.characteristicsDiscovered(scope: scope, available: [.ota, .command, .currentTime, .dcPortStatus])
@@ -226,5 +268,22 @@ private struct DriverHarness {
 
     mutating func advanceToFirstSubscription() -> BLEHandshakeAction? {
         driver.readCompleted(scope: scope, uuid: .dcPortStatus, value: Data())
+    }
+}
+
+private final class LockedDateProvider: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+    private var calls = 0
+
+    init(initial: Date) { date = initial }
+
+    var callCount: Int { lock.withLock { calls } }
+    func set(_ date: Date) { lock.withLock { self.date = date } }
+    func current() -> Date {
+        lock.withLock {
+            calls += 1
+            return date
+        }
     }
 }

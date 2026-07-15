@@ -83,7 +83,7 @@ struct BLEHandshakeDriver: Sendable {
     }
 
     private let scope: BLEConnectionScope
-    private let now: Date
+    private let now: @Sendable () -> Date
     private let calendar: Calendar
     private var state: State = .idle
     private var available: Set<GATTUUID> = []
@@ -101,7 +101,7 @@ struct BLEHandshakeDriver: Sendable {
     init(
         scope: BLEConnectionScope,
         advertisedName: String?,
-        now: Date,
+        now: @escaping @Sendable () -> Date,
         calendar: Calendar = CurrentTimeCodec.defaultCalendar()
     ) {
         self.scope = scope
@@ -280,7 +280,7 @@ struct BLEHandshakeDriver: Sendable {
                 }
                 return write(
                     step,
-                    bytes: CurrentTimeCodec.encode(now, calendar: calendar),
+                    bytes: CurrentTimeCodec.encode(now(), calendar: calendar),
                     to: .currentTime,
                     readAfterWrite: false
                 )
