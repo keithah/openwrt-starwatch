@@ -21,7 +21,13 @@ public struct OTAInfo: Equatable, Sendable {
 }
 
 public enum CurrentTimeCodec {
-    public static func encode(_ date: Date, calendar: Calendar = .current) -> Data {
+    public static func defaultCalendar() -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        return calendar
+    }
+
+    public static func encode(_ date: Date, calendar: Calendar = defaultCalendar()) -> Data {
         let components = calendar.dateComponents(
             [.year, .month, .day, .hour, .minute, .second, .weekday, .nanosecond],
             from: date

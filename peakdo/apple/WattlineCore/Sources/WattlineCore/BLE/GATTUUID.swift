@@ -138,6 +138,7 @@ public struct BLEBridgeCallbackStateMachine: Sendable {
     private enum IOPhase: Sendable {
         case write(followedByRead: Bool)
         case update
+        case notification
     }
 
     private struct PendingIO: Sendable {
@@ -219,6 +220,14 @@ public struct BLEBridgeCallbackStateMachine: Sendable {
         pendingIO = PendingIO(scope: scope, characteristic: characteristic, phase: .update)
     }
 
+    public mutating func expectNotification(
+        scope: BLEConnectionScope,
+        characteristic: GATTUUID
+    ) {
+        guard scope == activeScope else { return }
+        pendingIO = PendingIO(scope: scope, characteristic: characteristic, phase: .notification)
+    }
+
     public mutating func didWrite(
         scope: BLEConnectionScope,
         characteristic: GATTUUID
@@ -244,6 +253,21 @@ public struct BLEBridgeCallbackStateMachine: Sendable {
               scope == activeScope,
               pendingIO.characteristic == characteristic,
               case .update = pendingIO.phase
+        else { return .ignored }
+        self.pendingIO = nil
+        return .accepted
+    }
+
+
+    public mutating func didUpdateNotification(
+        scope: BLEConnectionScope,
+        characteristic: GATTUUID
+    ) -> BLECallbackDisposition {
+        guard let pendingIO,
+              pendingIO.scope == scope,
+              scope == activeScope,
+              pendingIO.characteristic == characteristic,
+              case .notification = pendingIO.phase
         else { return .ignored }
         self.pendingIO = nil
         return .accepted

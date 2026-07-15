@@ -43,42 +43,102 @@ final class HandshakeTests: XCTestCase {
         )
     }
 
-    func testApplicationHandshakeOrderUsesCapabilitiesForTelemetry() {
-        let capabilities = DeviceCapabilities(features: [.batteryCapacity, .dcPort, .usbPort])
+    func testScriptedDriverRunsExactApplicationHandshakeThroughSubscriptionAcknowledgements() throws {
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var driver = BLEHandshakeDriver(
+            scope: scope, advertisedName: "Link-Power-1",
+            now: fixedDate, calendar: utcGregorian
+        )
+        let all = Set(GATTUUID.allCases)
 
-        XCTAssertEqual(HandshakePlan.operations(mode: .application, capabilities: capabilities), [
-            .settle, .discoverServices, .otaInfo,
-            .readDIS(.modelNumber), .readDIS(.hardwareRevision),
-            .readDIS(.firmwareRevision), .readDIS(.softwareRevision),
-            .features, .deviceID, .writeCurrentTime,
-            .readTelemetry(.extendedBatteryInfo), .subscribe(.extendedBatteryInfo),
-            .readTelemetry(.dcPortStatus), .subscribe(.dcPortStatus),
-            .readTelemetry(.typeCPortStatus), .subscribe(.typeCPortStatus),
-            .publishSnapshot, .connected,
-        ])
+        XCTAssertEqual(driver.start(), .settle)
+        XCTAssertEqual(driver.settleCompleted(scope: scope), .discoverServices)
+        XCTAssertEqual(driver.characteristicsDiscovered(scope: scope, available: all), .write(
+            Data([0x84]), to: .ota, readAfterWrite: true
+        ))
+        XCTAssertEqual(driver.writeCompleted(scope: scope, uuid: .ota, succeeded: true), .read(.ota))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .ota, value: appInfo), .read(.modelNumber))
+
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .modelNumber, value: Data("BP4SL3V2".utf8)), .read(.hardwareRevision))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .hardwareRevision, value: Data("V5#0305".utf8)), .read(.firmwareRevision))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .firmwareRevision, value: Data("2.0.2".utf8)), .read(.softwareRevision))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .softwareRevision, value: Data("1.4.9".utf8)), .write(
+            Data([0xFE, 0x00]), to: .command, readAfterWrite: true
+        ))
+        XCTAssertEqual(driver.writeCompleted(scope: scope, uuid: .command, succeeded: true), .read(.command))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .command, value: Data([0xFE, 0x80, 0, 0x30, 1, 0, 0])), .write(
+            Data([0x10, 0x00]), to: .command, readAfterWrite: true
+        ))
+        XCTAssertEqual(driver.writeCompleted(scope: scope, uuid: .command, succeeded: true), .read(.command))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .command, value: Data([0x10, 0x80, 0, 0x2B, 0x72, 0xEB, 0x5A, 0x04, 0xDC])), .write(
+            Data([0xEA, 0x07, 7, 14, 15, 4, 5, 2, 128, 1]), to: .currentTime, readAfterWrite: false
+        ))
+        XCTAssertEqual(driver.writeCompleted(scope: scope, uuid: .currentTime, succeeded: true), .read(.extendedBatteryInfo))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .extendedBatteryInfo, value: Data()), .subscribe(.extendedBatteryInfo))
+        XCTAssertEqual(driver.notificationStateUpdated(scope: scope, uuid: .extendedBatteryInfo, succeeded: true, isNotifying: true), .read(.dcPortStatus))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .dcPortStatus, value: Data()), .subscribe(.dcPortStatus))
+        XCTAssertEqual(driver.notificationStateUpdated(scope: scope, uuid: .dcPortStatus, succeeded: true, isNotifying: true), .read(.typeCPortStatus))
+        XCTAssertEqual(driver.readCompleted(scope: scope, uuid: .typeCPortStatus, value: Data()), .subscribe(.typeCPortStatus))
+        guard case let .publish(snapshot) = driver.notificationStateUpdated(
+            scope: scope, uuid: .typeCPortStatus, succeeded: true, isNotifying: true
+        ) else { return XCTFail("Expected snapshot") }
+        XCTAssertEqual(snapshot.rawFeatures, 0x000130)
+        XCTAssertEqual(snapshot.macAddress, "DC:04:5A:EB:72:2B")
+        XCTAssertEqual(driver.eventEmitted(scope: scope), .connected(scope.peripheralID))
     }
 
-    func testLPPHandshakeSubscribesOnlyDC() {
-        let capabilities = CapabilityResolver.resolve(features: nil, cid: 0x0201, model: nil)
-        let operations = HandshakePlan.operations(mode: .application, capabilities: capabilities)
-
-        XCTAssertEqual(operations.filter(\.isTelemetry), [
-            .readTelemetry(.dcPortStatus), .subscribe(.dcPortStatus),
-        ])
+    func testSubscriptionFailureCannotPublishSnapshotOrConnected() {
+        var harness = DriverHarness(features: [.dcPort])
+        XCTAssertEqual(harness.advanceToFirstSubscription(), .subscribe(.dcPortStatus))
+        XCTAssertEqual(
+            harness.driver.notificationStateUpdated(
+                scope: harness.scope, uuid: .dcPortStatus, succeeded: false, isNotifying: false
+            ),
+            .fail(.subscriptionFailed(.dcPortStatus))
+        )
+        XCTAssertNil(harness.driver.eventEmitted(scope: harness.scope))
     }
 
-    func testLP2HandshakeUsesAllTelemetryChannels() {
-        let capabilities = CapabilityResolver.resolve(features: nil, cid: 0x0305, model: nil)
-        let operations = HandshakePlan.operations(mode: .application, capabilities: capabilities)
-
-        XCTAssertEqual(operations.filter(\.isTelemetry).count, 6)
+    func testStaleGenerationSubscriptionCallbackCannotAdvance() {
+        var harness = DriverHarness(features: [.dcPort])
+        XCTAssertEqual(harness.advanceToFirstSubscription(), .subscribe(.dcPortStatus))
+        let stale = BLEConnectionScope(
+            peripheralID: harness.scope.peripheralID,
+            generation: harness.scope.generation - 1
+        )
+        XCTAssertNil(harness.driver.notificationStateUpdated(
+            scope: stale, uuid: .dcPortStatus, succeeded: true, isNotifying: true
+        ))
+        guard case .publish = harness.driver.notificationStateUpdated(
+            scope: harness.scope, uuid: .dcPortStatus, succeeded: true, isNotifying: true
+        ) else { return XCTFail("Expected current subscription ACK to advance") }
     }
 
-    func testBootloaderHandshakeDoesNotUseAppCommandsOrTelemetry() {
-        XCTAssertEqual(HandshakePlan.operations(
-            mode: .ota,
-            capabilities: DeviceCapabilities(features: [])
-        ), [.settle, .discoverServices, .otaInfo, .publishSnapshot, .connected])
+    func testNotificationCallbackExpectationChecksGenerationAndCharacteristic() {
+        let peripheralID = UUID()
+        var callbacks = BLEBridgeCallbackStateMachine()
+        let stale = callbacks.beginConnection(peripheralID: peripheralID)
+        let current = callbacks.beginConnection(peripheralID: peripheralID)
+        callbacks.expectNotification(scope: current, characteristic: .dcPortStatus)
+
+        XCTAssertEqual(callbacks.didUpdateNotification(scope: stale, characteristic: .dcPortStatus), .ignored)
+        XCTAssertEqual(callbacks.didUpdateNotification(scope: current, characteristic: .typeCPortStatus), .ignored)
+        XCTAssertEqual(callbacks.didUpdateNotification(scope: current, characteristic: .dcPortStatus), .accepted)
+        XCTAssertEqual(callbacks.didUpdateNotification(scope: current, characteristic: .dcPortStatus), .ignored)
+    }
+
+    func testOTADriverPublishesWithoutAppCharacteristicAccess() {
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var driver = BLEHandshakeDriver(scope: scope, advertisedName: nil, now: fixedDate, calendar: utcGregorian)
+        XCTAssertEqual(driver.start(), .settle)
+        XCTAssertEqual(driver.settleCompleted(scope: scope), .discoverServices)
+        XCTAssertEqual(driver.characteristicsDiscovered(scope: scope, available: [.ota]), .write(Data([0x84]), to: .ota, readAfterWrite: true))
+        XCTAssertEqual(driver.writeCompleted(scope: scope, uuid: .ota, succeeded: true), .read(.ota))
+        guard case let .publish(snapshot) = driver.readCompleted(scope: scope, uuid: .ota, value: bootloaderInfo) else {
+            return XCTFail("Expected OTA snapshot")
+        }
+        XCTAssertEqual(snapshot.mode, .ota)
+        XCTAssertEqual(driver.eventEmitted(scope: scope), .connected(scope.peripheralID))
     }
 
     func testFeaturesZeroIsAuthoritativeAndFailuresFallBack() throws {
@@ -108,36 +168,63 @@ final class HandshakeTests: XCTestCase {
     }
 
     func testCancelledHandshakeGenerationCannotCompleteNewConnection() {
-        let peripheralID = UUID()
-        var lifecycle = BLESessionLifecycleStateMachine()
-        var callbacks = BLEBridgeCallbackStateMachine()
-
-        let cancelled = callbacks.beginConnection(peripheralID: peripheralID)
-        XCTAssertTrue(lifecycle.beginConnection(scope: cancelled))
-        XCTAssertTrue(lifecycle.didConnect(scope: cancelled))
-        callbacks.expectWrite(scope: cancelled, characteristic: .ota, followedByRead: true)
-        XCTAssertTrue(lifecycle.beginTeardown(scope: cancelled))
-        XCTAssertEqual(callbacks.didDisconnect(scope: cancelled), .accepted)
-        XCTAssertEqual(lifecycle.didDisconnect(scope: cancelled), .accepted)
-
-        let current = callbacks.beginConnection(peripheralID: peripheralID)
-        XCTAssertTrue(lifecycle.beginConnection(scope: current))
-        XCTAssertTrue(lifecycle.didConnect(scope: current))
-        callbacks.expectWrite(scope: current, characteristic: .ota, followedByRead: true)
-
-        XCTAssertEqual(callbacks.didWrite(scope: cancelled, characteristic: .ota), .ignored)
-        XCTAssertEqual(callbacks.didUpdate(scope: cancelled, characteristic: .ota), .ignored)
-        XCTAssertEqual(callbacks.didWrite(scope: current, characteristic: .ota), .accepted)
-        XCTAssertEqual(callbacks.didUpdate(scope: current, characteristic: .ota), .accepted)
-        XCTAssertTrue(lifecycle.didFinishSetup(scope: current))
+        let current = BLEConnectionScope(peripheralID: UUID(), generation: 2)
+        let stale = BLEConnectionScope(peripheralID: current.peripheralID, generation: 1)
+        var driver = BLEHandshakeDriver(scope: current, advertisedName: nil, now: fixedDate, calendar: utcGregorian)
+        XCTAssertEqual(driver.start(), .settle)
+        XCTAssertNil(driver.settleCompleted(scope: stale))
+        XCTAssertEqual(driver.settleCompleted(scope: current), .discoverServices)
+        XCTAssertEqual(driver.characteristicsDiscovered(scope: current, available: [.ota]), .write(Data([0x84]), to: .ota, readAfterWrite: true))
+        XCTAssertNil(driver.writeCompleted(scope: stale, uuid: .ota, succeeded: true))
+        XCTAssertEqual(driver.writeCompleted(scope: current, uuid: .ota, succeeded: true), .read(.ota))
+        XCTAssertNil(driver.readCompleted(scope: stale, uuid: .ota, value: bootloaderInfo))
+        guard case .publish = driver.readCompleted(scope: current, uuid: .ota, value: bootloaderInfo) else {
+            return XCTFail("Expected current generation to advance")
+        }
     }
+
+    func testDefaultCurrentTimeCalendarIsGregorian() {
+        XCTAssertEqual(CurrentTimeCodec.defaultCalendar().identifier, .gregorian)
+        XCTAssertEqual(CurrentTimeCodec.defaultCalendar().timeZone, .current)
+    }
+
+    func testAdvertisedNameRequiresFreshAdvertisementLocalName() {
+        XCTAssertEqual(HandshakeAdvertisementPolicy.advertisedName(freshLocalName: "Link-Power-1"), "Link-Power-1")
+        XCTAssertNil(HandshakeAdvertisementPolicy.advertisedName(freshLocalName: nil))
+    }
+
+    private var fixedDate: Date { utcGregorian.date(from: DateComponents(year: 2026, month: 7, day: 14, hour: 15, minute: 4, second: 5, nanosecond: 500_000_000))! }
+    private var utcGregorian: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+    private var appInfo: Data { Data([0x01] + Array(repeating: 0, count: 12) + [0x05, 0x03]) }
+    private var bootloaderInfo: Data { Data([0x02] + Array(repeating: 0, count: 12) + [0x05, 0x03]) }
 }
 
-private extension HandshakeOperation {
-    var isTelemetry: Bool {
-        switch self {
-        case .readTelemetry, .subscribe: true
-        default: false
-        }
+private struct DriverHarness {
+    let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+    var driver: BLEHandshakeDriver
+
+    init(features: FeatureFlags) {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        driver = BLEHandshakeDriver(scope: scope, advertisedName: nil, now: Date(timeIntervalSince1970: 0), calendar: calendar)
+        _ = driver.start()
+        _ = driver.settleCompleted(scope: scope)
+        _ = driver.characteristicsDiscovered(scope: scope, available: [.ota, .command, .currentTime, .dcPortStatus])
+        _ = driver.writeCompleted(scope: scope, uuid: .ota, succeeded: true)
+        _ = driver.readCompleted(scope: scope, uuid: .ota, value: Data([1]))
+        _ = driver.writeCompleted(scope: scope, uuid: .command, succeeded: true)
+        let raw = features.rawValue
+        _ = driver.readCompleted(scope: scope, uuid: .command, value: Data([0xFE, 0x80, 0, UInt8(raw), UInt8(raw >> 8), UInt8(raw >> 16), UInt8(raw >> 24)]))
+        _ = driver.writeCompleted(scope: scope, uuid: .command, succeeded: true)
+        _ = driver.readCompleted(scope: scope, uuid: .command, value: nil)
+        _ = driver.writeCompleted(scope: scope, uuid: .currentTime, succeeded: true)
+    }
+
+    mutating func advanceToFirstSubscription() -> BLEHandshakeAction? {
+        driver.readCompleted(scope: scope, uuid: .dcPortStatus, value: Data())
     }
 }
