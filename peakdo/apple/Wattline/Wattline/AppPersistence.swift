@@ -85,18 +85,20 @@ final class AppPersistence {
         }
     }
 
+    @discardableResult
     func saveTelemetry(
         battery: PersistedObservation<BatteryStatus>?,
         dc: PersistedObservation<DCPortStatus>?,
         typeC: PersistedObservation<TypeCPortStatus>?,
         for identifier: UUID
-    ) {
+    ) -> Bool {
         let didSave = updatePersistedState(for: identifier) { state in
             if let battery { state.battery = battery }
             if let dc { state.dc = dc }
             if let typeC { state.typeC = typeC }
         }
         if didSave { telemetryFlushCount += 1 }
+        return didSave
     }
 
     func resetOnboarding() {

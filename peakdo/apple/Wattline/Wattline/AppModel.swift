@@ -565,6 +565,7 @@ final class AppModel {
                     isOTAMode: isOTAMode
                 )
                 persistence.saveResolvedFeatures(capabilities.features.rawValue, for: snapshot.peripheralID)
+                flushPendingTelemetryPersistence()
                 connectedName = knownDevices[snapshot.peripheralID]?.name
             }
             if isOTAMode {
@@ -582,16 +583,16 @@ final class AppModel {
             } else {
                 otaRecoveryPeripheralID = nil
             }
-        case let .battery(value, timestamp):
-            queueTelemetryPersistence(timestamp: timestamp) { pending, observedAt in
+        case let .battery(value, _):
+            queueTelemetryPersistence { pending, observedAt in
                 pending.battery = PersistedObservation(value: value, observedAt: observedAt)
             }
-        case let .dc(value, timestamp):
-            queueTelemetryPersistence(timestamp: timestamp) { pending, observedAt in
+        case let .dc(value, _):
+            queueTelemetryPersistence { pending, observedAt in
                 pending.dc = PersistedObservation(value: value, observedAt: observedAt)
             }
-        case let .typeC(value, timestamp):
-            queueTelemetryPersistence(timestamp: timestamp) { pending, observedAt in
+        case let .typeC(value, _):
+            queueTelemetryPersistence { pending, observedAt in
                 pending.typeC = PersistedObservation(value: value, observedAt: observedAt)
             }
         case .transactionDepth:
@@ -620,21 +621,18 @@ final class AppModel {
     }
 
     private func queueTelemetryPersistence(
-        timestamp: DeviceTimestamp,
         update: (inout PendingTelemetryPersistence, Date) -> Void
     ) {
         guard !isDemo, let selectedPeripheralID else { return }
         if let pendingTelemetryPersistence,
            pendingTelemetryPersistence.identifier != selectedPeripheralID
-            || pendingTelemetryPersistence.transportGeneration != transportGeneration
-            || pendingTelemetryPersistence.timestamp != timestamp {
+            || pendingTelemetryPersistence.transportGeneration != transportGeneration {
             flushPendingTelemetryPersistence()
         }
         if pendingTelemetryPersistence == nil {
             pendingTelemetryPersistence = PendingTelemetryPersistence(
                 identifier: selectedPeripheralID,
-                transportGeneration: transportGeneration,
-                timestamp: timestamp
+                transportGeneration: transportGeneration
             )
         }
         update(&pendingTelemetryPersistence!, persistence.currentDate)
@@ -649,34 +647,37 @@ final class AppModel {
                 return
             }
             guard let self, telemetryPersistenceGeneration == generation else { return }
-            flushPendingTelemetryPersistence()
+            flushPendingTelemetryPersistence(retainIfDeviceUnknown: true)
         }
     }
 
-    private func flushPendingTelemetryPersistence() {
+    private func flushPendingTelemetryPersistence(retainIfDeviceUnknown: Bool = false) {
         guard let pending = pendingTelemetryPersistence else { return }
-        pendingTelemetryPersistence = nil
-        telemetryPersistenceTask = nil
-        persistence.saveTelemetry(
+        let didSave = persistence.saveTelemetry(
             battery: pending.battery,
             dc: pending.dc,
             typeC: pending.typeC,
             for: pending.identifier
         )
+        guard didSave || !retainIfDeviceUnknown else {
+            telemetryPersistenceTask = nil
+            return
+        }
+        telemetryPersistenceTask?.cancel()
+        telemetryPersistenceTask = nil
+        pendingTelemetryPersistence = nil
     }
 
     private struct PendingTelemetryPersistence {
         let identifier: UUID
         let transportGeneration: UInt
-        let timestamp: DeviceTimestamp
         var battery: PersistedObservation<BatteryStatus>?
         var dc: PersistedObservation<DCPortStatus>?
         var typeC: PersistedObservation<TypeCPortStatus>?
 
-        init(identifier: UUID, transportGeneration: UInt, timestamp: DeviceTimestamp) {
+        init(identifier: UUID, transportGeneration: UInt) {
             self.identifier = identifier
             self.transportGeneration = transportGeneration
-            self.timestamp = timestamp
         }
     }
 

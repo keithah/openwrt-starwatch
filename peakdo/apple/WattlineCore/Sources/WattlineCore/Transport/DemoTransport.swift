@@ -77,6 +77,7 @@ public actor DemoTransport: DeviceTransport {
 
     private let continuation: AsyncStream<DeviceEvent>.Continuation
     private let clock: any DeviceClock
+    private let typeCOutputCurrent: Double
     private let transactions = SerializedTransactions()
     private var random: SeededGenerator
     private var telemetryTask: Task<Void, Never>?
@@ -91,18 +92,24 @@ public actor DemoTransport: DeviceTransport {
     public private(set) var pendingTransactionCount = 0
     public private(set) var maximumPendingTransactionCount = 0
 
-    public init(seed: UInt64, clock: any DeviceClock = ContinuousDeviceClock()) {
+    public init(
+        seed: UInt64,
+        clock: any DeviceClock = ContinuousDeviceClock(),
+        typeCOutputCurrent: Double = 1.4
+    ) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
         events = pair.stream
         continuation = pair.continuation
         self.clock = clock
+        self.typeCOutputCurrent = typeCOutputCurrent
         random = SeededGenerator(seed: seed)
         snapshot = Self.makeSnapshot(
             dcEnabled: true,
             typeCOutputPreferred: true,
             bypassEnabled: false,
             chargerConnected: false,
-            limits: Self.initialLimits
+            limits: Self.initialLimits,
+            typeCOutputCurrent: typeCOutputCurrent
         )
     }
 
@@ -294,6 +301,7 @@ public actor DemoTransport: DeviceTransport {
             bypassEnabled: bypassEnabled,
             chargerConnected: chargerConnected,
             limits: limits,
+            typeCOutputCurrent: typeCOutputCurrent,
             jitter: jittered ? { [self] value in random.jitter(value) } : nil
         )
     }
@@ -341,6 +349,7 @@ public actor DemoTransport: DeviceTransport {
         bypassEnabled: Bool,
         chargerConnected: Bool,
         limits: [PowerLimitType: PowerLimitLevel],
+        typeCOutputCurrent: Double,
         jitter: ((Double) -> Double)? = nil
     ) -> DemoSnapshot {
         let vary = jitter ?? { $0 }
@@ -379,7 +388,7 @@ public actor DemoTransport: DeviceTransport {
         let typeCVoltage = chargerConnected ? vary(20) : (effectiveTypeCOutput ? vary(12) : 0)
         let typeCPower = chargerConnected
             ? min(typeCVoltage * 5, inputLimit)
-            : (effectiveTypeCOutput ? min(typeCVoltage * 1.4, outputLimit) : 0)
+            : (effectiveTypeCOutput ? min(typeCVoltage * typeCOutputCurrent, outputLimit) : 0)
         let typeCCurrent = typeCVoltage == 0 ? 0 : typeCPower / typeCVoltage
         let typeC = try! TypeCPortStatus(frame: typeCFrame(
             status: typeCStatus,

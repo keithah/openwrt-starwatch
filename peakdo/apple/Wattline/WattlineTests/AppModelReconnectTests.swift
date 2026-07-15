@@ -441,8 +441,12 @@ final class AppModelReconnectTests: XCTestCase {
         await fixture.transport.emit(.handshakeCompleted(identity))
         await fixture.transport.emit(.connected(id))
         await fixture.transport.emit(.battery(firstBattery, timestamp: .seconds(1)))
-        await fixture.transport.emit(.dc(dc, timestamp: .seconds(1)))
-        await fixture.transport.emit(.typeC(typeC, timestamp: .seconds(1)))
+        try await eventually { model.state.battery == firstBattery }
+        observedAt = Date(timeIntervalSince1970: 1_001)
+        await fixture.transport.emit(.dc(dc, timestamp: .seconds(2)))
+        try await eventually { model.state.dc == dc }
+        observedAt = Date(timeIntervalSince1970: 1_002)
+        await fixture.transport.emit(.typeC(typeC, timestamp: .seconds(3)))
         try await eventually {
             fixture.persistence.loadPersistedDeviceState(for: id)?.typeC?.value == typeC
         }
@@ -454,6 +458,8 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(persisted.typeC?.value, typeC)
         XCTAssertEqual(fixture.persistence.telemetryFlushCount, 1)
         XCTAssertEqual(persisted.battery?.observedAt, Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(persisted.dc?.observedAt, Date(timeIntervalSince1970: 1_001))
+        XCTAssertEqual(persisted.typeC?.observedAt, Date(timeIntervalSince1970: 1_002))
 
         observedAt = Date(timeIntervalSince1970: 2_000)
         await fixture.transport.emit(.battery(replacementBattery, timestamp: .seconds(4)))
@@ -464,8 +470,36 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(persisted.battery?.observedAt, Date(timeIntervalSince1970: 2_000))
         XCTAssertEqual(persisted.dc?.value, dc, "battery updates must not discard DC")
         XCTAssertEqual(persisted.typeC?.value, typeC, "battery updates must not discard Type-C")
-        XCTAssertEqual(persisted.dc?.observedAt, Date(timeIntervalSince1970: 1_000))
-        XCTAssertEqual(persisted.typeC?.observedAt, Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(persisted.dc?.observedAt, Date(timeIntervalSince1970: 1_001))
+        XCTAssertEqual(persisted.typeC?.observedAt, Date(timeIntervalSince1970: 1_002))
+    }
+
+    func testDistinctTimestampTelemetryBeforeNewDeviceHandshakeIsRetainedUntilIdentityExists() async throws {
+        let fixture = makeFixture(onboardingComplete: false)
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        model.requestBluetoothAfterPriming()
+        let id = UUID()
+        let identity = makeIdentity(id: id, features: 0x7FFF)
+        let battery = try battery(level: 62)
+        let dc = try DCPortStatus(frame: Data([1, 0xFF, 0, 0, 0, 0, 0, 0]))
+        let typeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 13))
+
+        await fixture.transport.emit(.connected(id))
+        await fixture.transport.emit(.battery(battery, timestamp: .seconds(1)))
+        await fixture.transport.emit(.dc(dc, timestamp: .seconds(2)))
+        await fixture.transport.emit(.typeC(typeC, timestamp: .seconds(3)))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(fixture.persistence.loadPersistedDeviceState(for: id))
+        await fixture.transport.emit(.handshakeCompleted(identity))
+
+        try await eventually {
+            fixture.persistence.loadPersistedDeviceState(for: id)?.typeC?.value == typeC
+        }
+        let persisted = try XCTUnwrap(fixture.persistence.loadPersistedDeviceState(for: id))
+        XCTAssertEqual(persisted.battery?.value, battery)
+        XCTAssertEqual(persisted.dc?.value, dc)
+        XCTAssertEqual(persisted.typeC?.value, typeC)
+        XCTAssertEqual(fixture.persistence.telemetryFlushCount, 1)
     }
 
     func testReturningRelaunchRestoresStaleSnapshotCapabilitiesAndReplacesFreshChannels() async throws {

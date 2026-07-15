@@ -92,14 +92,18 @@ final class DemoTransportTests: XCTestCase {
     }
 
     func testThirtyWattOutputCapNeverAllowsOutputTelemetryAboveThirtyWatts() async throws {
-        let demo = DemoTransport(seed: 0x57415454)
+        let demo = DemoTransport(seed: 0x57415454, typeCOutputCurrent: 4)
+        let unrestricted = await demo.snapshot.typeC
+        XCTAssertEqual(unrestricted.power, 48, accuracy: 0.001)
+
         _ = try await demo.perform(.setPowerLimit(.output, level: .watts30))
 
         for _ in 0..<3 {
             try await demo.refreshTelemetry()
             let output = await demo.snapshot.typeC
             XCTAssertEqual(output.mode, .output)
-            XCTAssertLessThanOrEqual(output.power, 30.001)
+            XCTAssertEqual(output.power, 30, accuracy: 0.001)
+            XCTAssertLessThan(output.power, unrestricted.power)
             XCTAssertEqual(output.current * output.voltage, output.power, accuracy: 0.35)
         }
     }
