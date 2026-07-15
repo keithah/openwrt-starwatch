@@ -39,6 +39,37 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(persisted.rawFeatures, 0)
         XCTAssertEqual(persisted.macAddress, "DC:04:5A:EB:72:2B")
         XCTAssertEqual(persisted.isOTAMode, false)
+        XCTAssertEqual(model.route, .connected)
+    }
+
+    func testRestoredOTAModeHandshakeNeverRoutesConnectedDashboard() async throws {
+        let fixture = makeFixture(onboardingComplete: false)
+        let id = UUID()
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        model.requestBluetoothAfterPriming()
+        let snapshot = DeviceIdentitySnapshot(
+            peripheralID: id,
+            advertisedName: "PeakDo-OTA",
+            mode: .ota,
+            cid: 0x0305,
+            capabilities: CapabilityResolver.resolve(features: nil, cid: 0x0305, model: nil)
+        )
+
+        await fixture.transport.emit(.handshakeCompleted(snapshot))
+        await fixture.transport.emit(.connected(id))
+
+        try await eventually {
+            let scanCount = await fixture.transport.scanCount
+            let disconnectCount = await fixture.transport.disconnectCount
+            return model.state.identity == snapshot
+                && model.otaRecoveryDevice?.id == id
+                && disconnectCount == 1
+                && scanCount >= 2
+        }
+        XCTAssertEqual(model.capabilities.features.rawValue, 0)
+        XCTAssertEqual(model.route, .scan)
+        XCTAssertNotEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(model.knownDevices[id]?.isOTAMode, true)
     }
 
     func testLegacyKnownDeviceIdentityStillDecodes() throws {
@@ -77,6 +108,36 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertFalse(model.limitsLoading)
         XCTAssertNil(model.toastMessage)
         XCTAssertFalse(model.demoChargerConnected)
+    }
+
+    func testReplacingTransportExplicitlyDisconnectsPreviousTransport() async throws {
+        let first = RecordingTransport(connectResult: .success)
+        let second = RecordingTransport(connectResult: .success)
+        var transports: [RecordingTransport] = [first, second]
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(persistence: AppPersistence(defaults: defaults)) {
+            transports.removeFirst()
+        }
+
+        model.requestBluetoothAfterPriming()
+        model.requestBluetoothAfterPriming()
+
+        try await eventually { await first.disconnectCount == 1 }
+        let secondDisconnectCount = await second.disconnectCount
+        XCTAssertEqual(secondDisconnectCount, 0)
+    }
+
+    func testReturningToScanExplicitlyDisconnectsCurrentTransport() async throws {
+        let fixture = makeFixture(onboardingComplete: false)
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        model.requestBluetoothAfterPriming()
+
+        model.returnToScan()
+
+        try await eventually { await fixture.transport.disconnectCount == 1 }
+        XCTAssertEqual(model.route, .scan)
     }
 
     func testSetFailureUsesSuccessfulRecoveryGetAsConfirmedLimit() async {
@@ -126,6 +187,46 @@ final class AppModelReconnectTests: XCTestCase {
 
         XCTAssertEqual(model.limits[.output], .watts45)
         XCTAssertGreaterThan(model.limitsRevision, originalRevision)
+        XCTAssertNotNil(model.toastMessage)
+    }
+
+    func testMalformedSetFollowUpRunsRecoveryAndRollsBackConfirmedLimit() async {
+        let transport = MutationTransport(steps: [
+            .reply(Data([0x02, 0x81, 0x00])),
+            .reply(Data([0x02, 0x80, 0x00, 0x7F])),
+            .failure,
+        ])
+        let model = makeMutationModel(transport: transport)
+        model.limits[.global] = .watts65
+        let originalRevision = model.limitsRevision
+
+        await model.setLimit(.global, level: .watts140)
+
+        XCTAssertEqual(model.limits[.global], .watts65)
+        XCTAssertGreaterThan(model.limitsRevision, originalRevision)
+        XCTAssertTrue(model.pendingLimits.isEmpty)
+        XCTAssertNotNil(model.toastMessage)
+    }
+
+    func testMalformedInitialLimitGetShowsErrorAndStopsLoading() async {
+        let transport = MutationTransport(steps: [
+            .reply(Data([0x02, 0x80, 0x00])),
+            .reply(Data([0x02, 0x80, 0x00, PowerLimitLevel.watts45.rawValue])),
+            .reply(Data([0x02, 0x80, 0x00, PowerLimitLevel.watts60.rawValue])),
+            .reply(Data([0x02, 0x80, 0xFF])),
+        ])
+        let model = makeMutationModel(transport: transport)
+        model.capabilities = DeviceCapabilities(features: [.usbPowerLimit])
+
+        await model.loadLimits()
+
+        XCTAssertFalse(model.limitsLoading)
+        XCTAssertNil(model.limits[.global])
+        XCTAssertEqual(model.limits[.input], .watts45)
+        XCTAssertEqual(model.limits[.output], .watts60)
+        XCTAssertNil(model.limits[.runtime])
+        XCTAssertTrue(model.limitReadFailures.contains(.global))
+        XCTAssertFalse(model.limitReadFailures.contains(.runtime))
         XCTAssertNotNil(model.toastMessage)
     }
 
@@ -372,6 +473,7 @@ private actor RecordingTransport: DeviceTransport {
     private var postThrowDisconnectPending = false
     private(set) var connectedIDs: [UUID] = []
     private(set) var scanCount = 0
+    private(set) var disconnectCount = 0
 
     init(connectResult: ConnectResult) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
@@ -417,7 +519,7 @@ private actor RecordingTransport: DeviceTransport {
         suspendedConnect.resume(throwing: Failure.reconnectFailed)
     }
 
-    func disconnect() async {}
+    func disconnect() async { disconnectCount += 1 }
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
     func refreshTelemetry() async throws {}
 }

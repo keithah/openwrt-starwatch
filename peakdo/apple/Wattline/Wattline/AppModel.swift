@@ -128,6 +128,7 @@ final class AppModel {
     var limits: [PowerLimitType: PowerLimitLevel] = [:]
     var limitsRevision: UInt = 0
     var limitsLoading = false
+    var limitReadFailures: Set<PowerLimitType> = []
     var pendingLimits: [PowerLimitType] = []
     var toastMessage: String?
     var demoChargerConnected = false
@@ -142,9 +143,11 @@ final class AppModel {
     private var sessionStateTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var supersededOperationTask: Task<Void, Never>?
+    private var otaRecoveryTask: Task<Void, Never>?
     private var transportGeneration: UInt = 0
     private var operationGeneration: UInt = 0
     private var selectedPeripheralID: UUID?
+    private var otaRecoveryPeripheralID: UUID?
 
     init(
         persistence: AppPersistence = AppPersistence(),
@@ -278,7 +281,17 @@ final class AppModel {
         selectedPeripheralID = nil
         route = .scan
         connectionStatus = .disconnected(nil)
-        startScanning()
+        guard let context = beginOperationForCurrentTransport() else { return }
+        operationTask = Task { [weak self] in
+            await context.transport.disconnect()
+            guard let self, self.isCurrent(context) else { return }
+            do {
+                try await context.transport.startScan()
+            } catch {
+                guard self.isCurrent(context) else { return }
+                presentBluetoothFailure(error)
+            }
+        }
     }
 
     func setDC(_ enabled: Bool) {
@@ -390,9 +403,15 @@ final class AppModel {
 
     @discardableResult
     private func attach(transport: any DeviceTransport) -> UInt {
+        let previousTransport = self.transport
         supersedeCurrentOperation()
         eventTask?.cancel()
         sessionStateTask?.cancel()
+        otaRecoveryTask?.cancel()
+        otaRecoveryTask = nil
+        if let previousTransport {
+            Task { await previousTransport.disconnect() }
+        }
         transportGeneration &+= 1
         operationGeneration &+= 1
         let generation = transportGeneration
@@ -404,9 +423,12 @@ final class AppModel {
         limits.removeAll()
         limitsRevision = 0
         limitsLoading = false
+        limitReadFailures.removeAll()
         pendingLimits.removeAll()
         toastMessage = nil
         demoChargerConnected = false
+        otaRecoveryDevice = nil
+        otaRecoveryPeripheralID = nil
         sessionStateTask = Task { [weak self] in
             for await nextState in session.states {
                 guard !Task.isCancelled,
@@ -441,6 +463,11 @@ final class AppModel {
                 discoveredDevices.append(device)
             }
         case let .connected(id):
+            if otaRecoveryPeripheralID == id {
+                connectionStatus = .disconnected(nil)
+                route = .scan
+                return
+            }
             if !isDemo {
                 persistence.lastSuccessfulPeripheralID = id
                 selectedPeripheralID = id
@@ -473,9 +500,14 @@ final class AppModel {
             route = .connected
         case let .disconnected(failure):
             connectionStatus = .disconnected(failure?.message)
-            if selectedPeripheralID != nil || isDemo { route = .connected }
+            if otaRecoveryPeripheralID != nil {
+                route = .scan
+            } else if selectedPeripheralID != nil || isDemo {
+                route = .connected
+            }
         case let .handshakeCompleted(snapshot):
-            capabilities = snapshot.capabilities
+            let isOTAMode = snapshot.mode == .ota
+            capabilities = isOTAMode ? DeviceCapabilities(features: []) : snapshot.capabilities
             selectedPeripheralID = snapshot.peripheralID
             let advertisedName = snapshot.advertisedName
                 ?? knownDevices[snapshot.peripheralID]?.advertisedName
@@ -491,9 +523,24 @@ final class AppModel {
                 appFirmwareRevision: snapshot.appFirmwareRevision,
                 cid: snapshot.cid,
                 rawFeatures: snapshot.rawFeatures,
-                isOTAMode: snapshot.mode == .ota
+                isOTAMode: isOTAMode
             )
             connectedName = knownDevices[snapshot.peripheralID]?.name
+            if isOTAMode {
+                otaRecoveryPeripheralID = snapshot.peripheralID
+                let discovered = discoveredDevices.first { $0.id == snapshot.peripheralID }
+                otaRecoveryDevice = DiscoveredDevice(
+                    id: snapshot.peripheralID,
+                    localName: snapshot.advertisedName ?? discovered?.localName ?? "PeakDo-OTA",
+                    rssi: discovered?.rssi ?? -127,
+                    mode: .ota
+                )
+                connectionStatus = .disconnected(nil)
+                route = .scan
+                beginOTARecoveryScan(generation: generation)
+            } else {
+                otaRecoveryPeripheralID = nil
+            }
         case .battery, .dc, .typeC, .transactionDepth:
             break
         }
@@ -523,7 +570,10 @@ final class AppModel {
         guard let session else { return false }
         do {
             let outcome = try await session.perform(.getPowerLimit(type))
-            guard applyLimitReply(outcome, type: type) else { return false }
+            guard applyLimitReply(outcome, type: type) else {
+                if showError { showToast("Device returned an invalid power-limit value.") }
+                return false
+            }
             state = await session.state
             return true
         } catch {
@@ -539,12 +589,17 @@ final class AppModel {
         defer { pendingLimits.removeAll { $0 == type } }
         do {
             let outcome = try await session.perform(command)
-            applyLimitReply(outcome, type: type)
+            guard applyLimitReply(outcome, type: type) else {
+                throw LimitReadbackError.invalidValue
+            }
             state = await session.state
         } catch {
-            showToast(String(describing: error))
+            showToast(error is LimitReadbackError
+                ? "Device returned an invalid power-limit value."
+                : String(describing: error))
             if !(await readLimit(type, showError: false)) {
                 limits[type] = confirmedValue
+                limitReadFailures.remove(type)
                 limitsRevision &+= 1
             }
         }
@@ -553,16 +608,44 @@ final class AppModel {
     @discardableResult
     private func applyLimitReply(_ outcome: CommandOutcome, type: PowerLimitType) -> Bool {
         guard case let .reply(reply) = outcome else { return false }
-        if reply.result == 0xFF {
+        if reply.result == 0xFF, type == .runtime {
             limits[type] = nil
+            limitReadFailures.remove(type)
             limitsRevision &+= 1
             return true
-        } else if let raw = reply.payload.first, let level = PowerLimitLevel(rawValue: raw) {
+        } else if reply.result == 0,
+                  let raw = reply.payload.first,
+                  let level = PowerLimitLevel(rawValue: raw) {
             limits[type] = level
+            limitReadFailures.remove(type)
             limitsRevision &+= 1
             return true
         }
+        limitReadFailures.insert(type)
         return false
+    }
+
+    private enum LimitReadbackError: Error {
+        case invalidValue
+    }
+
+    private func beginOTARecoveryScan(generation: UInt) {
+        guard let transport else { return }
+        otaRecoveryTask?.cancel()
+        otaRecoveryTask = Task { [weak self] in
+            await transport.disconnect()
+            guard !Task.isCancelled,
+                  let self,
+                  transportGeneration == generation,
+                  otaRecoveryPeripheralID != nil
+            else { return }
+            do {
+                try await transport.startScan()
+            } catch {
+                guard transportGeneration == generation else { return }
+                presentBluetoothFailure(error)
+            }
+        }
     }
 
     private func showToast(_ message: String) {

@@ -64,6 +64,10 @@ struct LimitsView: View {
                     Task { await model.setLimit(type, level: level) }
                 }
             )
+        } else if model.limitReadFailures.contains(type) {
+            Label("\(label) limit unavailable", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 90)
         } else {
             ProgressView("Reading \(label.lowercased()) limit…")
                 .frame(maxWidth: .infinity, minHeight: 90)

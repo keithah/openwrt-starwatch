@@ -317,7 +317,9 @@ struct BLEHandshakeDriver: Sendable {
     }
 
     private var snapshot: DeviceIdentitySnapshot {
-        let capabilities = CapabilityResolver.resolve(features: features, cid: cid, model: modelNumber)
+        let capabilities = mode == .ota
+            ? DeviceCapabilities(features: [])
+            : CapabilityResolver.resolve(features: features, cid: cid, model: modelNumber)
         return DeviceIdentitySnapshot(
             peripheralID: scope.peripheralID,
             advertisedName: advertisedName,

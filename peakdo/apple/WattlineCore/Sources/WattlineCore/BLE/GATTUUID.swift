@@ -40,6 +40,11 @@ public enum BLECallbackDisposition: Equatable, Sendable {
     case ignored
 }
 
+public enum BLEUnexpectedDisconnectAction: Equatable, Sendable {
+    case reconnect(UUID)
+    case ignored
+}
+
 public enum BLEExternalIOAdmission: Equatable, Sendable {
     case allowed
     case notReady
@@ -119,6 +124,14 @@ public struct BLESessionLifecycleStateMachine: Sendable {
         guard state.scope == scope else { return .ignored }
         state = .idle
         return .accepted
+    }
+
+    public mutating func didUnexpectedDisconnect(
+        scope: BLEConnectionScope
+    ) -> BLEUnexpectedDisconnectAction {
+        guard state.scope == scope else { return .ignored }
+        state = .idle
+        return .reconnect(scope.peripheralID)
     }
 
     public mutating func terminate(scope: BLEConnectionScope) -> Bool {

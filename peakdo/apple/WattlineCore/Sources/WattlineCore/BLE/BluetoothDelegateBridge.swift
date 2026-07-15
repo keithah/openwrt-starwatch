@@ -239,7 +239,21 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     func disconnect() async {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
-                if let session { central.cancelPeripheralConnection(session.peripheral) }
+                if let session {
+                    let scope = session.scope
+                    if let pendingConnect, pendingConnect.scope == scope {
+                        self.pendingConnect = nil
+                        pendingConnect.continuation.resume(throwing: CancellationError())
+                    }
+                    if let pendingIO, pendingIO.scope == scope {
+                        self.pendingIO = nil
+                        if case var .write(_, _, _, expectation?, _) = pendingIO {
+                            _ = expectation.cancel(scope: scope)
+                        }
+                        resume(pendingIO, throwing: CancellationError())
+                    }
+                    beginTeardown(scope: scope, eventAlreadyEmitted: false)
+                }
                 continuation.resume()
             }
         }
@@ -592,14 +606,24 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         self.session = nil
     }
 
-    private func completeDisconnectedSession(scope: BLEConnectionScope) {
-        guard let session, session.scope == scope else { return }
+    private func completeDisconnectedSession(
+        scope: BLEConnectionScope,
+        unexpected: Bool
+    ) -> BLEUnexpectedDisconnectAction {
+        guard let session, session.scope == scope else { return .ignored }
         _ = callbackState.didDisconnect(scope: scope)
-        _ = lifecycle.didDisconnect(scope: scope)
+        let action: BLEUnexpectedDisconnectAction
+        if unexpected {
+            action = lifecycle.didUnexpectedDisconnect(scope: scope)
+        } else {
+            _ = lifecycle.didDisconnect(scope: scope)
+            action = .ignored
+        }
         session.peripheral.delegate = nil
         settleTask?.cancel()
         settleTask = nil
         self.session = nil
+        return action
     }
 
     private func beginTeardown(
@@ -845,7 +869,16 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         if case var .write(_, _, _, expectation?, _) = pendingIO {
             expectedAction = expectation.didDisconnect(scope: scope)
         }
-        completeDisconnectedSession(scope: scope)
+        let expectedPolicy: ReconnectPolicy?
+        if case let .succeeded(policy) = expectedAction {
+            expectedPolicy = policy
+        } else {
+            expectedPolicy = nil
+        }
+        let unexpectedAction = completeDisconnectedSession(
+            scope: scope,
+            unexpected: expectedPolicy == nil
+        )
 
         let transportFailure = error.map { TransportFailure(message: String(describing: $0)) }
         eventSink(.disconnected(transportFailure))
@@ -856,11 +889,11 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             )
         }
         if let pendingIO, pendingIO.scope == scope {
-            if case let .succeeded(policy) = expectedAction,
+            if let expectedPolicy,
                case let .write(_, _, _, _, continuation) = pendingIO
             {
                 continuation.resume()
-                enact(policy, peripheral: peripheral)
+                enact(expectedPolicy, peripheral: peripheral)
             } else {
                 resume(
                     pendingIO,
@@ -869,6 +902,9 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
                     )
                 )
             }
+        }
+        if case .reconnect = unexpectedAction {
+            enact(.armed, peripheral: peripheral)
         }
     }
 

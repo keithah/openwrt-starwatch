@@ -91,6 +91,42 @@ final class BLETransactionStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.didDisconnect(scope: current), .ignored)
     }
 
+    func testUnexpectedDisconnectRequestsOneFreshReconnectForEachLoss() {
+        let peripheralID = UUID()
+        var lifecycle = BLESessionLifecycleStateMachine()
+        var callbacks = BLEBridgeCallbackStateMachine()
+
+        let first = callbacks.beginConnection(peripheralID: peripheralID)
+        XCTAssertTrue(lifecycle.beginConnection(scope: first))
+        XCTAssertTrue(lifecycle.didConnect(scope: first))
+        XCTAssertTrue(lifecycle.didFinishSetup(scope: first))
+        XCTAssertEqual(callbacks.didDisconnect(scope: first), .accepted)
+        XCTAssertEqual(lifecycle.didUnexpectedDisconnect(scope: first), .reconnect(peripheralID))
+
+        let second = callbacks.beginConnection(peripheralID: peripheralID)
+        XCTAssertNotEqual(second.generation, first.generation)
+        XCTAssertTrue(lifecycle.beginConnection(scope: second))
+        XCTAssertTrue(lifecycle.didConnect(scope: second))
+        XCTAssertTrue(lifecycle.didFinishSetup(scope: second))
+
+        XCTAssertEqual(lifecycle.didUnexpectedDisconnect(scope: first), .ignored)
+        XCTAssertEqual(callbacks.didDisconnect(scope: second), .accepted)
+        XCTAssertEqual(lifecycle.didUnexpectedDisconnect(scope: second), .reconnect(peripheralID))
+        XCTAssertEqual(lifecycle.didUnexpectedDisconnect(scope: second), .ignored)
+    }
+
+    func testExplicitTeardownDisconnectDoesNotRequestReconnect() {
+        let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)
+        var lifecycle = BLESessionLifecycleStateMachine()
+        XCTAssertTrue(lifecycle.beginConnection(scope: scope))
+        XCTAssertTrue(lifecycle.didConnect(scope: scope))
+        XCTAssertTrue(lifecycle.didFinishSetup(scope: scope))
+
+        XCTAssertTrue(lifecycle.beginTeardown(scope: scope))
+        XCTAssertEqual(lifecycle.didDisconnect(scope: scope), .accepted)
+        XCTAssertEqual(lifecycle.didUnexpectedDisconnect(scope: scope), .ignored)
+    }
+
     func testExpectedDisconnectAfterWriteCompletesWithCommandReconnectPolicy() {
         for command in [DeviceCommand.restart, .enterOTA, .shutdown] {
             let scope = BLEConnectionScope(peripheralID: UUID(), generation: 1)

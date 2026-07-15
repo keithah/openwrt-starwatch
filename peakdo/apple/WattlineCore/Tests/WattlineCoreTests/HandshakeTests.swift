@@ -142,6 +142,11 @@ final class HandshakeTests: XCTestCase {
             return XCTFail("Expected OTA snapshot")
         }
         XCTAssertEqual(snapshot.mode, .ota)
+        XCTAssertEqual(snapshot.capabilities.features.rawValue, 0)
+        XCTAssertFalse(snapshot.capabilities.hasBattery)
+        XCTAssertFalse(snapshot.capabilities.hasDCPort)
+        XCTAssertFalse(snapshot.capabilities.hasUSBPort)
+        XCTAssertFalse(snapshot.capabilities.hasPowerLimits)
         XCTAssertEqual(driver.eventEmitted(scope: scope), .connected(scope.peripheralID))
     }
 
