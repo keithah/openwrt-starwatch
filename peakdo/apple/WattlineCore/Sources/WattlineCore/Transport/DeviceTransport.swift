@@ -30,6 +30,7 @@ public struct TransportFailure: Error, Equatable, Sendable {
 
 public enum DeviceEvent: Equatable, Sendable {
     case discovered(DiscoveredDevice)
+    case handshakeCompleted(DeviceIdentitySnapshot)
     case connected(UUID)
     case reconnecting(UUID)
     case disconnected(TransportFailure?)

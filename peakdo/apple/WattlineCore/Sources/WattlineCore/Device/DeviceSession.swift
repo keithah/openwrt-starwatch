@@ -21,6 +21,7 @@ public struct PendingMutation: Equatable, Sendable, Identifiable {
 }
 
 public struct DeviceState: Equatable, Sendable {
+    public var identity: DeviceIdentitySnapshot?
     public var connection: DeviceConnectionState
     public var freshness: TelemetryFreshness
     public var battery: BatteryStatus?
@@ -32,6 +33,7 @@ public struct DeviceState: Equatable, Sendable {
     public var lastError: String?
 
     public init(
+        identity: DeviceIdentitySnapshot? = nil,
         connection: DeviceConnectionState = .loading,
         freshness: TelemetryFreshness = .loading,
         battery: BatteryStatus? = nil,
@@ -42,6 +44,7 @@ public struct DeviceState: Equatable, Sendable {
         transactionDepth: Int = 0,
         lastError: String? = nil
     ) {
+        self.identity = identity
         self.connection = connection
         self.freshness = freshness
         self.battery = battery
@@ -99,6 +102,8 @@ public actor DeviceSession {
         switch event {
         case .discovered:
             break
+        case let .handshakeCompleted(snapshot):
+            state.identity = snapshot
         case .connected:
             state.connection = .loading
             state.lastError = nil

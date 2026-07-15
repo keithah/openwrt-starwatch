@@ -57,6 +57,40 @@ private final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate, @un
 
 final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     typealias EventSink = @Sendable (DeviceEvent) -> Void
+    typealias Settle = @Sendable () async throws -> Void
+
+    private struct IdentityBuilder {
+        let peripheralID: UUID
+        let advertisedName: String?
+        var mode: DeviceMode = .application
+        var modelNumber: String?
+        var hardwareRevision: String?
+        var otaFirmwareRevision: String?
+        var appFirmwareRevision: String?
+        var cid: UInt16?
+        var features: FeatureFlags?
+        var macAddress: String?
+
+        var capabilities: DeviceCapabilities {
+            CapabilityResolver.resolve(features: features, cid: cid, model: modelNumber)
+        }
+
+        var snapshot: DeviceIdentitySnapshot {
+            DeviceIdentitySnapshot(
+                peripheralID: peripheralID,
+                advertisedName: advertisedName,
+                mode: mode,
+                modelNumber: modelNumber,
+                hardwareRevision: hardwareRevision,
+                otaFirmwareRevision: otaFirmwareRevision,
+                appFirmwareRevision: appFirmwareRevision,
+                cid: cid,
+                rawFeatures: features?.rawValue,
+                macAddress: macAddress,
+                capabilities: capabilities
+            )
+        }
+    }
 
     private struct Session {
         let scope: BLEConnectionScope
@@ -64,8 +98,9 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         let proxy: PeripheralDelegateProxy
         var characteristics: [CBUUID: CBCharacteristic] = [:]
         var expectedServices: Set<ObjectIdentifier> = []
-        var setupReadQueue: [GATTUUID] = []
-        var setupReading: (uuid: GATTUUID, characteristic: CBCharacteristic)?
+        var handshakeOperations: [HandshakeOperation] = []
+        var setupOperation: (operation: HandshakeOperation, characteristic: CBCharacteristic)?
+        var identity: IdentityBuilder
     }
 
     private struct PendingConnect {
@@ -124,10 +159,13 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "ca.peakdo.wattline.bluetooth")
     private let eventSink: EventSink
+    private let settle: Settle
+    private let now: @Sendable () -> Date
     private var central: CBCentralManager!
     private var powerWaiters: [CheckedContinuation<Void, Error>] = []
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var discoveredModes: [UUID: DeviceMode] = [:]
+    private var discoveredLocalNames: [UUID: String] = [:]
     private var callbackState = BLEBridgeCallbackStateMachine()
     private var lifecycle = BLESessionLifecycleStateMachine()
     private var session: Session?
@@ -135,10 +173,18 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     private var pendingConnect: PendingConnect?
     private var pendingIO: PendingIO?
     private var cancelledOperations: Set<UUID> = []
+    private var settleTask: Task<Void, Never>?
     private let timestampOrigin = DispatchTime.now().uptimeNanoseconds
 
-    init(restorationIdentifier: String, eventSink: @escaping EventSink) {
+    init(
+        restorationIdentifier: String,
+        settle: @escaping Settle = { try await Task.sleep(for: .seconds(2)) },
+        now: @escaping @Sendable () -> Date = Date.init,
+        eventSink: @escaping EventSink
+    ) {
         self.eventSink = eventSink
+        self.settle = settle
+        self.now = now
         super.init()
         central = CBCentralManager(
             delegate: self,
@@ -416,9 +462,42 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         guard lifecycle.beginConnection(scope: scope) else { return nil }
         let proxy = PeripheralDelegateProxy(bridge: self, scope: scope)
         peripheral.delegate = proxy
-        session = Session(scope: scope, peripheral: peripheral, proxy: proxy)
+        session = Session(
+            scope: scope,
+            peripheral: peripheral,
+            proxy: proxy,
+            identity: IdentityBuilder(
+                peripheralID: peripheral.identifier,
+                advertisedName: discoveredLocalNames[peripheral.identifier] ?? peripheral.name
+            )
+        )
         discoveredPeripherals[peripheral.identifier] = peripheral
         return scope
+    }
+
+    private func beginSettle(scope: BLEConnectionScope) {
+        settleTask?.cancel()
+        settleTask = Task { [weak self, settle] in
+            do {
+                try await settle()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self else { return }
+                queue.async { [self] in
+                    guard session?.scope == scope, callbackState.activeScope == scope else { return }
+                    settleTask = nil
+                    failSetup(scope: scope, error: error)
+                }
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            queue.async { [self] in
+                guard session?.scope == scope, callbackState.activeScope == scope else { return }
+                settleTask = nil
+                beginServiceDiscovery(scope: scope)
+            }
+        }
     }
 
     private func beginServiceDiscovery(scope: BLEConnectionScope) {
@@ -446,40 +525,196 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         }
     }
 
-    private func beginInitialTelemetryReads(scope: BLEConnectionScope) {
+    private func beginHandshake(scope: BLEConnectionScope) {
         guard var session, session.scope == scope else { return }
-        session.setupReadQueue = [.extendedBatteryInfo, .dcPortStatus, .typeCPortStatus].filter {
-            session.characteristics[$0.bluetoothUUID] != nil
-        }
+        session.handshakeOperations = [.otaInfo]
         self.session = session
-        readNextSetupCharacteristic(scope: scope)
+        runNextHandshakeOperation(scope: scope)
     }
 
-    private func readNextSetupCharacteristic(scope: BLEConnectionScope) {
-        guard var session, session.scope == scope else { return }
-        guard !session.setupReadQueue.isEmpty else {
-            for uuid in [GATTUUID.extendedBatteryInfo, .dcPortStatus, .typeCPortStatus] {
-                if let characteristic = session.characteristics[uuid.bluetoothUUID],
-                   characteristic.properties.contains(.notify) || characteristic.properties.contains(.indicate)
-                {
-                    session.peripheral.setNotifyValue(true, for: characteristic)
-                }
+    private func runNextHandshakeOperation(scope: BLEConnectionScope) {
+        guard var session, session.scope == scope, session.setupOperation == nil else { return }
+        guard !session.handshakeOperations.isEmpty else {
+            failSetup(scope: scope, error: BLETransportError.invalidResponse)
+            return
+        }
+        let operation = session.handshakeOperations.removeFirst()
+        self.session = session
+
+        switch operation {
+        case .otaInfo:
+            beginSetupWriteRead(Data([0x84]), uuid: .ota, operation: operation, scope: scope)
+        case let .readDIS(uuid), let .readTelemetry(uuid):
+            beginSetupRead(uuid: uuid, operation: operation, scope: scope)
+        case .features:
+            beginSetupWriteRead(
+                CommandRequest(command: .features, action: .get).bytes,
+                uuid: .command,
+                operation: operation,
+                scope: scope
+            )
+        case .deviceID:
+            beginSetupWriteRead(
+                CommandRequest(command: .deviceID, action: .get).bytes,
+                uuid: .command,
+                operation: operation,
+                scope: scope
+            )
+        case .writeCurrentTime:
+            beginSetupWrite(
+                CurrentTimeCodec.encode(now()),
+                uuid: .currentTime,
+                operation: operation,
+                scope: scope
+            )
+        case let .subscribe(uuid):
+            if let characteristic = session.characteristics[uuid.bluetoothUUID],
+               characteristic.properties.contains(.notify) || characteristic.properties.contains(.indicate)
+            {
+                session.peripheral.setNotifyValue(true, for: characteristic)
             }
-            session.setupReading = nil
-            self.session = session
+            runNextHandshakeOperation(scope: scope)
+        case .publishSnapshot:
+            eventSink(.handshakeCompleted(session.identity.snapshot))
+            runNextHandshakeOperation(scope: scope)
+        case .connected:
             finishConnection(scope: scope)
+        case .settle, .discoverServices:
+            failSetup(scope: scope, error: BLETransportError.invalidResponse)
+        }
+    }
+
+    private func beginSetupWriteRead(
+        _ bytes: Data,
+        uuid: GATTUUID,
+        operation: HandshakeOperation,
+        scope: BLEConnectionScope
+    ) {
+        guard var session, session.scope == scope,
+              let characteristic = session.characteristics[uuid.bluetoothUUID]
+        else {
+            skipOrFailMissing(operation: operation, uuid: uuid, scope: scope)
             return
         }
-        let uuid = session.setupReadQueue.removeFirst()
-        guard let characteristic = session.characteristics[uuid.bluetoothUUID] else {
-            self.session = session
-            readNextSetupCharacteristic(scope: scope)
+        session.setupOperation = (operation, characteristic)
+        self.session = session
+        callbackState.expectWrite(scope: scope, characteristic: uuid, followedByRead: true)
+        session.peripheral.writeValue(bytes, for: characteristic, type: .withResponse)
+    }
+
+    private func beginSetupRead(
+        uuid: GATTUUID,
+        operation: HandshakeOperation,
+        scope: BLEConnectionScope
+    ) {
+        guard var session, session.scope == scope,
+              let characteristic = session.characteristics[uuid.bluetoothUUID]
+        else {
+            skipOrFailMissing(operation: operation, uuid: uuid, scope: scope)
             return
         }
-        session.setupReading = (uuid, characteristic)
+        session.setupOperation = (operation, characteristic)
         self.session = session
         callbackState.expectUpdate(scope: scope, characteristic: uuid)
         session.peripheral.readValue(for: characteristic)
+    }
+
+    private func beginSetupWrite(
+        _ bytes: Data,
+        uuid: GATTUUID,
+        operation: HandshakeOperation,
+        scope: BLEConnectionScope
+    ) {
+        guard var session, session.scope == scope,
+              let characteristic = session.characteristics[uuid.bluetoothUUID]
+        else {
+            skipOrFailMissing(operation: operation, uuid: uuid, scope: scope)
+            return
+        }
+        session.setupOperation = (operation, characteristic)
+        self.session = session
+        callbackState.expectWrite(scope: scope, characteristic: uuid, followedByRead: false)
+        session.peripheral.writeValue(bytes, for: characteristic, type: .withResponse)
+    }
+
+    private func skipOrFailMissing(
+        operation: HandshakeOperation,
+        uuid: GATTUUID,
+        scope: BLEConnectionScope
+    ) {
+        switch operation {
+        case .readDIS, .features, .deviceID, .readTelemetry:
+            if operation == .features { appendCapabilityDirectedOperations(scope: scope) }
+            runNextHandshakeOperation(scope: scope)
+        default:
+            failSetup(scope: scope, error: BLETransportError.missingCharacteristic(uuid))
+        }
+    }
+
+    private func appendCapabilityDirectedOperations(scope: BLEConnectionScope) {
+        guard var session, session.scope == scope else { return }
+        let plan = HandshakePlan.operations(
+            mode: .application,
+            capabilities: session.identity.capabilities
+        )
+        guard let deviceIDIndex = plan.firstIndex(of: .deviceID) else { return }
+        session.handshakeOperations.append(contentsOf: plan[plan.index(after: deviceIDIndex)...])
+        self.session = session
+    }
+
+    private func finishSetupRead(
+        operation: HandshakeOperation,
+        value: Data,
+        scope: BLEConnectionScope
+    ) throws {
+        guard var session, session.scope == scope else { return }
+        switch operation {
+        case .otaInfo:
+            let info = try OTAInfo(frame: value)
+            session.identity.mode = info.mode
+            session.identity.cid = info.cid
+            session.handshakeOperations = info.mode == .application
+                ? [.readDIS(.modelNumber), .readDIS(.hardwareRevision),
+                   .readDIS(.firmwareRevision), .readDIS(.softwareRevision),
+                   .features, .deviceID]
+                : [.publishSnapshot, .connected]
+        case let .readDIS(uuid):
+            let string = String(data: value, encoding: .utf8)
+            switch uuid {
+            case .modelNumber: session.identity.modelNumber = string
+            case .hardwareRevision: session.identity.hardwareRevision = string
+            case .firmwareRevision: session.identity.otaFirmwareRevision = string
+            case .softwareRevision: session.identity.appFirmwareRevision = string
+            default: break
+            }
+        case .features:
+            session.identity.features = try HandshakeCodec.features(from: value)
+        case .deviceID:
+            session.identity.macAddress = try DeviceID(reply: value).macAddress
+        case let .readTelemetry(uuid):
+            emitTelemetry(uuid: uuid, value: value)
+        default:
+            break
+        }
+        self.session = session
+        if operation == .features { appendCapabilityDirectedOperations(scope: scope) }
+        runNextHandshakeOperation(scope: scope)
+    }
+
+    private func handleSetupError(
+        operation: HandshakeOperation,
+        error: Error,
+        scope: BLEConnectionScope
+    ) {
+        switch operation {
+        case .readDIS, .deviceID, .readTelemetry:
+            runNextHandshakeOperation(scope: scope)
+        case .features:
+            appendCapabilityDirectedOperations(scope: scope)
+            runNextHandshakeOperation(scope: scope)
+        default:
+            failSetup(scope: scope, error: error)
+        }
     }
 
     private func finishConnection(scope: BLEConnectionScope) {
@@ -497,6 +732,8 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         _ = callbackState.didDisconnect(scope: scope)
         _ = lifecycle.terminate(scope: scope)
         session.peripheral.delegate = nil
+        settleTask?.cancel()
+        settleTask = nil
         self.session = nil
     }
 
@@ -505,6 +742,8 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         _ = callbackState.didDisconnect(scope: scope)
         _ = lifecycle.didDisconnect(scope: scope)
         session.peripheral.delegate = nil
+        settleTask?.cancel()
+        settleTask = nil
         self.session = nil
     }
 
@@ -514,6 +753,8 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         eventAlreadyEmitted: Bool
     ) {
         guard let session, session.scope == scope, lifecycle.beginTeardown(scope: scope) else { return }
+        settleTask?.cancel()
+        settleTask = nil
         if cancelPeripheral {
             central.cancelPeripheralConnection(session.peripheral)
         }
@@ -676,6 +917,7 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         else { return }
         discoveredPeripherals[peripheral.identifier] = peripheral
         discoveredModes[peripheral.identifier] = mode
+        discoveredLocalNames[peripheral.identifier] = localName
         eventSink(.discovered(DiscoveredDevice(
             id: peripheral.identifier,
             localName: localName,
@@ -691,7 +933,7 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
               peripheral.state == .connected,
               lifecycle.didConnect(scope: session.scope)
         else { return }
-        beginServiceDiscovery(scope: session.scope)
+        beginSettle(scope: session.scope)
     }
 
     func centralManager(
@@ -790,7 +1032,7 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             break
         case .discoverServices:
             if lifecycle.didConnect(scope: scope) {
-                beginServiceDiscovery(scope: scope)
+                beginSettle(scope: scope)
             }
         case .terminate:
             beginTeardown(
@@ -852,11 +1094,11 @@ private extension BluetoothDelegateBridge {
         }
         self.session = session
         if callbackState.outstandingCharacteristicDiscoveries == 0 {
-            guard session.characteristics[GATTUUID.command.bluetoothUUID] != nil else {
-                failSetup(scope: scope, error: BLETransportError.missingCharacteristic(.command))
+            guard session.characteristics[GATTUUID.ota.bluetoothUUID] != nil else {
+                failSetup(scope: scope, error: BLETransportError.missingCharacteristic(.ota))
                 return
             }
-            beginInitialTelemetryReads(scope: scope)
+            beginHandshake(scope: scope)
         }
     }
 
@@ -866,6 +1108,29 @@ private extension BluetoothDelegateBridge {
         scope: BLEConnectionScope,
         error: Error?
     ) {
+        if var session,
+           session.scope == scope,
+           session.peripheral === peripheral,
+           let setup = session.setupOperation,
+           setup.characteristic === characteristic,
+           let uuid = GATTUUID.allCases.first(where: { $0.bluetoothUUID == characteristic.uuid }),
+           callbackState.didWrite(scope: scope, characteristic: uuid) == .accepted
+        {
+            if let error {
+                callbackState.clearIO(scope: scope)
+                session.setupOperation = nil
+                self.session = session
+                handleSetupError(operation: setup.operation, error: error, scope: scope)
+            } else if setup.operation == .writeCurrentTime {
+                session.setupOperation = nil
+                self.session = session
+                runNextHandshakeOperation(scope: scope)
+            } else {
+                peripheral.readValue(for: characteristic)
+            }
+            return
+        }
+
         guard let pendingIO, pendingIO.scope == scope else { return }
         let expectedCharacteristic: CBCharacteristic
         let uuid: GATTUUID
@@ -935,22 +1200,30 @@ private extension BluetoothDelegateBridge {
     ) {
         guard var session, session.scope == scope, session.peripheral === peripheral else { return }
 
-        if let setup = session.setupReading,
+        if let setup = session.setupOperation,
            setup.characteristic === characteristic,
-           callbackState.didUpdate(scope: scope, characteristic: setup.uuid) == .accepted
+           let uuid = GATTUUID.allCases.first(where: { $0.bluetoothUUID == characteristic.uuid }),
+           callbackState.didUpdate(scope: scope, characteristic: uuid) == .accepted
         {
-            session.setupReading = nil
+            session.setupOperation = nil
             self.session = session
             if let error {
-                failSetup(scope: scope, error: error)
+                handleSetupError(operation: setup.operation, error: error, scope: scope)
                 return
             }
             guard let value = characteristic.value else {
-                failSetup(scope: scope, error: BLETransportError.invalidResponse)
+                handleSetupError(
+                    operation: setup.operation,
+                    error: BLETransportError.invalidResponse,
+                    scope: scope
+                )
                 return
             }
-            emitTelemetry(uuid: setup.uuid, value: value)
-            readNextSetupCharacteristic(scope: scope)
+            do {
+                try finishSetupRead(operation: setup.operation, value: value, scope: scope)
+            } catch {
+                handleSetupError(operation: setup.operation, error: error, scope: scope)
+            }
             return
         }
 
