@@ -15,6 +15,29 @@ final class DemoTransportTests: XCTestCase {
         XCTAssertEqual(identity.firmware, "1.4.9")
     }
 
+    func testDemoHandshakePrecedesConnectedWithAuthoritativeLP2V5Identity() async throws {
+        let demo = DemoTransport(seed: 1)
+        var iterator = demo.events.makeAsyncIterator()
+
+        _ = try await demo.connectDemo()
+
+        guard case let .handshakeCompleted(identity) = await iterator.next() else {
+            return XCTFail("Expected Demo handshake before connected")
+        }
+        XCTAssertEqual(identity.peripheralID, UUID(uuidString: "57415454-4C49-4E45-8000-000000000305"))
+        XCTAssertEqual(identity.advertisedName, "Link-Power 2 (Demo)")
+        XCTAssertEqual(identity.mode, .application)
+        XCTAssertEqual(identity.modelNumber, "BP4SL3V2")
+        XCTAssertEqual(identity.hardwareRevision, "V5#0305")
+        XCTAssertEqual(identity.appFirmwareRevision, "1.4.9")
+        XCTAssertEqual(identity.cid, 0x0305)
+        XCTAssertEqual(identity.rawFeatures, 0x7FFF)
+        XCTAssertEqual(identity.capabilities.features.rawValue, 0x7FFF)
+        guard case .connected = await iterator.next() else {
+            return XCTFail("Expected connected after Demo handshake")
+        }
+    }
+
     func testTypeCOutputChangesModeWhileEnabledStaysTrue() async throws {
         let demo = DemoTransport(seed: 1)
 
@@ -40,6 +63,45 @@ final class DemoTransportTests: XCTestCase {
         let snapshot = await demo.snapshot
         XCTAssertEqual(snapshot.limits[.input], .watts65)
         XCTAssertNil(snapshot.limits[.runtime])
+    }
+
+    func testChargingTelemetryRespectsInputAndGlobalCapsWithConsistentCurrent() async throws {
+        let demo = DemoTransport(seed: 0x57415454)
+        await demo.setChargerConnected(true)
+
+        let unrestricted = await demo.snapshot
+        XCTAssertEqual(unrestricted.limits[.global], .watts140)
+        XCTAssertEqual(unrestricted.limits[.input], .watts140)
+        XCTAssertEqual(unrestricted.battery.power, 100, accuracy: 0.001)
+
+        _ = try await demo.perform(.setPowerLimit(.input, level: .watts30))
+        for _ in 0..<3 {
+            try await demo.refreshTelemetry()
+            let capped = await demo.snapshot
+            XCTAssertLessThanOrEqual(capped.battery.power, 30.001)
+            XCTAssertLessThanOrEqual(capped.typeC.power, 30.001)
+            XCTAssertEqual(capped.battery.current * capped.battery.voltage, capped.battery.power, accuracy: 0.35)
+            XCTAssertEqual(capped.typeC.current * capped.typeC.voltage, capped.typeC.power, accuracy: 0.35)
+        }
+
+        _ = try await demo.perform(.setPowerLimit(.input, level: .watts140))
+        _ = try await demo.perform(.setPowerLimit(.global, level: .watts30))
+        let globallyCapped = await demo.snapshot
+        XCTAssertEqual(globallyCapped.battery.power, 30, accuracy: 0.001)
+        XCTAssertEqual(globallyCapped.typeC.power, 30, accuracy: 0.001)
+    }
+
+    func testThirtyWattOutputCapNeverAllowsOutputTelemetryAboveThirtyWatts() async throws {
+        let demo = DemoTransport(seed: 0x57415454)
+        _ = try await demo.perform(.setPowerLimit(.output, level: .watts30))
+
+        for _ in 0..<3 {
+            try await demo.refreshTelemetry()
+            let output = await demo.snapshot.typeC
+            XCTAssertEqual(output.mode, .output)
+            XCTAssertLessThanOrEqual(output.power, 30.001)
+            XCTAssertEqual(output.current * output.voltage, output.power, accuracy: 0.35)
+        }
     }
 
     func testDCControlAndChargerFlipUpdatePlausibleSnapshot() async throws {
@@ -76,8 +138,10 @@ final class DemoTransportTests: XCTestCase {
             await iterator.next(),
             await iterator.next(),
             await iterator.next(),
+            await iterator.next(),
         ].compactMap { $0 }
-        XCTAssertEqual(initial.count, 4)
+        XCTAssertEqual(initial.count, 5)
+        XCTAssertTrue(initial.contains { if case .handshakeCompleted = $0 { true } else { false } })
         XCTAssertTrue(initial.contains { if case .connected = $0 { true } else { false } })
         XCTAssertTrue(initial.contains { if case .battery = $0 { true } else { false } })
         XCTAssertTrue(initial.contains { if case .dc = $0 { true } else { false } })
@@ -140,18 +204,18 @@ final class DemoTransportTests: XCTestCase {
         let recorder = DemoEventRecorder()
         await recorder.start(stream: demo.events)
         _ = try await demo.connectDemo()
-        await recorder.waitForEventCount(4)
+        await recorder.waitForEventCount(5)
         await clock.waitForSleepers(1)
 
         await clock.advance(by: .seconds(1))
         await clock.waitForNowWaiters(1)
         await demo.disconnect()
-        await recorder.waitForEventCount(5)
+        await recorder.waitForEventCount(6)
         await clock.resumeNextNow()
         for _ in 0..<100 { await Task.yield() }
 
         let events = await recorder.events
-        XCTAssertEqual(events.count, 5)
+        XCTAssertEqual(events.count, 6)
         XCTAssertEqual(events.last, .disconnected(nil))
     }
 

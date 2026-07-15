@@ -110,6 +110,13 @@ final class AppModel {
     struct KnownDevice: Codable, Equatable, Sendable {
         let identifier: UUID
         let identity: CachedIdentity
+        let persistedState: PersistedDeviceState?
+
+        init(identifier: UUID, identity: CachedIdentity, persistedState: PersistedDeviceState? = nil) {
+            self.identifier = identifier
+            self.identity = identity
+            self.persistedState = persistedState
+        }
     }
 
     static let onboardingCompleteKey = AppPersistence.onboardingCompleteKey
@@ -144,6 +151,9 @@ final class AppModel {
     private var operationTask: Task<Void, Never>?
     private var supersededOperationTask: Task<Void, Never>?
     private var otaRecoveryTask: Task<Void, Never>?
+    private var telemetryPersistenceTask: Task<Void, Never>?
+    private var pendingTelemetryPersistence: PendingTelemetryPersistence?
+    private var telemetryPersistenceGeneration: UInt = 0
     private var transportGeneration: UInt = 0
     private var operationGeneration: UInt = 0
     private var selectedPeripheralID: UUID?
@@ -178,18 +188,15 @@ final class AppModel {
         let demo = DemoTransport(seed: 0x57415454)
         demoTransport = demo
         isDemo = true
-        connectedName = DemoTransport.identity.name
-        connectionStatus = .connected
         let generation = attach(transport: demo)
-        capabilities = DeviceCapabilities(features: DemoTransport.identity.features)
+        connectionStatus = .reconnecting
         route = .connected
 
         let operation = beginOperation(for: generation, transport: demo)
         operationTask = Task { [weak self] in
             do {
-                let identity = try await demo.connectDemo()
+                _ = try await demo.connectDemo()
                 guard let self, self.isCurrent(operation) else { return }
-                connectedName = identity.name
             } catch {
                 guard let self, self.isCurrent(operation) else { return }
                 connectionStatus = .disconnected(String(describing: error))
@@ -370,12 +377,34 @@ final class AppModel {
 
     private func startReturningSession() {
         let restoredTransport = transportFactory()
-        let generation = attach(transport: restoredTransport)
-
         guard let storedID = persistence.lastSuccessfulPeripheralID else {
+            attach(transport: restoredTransport)
             startScanning()
             return
         }
+
+        let persisted = persistence.loadPersistedDeviceState(for: storedID)
+        let restoredCapabilities = DeviceCapabilities(features: FeatureFlags(
+            rawValue: persisted?.resolvedFeaturesRawValue ?? 0
+        ))
+        let cachedIdentity = knownDevices[storedID]
+        let hasTelemetry = persisted?.battery != nil || persisted?.dc != nil || persisted?.typeC != nil
+        let restoredState = DeviceState(
+            identity: cachedIdentity.map {
+                restoredIdentity(identifier: storedID, identity: $0, capabilities: restoredCapabilities)
+            },
+            connection: .reconnecting,
+            freshness: hasTelemetry ? .stale : .loading,
+            battery: persisted?.battery?.value,
+            dc: persisted?.dc?.value,
+            typeC: persisted?.typeC?.value,
+            lastTelemetryAt: nil
+        )
+        let generation = attach(
+            transport: restoredTransport,
+            initialState: restoredState,
+            initialCapabilities: restoredCapabilities
+        )
 
         selectedPeripheralID = storedID
         connectedName = knownDevices[storedID]?.name
@@ -402,7 +431,13 @@ final class AppModel {
     }
 
     @discardableResult
-    private func attach(transport: any DeviceTransport) -> UInt {
+    private func attach(
+        transport: any DeviceTransport,
+        initialState: DeviceState = DeviceState(),
+        initialCapabilities: DeviceCapabilities = DeviceCapabilities(features: [])
+    ) -> UInt {
+        flushPendingTelemetryPersistence()
+        telemetryPersistenceTask?.cancel()
         let previousTransport = self.transport
         supersedeCurrentOperation()
         eventTask?.cancel()
@@ -416,10 +451,10 @@ final class AppModel {
         operationGeneration &+= 1
         let generation = transportGeneration
         self.transport = transport
-        let session = DeviceSession(transport: transport)
+        let session = DeviceSession(transport: transport, initialState: initialState)
         self.session = session
-        state = DeviceState()
-        capabilities = DeviceCapabilities(features: [])
+        state = initialState
+        capabilities = initialCapabilities
         limits.removeAll()
         limitsRevision = 0
         limitsLoading = false
@@ -499,6 +534,7 @@ final class AppModel {
             connectionStatus = .reconnecting
             route = .connected
         case let .disconnected(failure):
+            flushPendingTelemetryPersistence()
             connectionStatus = .disconnected(failure?.message)
             if otaRecoveryPeripheralID != nil {
                 route = .scan
@@ -512,20 +548,25 @@ final class AppModel {
             let advertisedName = snapshot.advertisedName
                 ?? knownDevices[snapshot.peripheralID]?.advertisedName
                 ?? "Wattline device"
-            recordSuccessfulHandshake(
-                deviceID: snapshot.peripheralID,
-                advertisedName: advertisedName,
-                deviceInformationName: snapshot.modelNumber,
-                macAddress: snapshot.macAddress,
-                modelNumber: snapshot.modelNumber,
-                hardwareRevision: snapshot.hardwareRevision,
-                otaFirmwareRevision: snapshot.otaFirmwareRevision,
-                appFirmwareRevision: snapshot.appFirmwareRevision,
-                cid: snapshot.cid,
-                rawFeatures: snapshot.rawFeatures,
-                isOTAMode: isOTAMode
-            )
-            connectedName = knownDevices[snapshot.peripheralID]?.name
+            if isDemo {
+                connectedName = advertisedName
+            } else {
+                recordSuccessfulHandshake(
+                    deviceID: snapshot.peripheralID,
+                    advertisedName: advertisedName,
+                    deviceInformationName: snapshot.modelNumber,
+                    macAddress: snapshot.macAddress,
+                    modelNumber: snapshot.modelNumber,
+                    hardwareRevision: snapshot.hardwareRevision,
+                    otaFirmwareRevision: snapshot.otaFirmwareRevision,
+                    appFirmwareRevision: snapshot.appFirmwareRevision,
+                    cid: snapshot.cid,
+                    rawFeatures: snapshot.rawFeatures,
+                    isOTAMode: isOTAMode
+                )
+                persistence.saveResolvedFeatures(capabilities.features.rawValue, for: snapshot.peripheralID)
+                connectedName = knownDevices[snapshot.peripheralID]?.name
+            }
             if isOTAMode {
                 otaRecoveryPeripheralID = snapshot.peripheralID
                 let discovered = discoveredDevices.first { $0.id == snapshot.peripheralID }
@@ -541,8 +582,101 @@ final class AppModel {
             } else {
                 otaRecoveryPeripheralID = nil
             }
-        case .battery, .dc, .typeC, .transactionDepth:
+        case let .battery(value, timestamp):
+            queueTelemetryPersistence(timestamp: timestamp) { pending, observedAt in
+                pending.battery = PersistedObservation(value: value, observedAt: observedAt)
+            }
+        case let .dc(value, timestamp):
+            queueTelemetryPersistence(timestamp: timestamp) { pending, observedAt in
+                pending.dc = PersistedObservation(value: value, observedAt: observedAt)
+            }
+        case let .typeC(value, timestamp):
+            queueTelemetryPersistence(timestamp: timestamp) { pending, observedAt in
+                pending.typeC = PersistedObservation(value: value, observedAt: observedAt)
+            }
+        case .transactionDepth:
             break
+        }
+    }
+
+    private func restoredIdentity(
+        identifier: UUID,
+        identity: CachedIdentity,
+        capabilities: DeviceCapabilities
+    ) -> DeviceIdentitySnapshot {
+        DeviceIdentitySnapshot(
+            peripheralID: identifier,
+            advertisedName: identity.advertisedName,
+            mode: identity.isOTAMode == true ? .ota : .application,
+            modelNumber: identity.modelNumber,
+            hardwareRevision: identity.hardwareRevision,
+            otaFirmwareRevision: identity.otaFirmwareRevision,
+            appFirmwareRevision: identity.appFirmwareRevision,
+            cid: identity.cid,
+            rawFeatures: identity.rawFeatures,
+            macAddress: identity.macAddress,
+            capabilities: capabilities
+        )
+    }
+
+    private func queueTelemetryPersistence(
+        timestamp: DeviceTimestamp,
+        update: (inout PendingTelemetryPersistence, Date) -> Void
+    ) {
+        guard !isDemo, let selectedPeripheralID else { return }
+        if let pendingTelemetryPersistence,
+           pendingTelemetryPersistence.identifier != selectedPeripheralID
+            || pendingTelemetryPersistence.transportGeneration != transportGeneration
+            || pendingTelemetryPersistence.timestamp != timestamp {
+            flushPendingTelemetryPersistence()
+        }
+        if pendingTelemetryPersistence == nil {
+            pendingTelemetryPersistence = PendingTelemetryPersistence(
+                identifier: selectedPeripheralID,
+                transportGeneration: transportGeneration,
+                timestamp: timestamp
+            )
+        }
+        update(&pendingTelemetryPersistence!, persistence.currentDate)
+
+        telemetryPersistenceTask?.cancel()
+        telemetryPersistenceGeneration &+= 1
+        let generation = telemetryPersistenceGeneration
+        telemetryPersistenceTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return
+            }
+            guard let self, telemetryPersistenceGeneration == generation else { return }
+            flushPendingTelemetryPersistence()
+        }
+    }
+
+    private func flushPendingTelemetryPersistence() {
+        guard let pending = pendingTelemetryPersistence else { return }
+        pendingTelemetryPersistence = nil
+        telemetryPersistenceTask = nil
+        persistence.saveTelemetry(
+            battery: pending.battery,
+            dc: pending.dc,
+            typeC: pending.typeC,
+            for: pending.identifier
+        )
+    }
+
+    private struct PendingTelemetryPersistence {
+        let identifier: UUID
+        let transportGeneration: UInt
+        let timestamp: DeviceTimestamp
+        var battery: PersistedObservation<BatteryStatus>?
+        var dc: PersistedObservation<DCPortStatus>?
+        var typeC: PersistedObservation<TypeCPortStatus>?
+
+        init(identifier: UUID, transportGeneration: UInt, timestamp: DeviceTimestamp) {
+            self.identifier = identifier
+            self.transportGeneration = transportGeneration
+            self.timestamp = timestamp
         }
     }
 
@@ -577,7 +711,12 @@ final class AppModel {
             state = await session.state
             return true
         } catch {
-            if showError { showToast(String(describing: error)) }
+            if showError {
+                limits[type] = nil
+                limitReadFailures.insert(type)
+                limitsRevision &+= 1
+                showToast(String(describing: error))
+            }
             return false
         }
     }

@@ -75,13 +75,15 @@ public actor DeviceSession {
 
     public init(
         transport: any DeviceTransport,
-        clock: any DeviceClock = ContinuousDeviceClock()
+        clock: any DeviceClock = ContinuousDeviceClock(),
+        initialState: DeviceState = DeviceState()
     ) {
         let pair = AsyncStream<DeviceState>.makeStream(bufferingPolicy: .bufferingNewest(1))
         states = pair.stream
         stateContinuation = pair.continuation
         self.transport = transport
         self.clock = clock
+        state = initialState
         stateContinuation.yield(state)
     }
 

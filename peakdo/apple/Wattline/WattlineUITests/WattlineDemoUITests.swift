@@ -64,7 +64,6 @@ final class WattlineDemoUITests: XCTestCase {
         for label in ["Global", "Input", "Output"] {
             let slider = app.sliders["\(label) limit"]
             XCTAssertTrue(slider.exists)
-            slider.adjust(toNormalizedSliderPosition: 1)
             waitForValue(of: slider, containing: "140")
             slider.adjust(toNormalizedSliderPosition: 0)
             waitForValue(of: slider, containing: "30")
@@ -77,6 +76,7 @@ final class WattlineDemoUITests: XCTestCase {
         try capture("limits", app: app)
 
         app.navigationBars.buttons.firstMatch.tap()
+        waitForValue(of: hero, containing: "30.0 watts")
         for tab in ["Home", "Timers", "Shortcuts", "Settings"] {
             app.tabBars.buttons[tab].tap()
             XCTAssertTrue(app.staticTexts["DEMO"].waitForExistence(timeout: 3))

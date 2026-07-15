@@ -1,19 +1,19 @@
 import Foundation
 
-public enum PowerFlow: Int8, Equatable, Sendable {
+public enum PowerFlow: Int8, Codable, Equatable, Sendable {
     case discharging = -1
     case idle = 0
     case charging = 1
 }
 
-public enum TypeCPortMode: UInt8, Equatable, Sendable {
+public enum TypeCPortMode: UInt8, Codable, Equatable, Sendable {
     case disabled = 0
     case input = 1
     case output = 2
     case inputAndOutput = 3
 }
 
-public struct BatteryStatus: Equatable, Sendable {
+public struct BatteryStatus: Codable, Equatable, Sendable {
     public let enabled: Bool
     public let status: PowerFlow
     public let isFull: Bool
@@ -41,7 +41,7 @@ public struct BatteryStatus: Equatable, Sendable {
     }
 }
 
-public struct DCPortStatus: Equatable, Sendable {
+public struct DCPortStatus: Codable, Equatable, Sendable {
     public let enabled: Bool
     public let status: PowerFlow
     public let voltage: Double
@@ -61,7 +61,7 @@ public struct DCPortStatus: Equatable, Sendable {
     }
 }
 
-public struct TypeCPortStatus: Equatable, Sendable {
+public struct TypeCPortStatus: Codable, Equatable, Sendable {
     public let enabled: Bool
     public let status: PowerFlow
     public let voltage: Double

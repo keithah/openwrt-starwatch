@@ -173,6 +173,7 @@ final class AppModelReconnectTests: XCTestCase {
         await model.setLimit(.global, level: .watts140)
 
         XCTAssertEqual(model.limits[.global], .watts65)
+        XCTAssertFalse(model.limitReadFailures.contains(.global))
         XCTAssertGreaterThan(model.limitsRevision, originalRevision)
         XCTAssertNotNil(model.toastMessage)
     }
@@ -230,6 +231,27 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(model.limits[.output], .watts60)
         XCTAssertNil(model.limits[.runtime])
         XCTAssertTrue(model.limitReadFailures.contains(.global))
+        XCTAssertFalse(model.limitReadFailures.contains(.runtime))
+        XCTAssertNotNil(model.toastMessage)
+    }
+
+    func testThrownInitialLimitGetMarksTypeUnavailableStopsLoadingAndToasts() async {
+        let transport = MutationTransport(steps: [
+            .failure,
+            .reply(Data([0x02, 0x80, 0x00, PowerLimitLevel.watts45.rawValue])),
+            .reply(Data([0x02, 0x80, 0x00, PowerLimitLevel.watts60.rawValue])),
+            .reply(Data([0x02, 0x80, 0xFF])),
+        ])
+        let model = makeMutationModel(transport: transport)
+        model.capabilities = DeviceCapabilities(features: [.usbPowerLimit])
+
+        await model.loadLimits()
+
+        XCTAssertFalse(model.limitsLoading)
+        XCTAssertNil(model.limits[.global])
+        XCTAssertTrue(model.limitReadFailures.contains(.global))
+        XCTAssertEqual(model.limits[.input], .watts45)
+        XCTAssertEqual(model.limits[.output], .watts60)
         XCTAssertFalse(model.limitReadFailures.contains(.runtime))
         XCTAssertNotNil(model.toastMessage)
     }
@@ -352,6 +374,7 @@ final class AppModelReconnectTests: XCTestCase {
         model.enterDemo()
         await fixture.transport.failSuspendedConnect(ordering: .beforeThrow)
         await model.waitForSupersededLifecycleOperation()
+        try await eventually { model.connectionStatus == .connected }
 
         XCTAssertTrue(model.isDemo)
         XCTAssertEqual(model.route, .connected)
@@ -386,18 +409,143 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(fixture.persistence.lastSuccessfulPeripheralID, realID)
     }
 
+    func testDemoIdentityUsesAuthoritativeHandshakeWithoutPersistingDemoDevice() async throws {
+        let fixture = makeFixture(onboardingComplete: false)
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+
+        model.enterDemo()
+
+        try await eventually {
+            model.state.identity?.cid == 0x0305
+                && model.state.identity?.modelNumber == "BP4SL3V2"
+                && model.capabilities.features.rawValue == 0x7FFF
+                && model.connectionStatus == .connected
+        }
+        XCTAssertEqual(model.state.identity?.appFirmwareRevision, "1.4.9")
+        XCTAssertTrue(model.knownDevices.isEmpty)
+        XCTAssertNil(fixture.persistence.lastSuccessfulPeripheralID)
+    }
+
+    func testRealTelemetryPersistenceRoundTripsAndPartialUpdatesRetainOtherChannels() async throws {
+        var observedAt = Date(timeIntervalSince1970: 1_000)
+        let fixture = makeFixture(onboardingComplete: false, wallClock: { observedAt })
+        let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        model.requestBluetoothAfterPriming()
+        let id = UUID()
+        let identity = makeIdentity(id: id, features: 0x7FFF)
+        let firstBattery = try battery(level: 62)
+        let replacementBattery = try battery(level: 63)
+        let dc = try DCPortStatus(frame: Data([1, 0xFF, 0, 0, 0, 0, 0, 0]))
+        let typeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 13))
+
+        await fixture.transport.emit(.handshakeCompleted(identity))
+        await fixture.transport.emit(.connected(id))
+        await fixture.transport.emit(.battery(firstBattery, timestamp: .seconds(1)))
+        await fixture.transport.emit(.dc(dc, timestamp: .seconds(1)))
+        await fixture.transport.emit(.typeC(typeC, timestamp: .seconds(1)))
+        try await eventually {
+            fixture.persistence.loadPersistedDeviceState(for: id)?.typeC?.value == typeC
+        }
+
+        var persisted = try XCTUnwrap(fixture.persistence.loadPersistedDeviceState(for: id))
+        XCTAssertEqual(persisted.resolvedFeaturesRawValue, 0x7FFF)
+        XCTAssertEqual(persisted.battery?.value, firstBattery)
+        XCTAssertEqual(persisted.dc?.value, dc)
+        XCTAssertEqual(persisted.typeC?.value, typeC)
+        XCTAssertEqual(fixture.persistence.telemetryFlushCount, 1)
+        XCTAssertEqual(persisted.battery?.observedAt, Date(timeIntervalSince1970: 1_000))
+
+        observedAt = Date(timeIntervalSince1970: 2_000)
+        await fixture.transport.emit(.battery(replacementBattery, timestamp: .seconds(4)))
+        try await eventually {
+            fixture.persistence.loadPersistedDeviceState(for: id)?.battery?.value == replacementBattery
+        }
+        persisted = try XCTUnwrap(fixture.persistence.loadPersistedDeviceState(for: id))
+        XCTAssertEqual(persisted.battery?.observedAt, Date(timeIntervalSince1970: 2_000))
+        XCTAssertEqual(persisted.dc?.value, dc, "battery updates must not discard DC")
+        XCTAssertEqual(persisted.typeC?.value, typeC, "battery updates must not discard Type-C")
+        XCTAssertEqual(persisted.dc?.observedAt, Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(persisted.typeC?.observedAt, Date(timeIntervalSince1970: 1_000))
+    }
+
+    func testReturningRelaunchRestoresStaleSnapshotCapabilitiesAndReplacesFreshChannels() async throws {
+        let id = UUID()
+        let fixture = makeFixture(onboardingComplete: false)
+        let initial = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
+        initial.requestBluetoothAfterPriming()
+        let identity = makeIdentity(id: id, features: 0x0310)
+        let cachedBattery = try battery(level: 62)
+        let freshBattery = try battery(level: 64)
+        let cachedDC = try DCPortStatus(frame: Data([1, 0xFF, 0, 0, 0, 0, 0, 0]))
+        let cachedTypeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 13))
+        await fixture.transport.emit(.handshakeCompleted(identity))
+        await fixture.transport.emit(.connected(id))
+        await fixture.transport.emit(.battery(cachedBattery, timestamp: .seconds(1)))
+        await fixture.transport.emit(.dc(cachedDC, timestamp: .seconds(2)))
+        await fixture.transport.emit(.typeC(cachedTypeC, timestamp: .seconds(3)))
+        try await eventually {
+            fixture.persistence.loadPersistedDeviceState(for: id)?.typeC?.value == cachedTypeC
+        }
+        fixture.persistence.onboardingComplete = true
+        fixture.persistence.lastSuccessfulPeripheralID = id
+
+        let returningTransport = RecordingTransport(connectResult: .suspended)
+        let restored = AppModel(
+            persistence: fixture.persistence,
+            transportFactory: { returningTransport }
+        )
+
+        XCTAssertEqual(restored.connectionStatus, .reconnecting)
+        XCTAssertEqual(restored.state.connection, .reconnecting)
+        XCTAssertEqual(restored.state.freshness, .stale)
+        XCTAssertEqual(restored.state.battery, cachedBattery)
+        XCTAssertEqual(restored.state.dc, cachedDC)
+        XCTAssertEqual(restored.state.typeC, cachedTypeC)
+        XCTAssertNil(restored.state.lastTelemetryAt, "monotonic time must not cross launches")
+        XCTAssertEqual(restored.capabilities.features.rawValue, 0x0310)
+
+        await returningTransport.emit(.battery(freshBattery, timestamp: .seconds(1)))
+        try await eventually { restored.state.battery == freshBattery }
+        XCTAssertEqual(restored.state.freshness, .live)
+        XCTAssertEqual(restored.state.dc, cachedDC)
+        XCTAssertEqual(restored.state.typeC, cachedTypeC)
+    }
+
     private func makeFixture(
         onboardingComplete: Bool,
         lastPeripheralID: UUID? = nil,
-        connectResult: RecordingTransport.ConnectResult = .success
+        connectResult: RecordingTransport.ConnectResult = .success,
+        wallClock: @escaping @MainActor () -> Date = Date.init
     ) -> (persistence: AppPersistence, transport: RecordingTransport) {
         let suiteName = "WattlineTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
-        let persistence = AppPersistence(defaults: defaults)
+        let persistence = AppPersistence(defaults: defaults, wallClock: wallClock)
         persistence.onboardingComplete = onboardingComplete
         persistence.lastSuccessfulPeripheralID = lastPeripheralID
         return (persistence, RecordingTransport(connectResult: connectResult))
+    }
+
+    private func makeIdentity(id: UUID, features: UInt32) -> DeviceIdentitySnapshot {
+        DeviceIdentitySnapshot(
+            peripheralID: id,
+            advertisedName: "Link-Power 2",
+            mode: .application,
+            modelNumber: "BP4SL3V2",
+            hardwareRevision: "V5#0305",
+            appFirmwareRevision: "1.4.9",
+            cid: 0x0305,
+            rawFeatures: features,
+            capabilities: DeviceCapabilities(features: FeatureFlags(rawValue: features))
+        )
+    }
+
+    private func battery(level: UInt8) throws -> BatteryStatus {
+        var frame = Data(repeating: 0, count: 16)
+        frame[0] = 1
+        frame[1] = UInt8(bitPattern: PowerFlow.discharging.rawValue)
+        frame[7] = level
+        return try BatteryStatus(frame: frame)
     }
 
     private func makeMutationModel(transport: MutationTransport) -> AppModel {

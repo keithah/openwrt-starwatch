@@ -52,11 +52,28 @@ public actor DemoTransport: DeviceTransport {
     )
 
     private static let deviceID = UUID(uuidString: "57415454-4C49-4E45-8000-000000000305")!
-    private static let defaultLimits: [PowerLimitType: PowerLimitLevel] = [
+    private static let initialLimits: [PowerLimitType: PowerLimitLevel] = [
+        .global: .watts140,
+        .input: .watts140,
+        .output: .watts140,
+    ]
+    private static let resetLimits: [PowerLimitType: PowerLimitLevel] = [
         .global: .watts65,
         .input: .watts65,
         .output: .watts65,
     ]
+    private static let identitySnapshot = DeviceIdentitySnapshot(
+        peripheralID: deviceID,
+        advertisedName: identity.name,
+        mode: .application,
+        modelNumber: "BP4SL3V2",
+        hardwareRevision: "V5#0305",
+        otaFirmwareRevision: nil,
+        appFirmwareRevision: identity.firmware,
+        cid: identity.cid,
+        rawFeatures: identity.features.rawValue,
+        capabilities: DeviceCapabilities(features: identity.features)
+    )
 
     private let continuation: AsyncStream<DeviceEvent>.Continuation
     private let clock: any DeviceClock
@@ -68,7 +85,7 @@ public actor DemoTransport: DeviceTransport {
     private var typeCOutputPreferred = true
     private var bypassEnabled = false
     private var chargerConnected = false
-    private var limits = DemoTransport.defaultLimits
+    private var limits = DemoTransport.initialLimits
 
     public private(set) var snapshot: DemoSnapshot
     public private(set) var pendingTransactionCount = 0
@@ -85,7 +102,7 @@ public actor DemoTransport: DeviceTransport {
             typeCOutputPreferred: true,
             bypassEnabled: false,
             chargerConnected: false,
-            limits: Self.defaultLimits
+            limits: Self.initialLimits
         )
     }
 
@@ -108,6 +125,7 @@ public actor DemoTransport: DeviceTransport {
     public func connect(to id: UUID) async throws {
         guard !connected else { return }
         connected = true
+        continuation.yield(.handshakeCompleted(Self.identitySnapshot))
         continuation.yield(.connected(id))
         let timestamp = await clock.now
         guard connected else { return }
@@ -208,7 +226,7 @@ public actor DemoTransport: DeviceTransport {
             payload = []
         case (.typeCPowerLimit, .delete):
             let type = try Self.limitType(request.payload, count: 1)
-            limits[type] = Self.defaultLimits[type]
+            limits[type] = Self.resetLimits[type]
             result = 0
             payload = []
         case (.runningModeControl, .set):
@@ -326,26 +344,32 @@ public actor DemoTransport: DeviceTransport {
         jitter: ((Double) -> Double)? = nil
     ) -> DemoSnapshot {
         let vary = jitter ?? { $0 }
-        let batteryPower = vary(chargerConnected ? 100 : -45)
+        let inputLimit = min(limitWatts(limits[.global]), limitWatts(limits[.input]))
+        let outputLimit = min(limitWatts(limits[.global]), limitWatts(limits[.output]))
+        let batteryVoltage = vary(16)
+        let batteryPower = chargerConnected
+            ? min(batteryVoltage * 6.25, inputLimit)
+            : batteryVoltage * (-45 / 16)
         let batteryCapacity = 153.6 * 0.62
         let runtime = UInt16((batteryCapacity / abs(batteryPower) * 60).rounded())
         let battery = try! BatteryStatus(frame: batteryFrame(
             status: chargerConnected ? .charging : .discharging,
             capacity: batteryCapacity,
-            voltage: vary(16),
-            current: vary(batteryPower / 16),
+            voltage: batteryVoltage,
+            current: batteryPower / batteryVoltage,
             power: batteryPower,
             remainingMinutes: runtime
         ))
 
         let dcVoltage = dcEnabled ? vary(19.6) : 0
-        let dcCurrent = dcEnabled ? vary(1.2) : 0
+        let dcPower = dcEnabled ? dcVoltage * 1.2 : 0
+        let dcCurrent = dcEnabled ? dcPower / dcVoltage : 0
         let dc = try! DCPortStatus(frame: dcFrame(
             enabled: dcEnabled,
             status: dcEnabled ? .discharging : .idle,
             voltage: dcVoltage,
             current: dcCurrent,
-            power: dcEnabled ? vary(23.52) : 0,
+            power: dcPower,
             bypassOn: bypassEnabled
         ))
 
@@ -353,12 +377,15 @@ public actor DemoTransport: DeviceTransport {
         let typeCMode: TypeCPortMode = effectiveTypeCOutput ? .output : .input
         let typeCStatus: PowerFlow = chargerConnected ? .charging : (effectiveTypeCOutput ? .discharging : .idle)
         let typeCVoltage = chargerConnected ? vary(20) : (effectiveTypeCOutput ? vary(12) : 0)
-        let typeCCurrent = chargerConnected ? vary(5) : (effectiveTypeCOutput ? vary(1.4) : 0)
+        let typeCPower = chargerConnected
+            ? min(typeCVoltage * 5, inputLimit)
+            : (effectiveTypeCOutput ? min(typeCVoltage * 1.4, outputLimit) : 0)
+        let typeCCurrent = typeCVoltage == 0 ? 0 : typeCPower / typeCVoltage
         let typeC = try! TypeCPortStatus(frame: typeCFrame(
             status: typeCStatus,
             voltage: typeCVoltage,
             current: typeCCurrent,
-            power: chargerConnected ? vary(100) : (effectiveTypeCOutput ? vary(16.8) : 0),
+            power: typeCPower,
             mode: typeCMode,
             isDCInput: chargerConnected
         ))
@@ -370,6 +397,17 @@ public actor DemoTransport: DeviceTransport {
             limits: limits,
             chargerConnected: chargerConnected
         )
+    }
+
+    private static func limitWatts(_ level: PowerLimitLevel?) -> Double {
+        switch level {
+        case .watts30: 30
+        case .watts45: 45
+        case .watts60: 60
+        case .watts65: 65
+        case .watts100: 100
+        case .watts140, nil: 140
+        }
     }
 
     private static func batteryFrame(
