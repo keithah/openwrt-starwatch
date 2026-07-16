@@ -17,6 +17,15 @@ final class LowBatteryNotificationTests: XCTestCase {
         XCTAssertEqual(categories, 1)
     }
 
+    func testAuthorizationDeniedIsObservableAndDoesNotEnable() async {
+        let recorder = NotificationRecorder(authorization: false)
+        let coordinator = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder) }
+        let result = await coordinator.setEnabled(true)
+        let enabled = await MainActor.run { coordinator.isEnabled }
+        XCTAssertEqual(result, .denied)
+        XCTAssertFalse(enabled)
+    }
+
     func testDCActionIsStructurallyAbsentWithoutCapability() async {
         let recorder = NotificationRecorder()
         let coordinator = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder, capabilities: { DeviceCapabilities(features: []) }) }
@@ -40,13 +49,38 @@ final class LowBatteryNotificationTests: XCTestCase {
         let result = await coordinator.handleAction(identifier: "WATTLINE_TURN_OFF_DC")
         XCTAssertEqual(result, .timedOut)
     }
+
+    func testActionMapsUnsupportedAndUnavailableDistinctly() async {
+        let recorder = NotificationRecorder()
+        let unsupported = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder, capabilities: { DeviceCapabilities(features: []) }) }
+        let unsupportedResult = await unsupported.handleAction(identifier: "WATTLINE_TURN_OFF_DC")
+        XCTAssertEqual(unsupportedResult, .unsupported)
+        let unavailable = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder, capabilities: { DeviceCapabilities(features: [.dcControl]) }) }
+        let unavailableResult = await unavailable.handleAction(identifier: "WATTLINE_TURN_OFF_DC")
+        XCTAssertEqual(unavailableResult, .unavailable)
+    }
+
+    func testAlreadyLowDischargingSampleAlertsAfterEnable() async {
+        let recorder = NotificationRecorder()
+        let coordinator = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder) }
+        _ = await coordinator.setEnabled(true)
+        let id = UUID()
+        let battery = SharedBatterySnapshot(enabled: true, status: .discharging, isFull: false, maxCapacity: 100, capacity: 19, level: 19, voltage: 0, current: 0, power: 0, remainingMinutes: 0)
+        let snapshot = SharedDeviceSnapshot(peripheralID: id, featuresRawValue: 0, battery: battery, dc: nil, typeC: nil, connection: .live, observedAt: Date())
+        await coordinator.receive(snapshot)
+        let posts = await recorder.posts
+        XCTAssertEqual(posts.count, 1)
+    }
 }
 
 actor NotificationRecorder: NotificationCenterAdapter {
+    let authorization: Bool
     private(set) var authorizationRequests = 0
     private(set) var categories = [Bool]()
     private(set) var lastIncludedDCAction = false
-    func requestAuthorization() async throws -> Bool { authorizationRequests += 1; return true }
+    private(set) var posts = [(Int, Int)]()
+    init(authorization: Bool = true) { self.authorization = authorization }
+    func requestAuthorization() async throws -> Bool { authorizationRequests += 1; return authorization }
     func registerLowBatteryCategory(includeDCAction: Bool) async { categories.append(includeDCAction); lastIncludedDCAction = includeDCAction }
-    func postLowBattery(level: Int, threshold: Int) async throws {}
+    func postLowBattery(level: Int, threshold: Int) async throws { posts.append((level, threshold)) }
 }

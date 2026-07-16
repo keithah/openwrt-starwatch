@@ -9,7 +9,7 @@ protocol NotificationCenterAdapter: Sendable {
 }
 
 enum NotificationActionResult: Equatable, Sendable {
-    case success, denied, timedOut, unsupported, unavailable
+    case success, denied, timedOut, superseded, unsupported, unavailable
 }
 
 struct SystemNotificationCenterAdapter: NotificationCenterAdapter {
@@ -26,7 +26,7 @@ struct SystemNotificationCenterAdapter: NotificationCenterAdapter {
     func postLowBattery(level: Int, threshold: Int) async throws {
         let content = UNMutableNotificationContent()
         content.title = "Low battery"
-        content.body = "Battery is at (level)% (threshold (threshold)%)."
+        content.body = "Battery is at \(level)% (threshold \(threshold)%)."
         content.categoryIdentifier = "WATTLINE_LOW_BATTERY"
         let request = UNNotificationRequest(identifier: "wattline.low-battery", content: content, trigger: nil)
         try await center.add(request)
@@ -56,15 +56,17 @@ final class LowBatteryNotificationCoordinator {
         self.notifications = notifications; self.broker = broker; self.peripheralID = peripheralID; self.snapshot = snapshot; self.capabilities = capabilities; self.telemetryTimeout = telemetryTimeout
     }
 
-    func setEnabled(_ enabled: Bool) async {
-        guard enabled != isEnabled else { return }
+    @discardableResult
+    func setEnabled(_ enabled: Bool) async -> NotificationActionResult {
+        guard enabled != isEnabled else { return .success }
         if enabled {
-            guard !authorizationRequested else { isEnabled = true; return }
+            guard !authorizationRequested else { isEnabled = true; return .success }
             authorizationRequested = true
-            guard (try? await notifications.requestAuthorization()) == true else { return }
+            guard (try? await notifications.requestAuthorization()) == true else { return .denied }
             isEnabled = true
             await notifications.registerLowBatteryCategory(includeDCAction: capabilities().hasDCControl)
-        } else { isEnabled = false; policy = LowBatteryPolicy() }
+            return .success
+        } else { isEnabled = false; policy = LowBatteryPolicy(); return .success }
     }
 
     func receive(_ snapshot: SharedDeviceSnapshot) async {
@@ -82,7 +84,13 @@ final class LowBatteryNotificationCoordinator {
             _ = try await broker.withConnection(to: id, timeout: .seconds(10)) { context in
                 try await context.session.perform(.setDC(false))
             }
-        } catch is DeviceOperationBroker.BrokerError { return .unavailable }
+        } catch let error as DeviceOperationBroker.BrokerError {
+            switch error {
+            case .timedOut: return .timedOut
+            case .superseded: return .superseded
+            case .unavailable: return .unavailable
+            }
+        }
           catch { return .unavailable }
 
         let deadline = ContinuousClock.now + telemetryTimeout
