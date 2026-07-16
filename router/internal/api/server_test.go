@@ -15,6 +15,16 @@ type snapshotStub struct{ snapshot dish.Snapshot }
 
 func (s snapshotStub) Snapshot() dish.Snapshot { return s.snapshot }
 
+type wanStub struct{ snapshot dish.WANStatus }
+
+func (s wanStub) Snapshot() dish.WANStatus { return s.snapshot }
+
+type spanStub struct{ result history.QueryResult }
+
+func (s spanStub) QuerySpan(string, time.Time, time.Duration, int) (history.QueryResult, error) {
+	return s.result, nil
+}
+
 func testHandler(t *testing.T, token string, capacity int) (http.Handler, *history.Store) {
 	t.Helper()
 	store := history.NewStore(capacity)
@@ -90,13 +100,14 @@ func TestHistoryReturnsAtMostThousandRAMPoints(t *testing.T) {
 	var body struct {
 		Series string          `json:"series"`
 		Span   string          `json:"span"`
+		Tier   history.Tier    `json:"tier"`
 		Points []history.Point `json:"points"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Series != history.LatencyMS || body.Span != "3h" || len(body.Points) != 1000 {
-		t.Fatalf("body: series=%q span=%q points=%d", body.Series, body.Span, len(body.Points))
+	if body.Series != history.LatencyMS || body.Span != "3h" || body.Tier != history.TierRAM || len(body.Points) != 1000 {
+		t.Fatalf("body: series=%q span=%q tier=%q points=%d", body.Series, body.Span, body.Tier, len(body.Points))
 	}
 }
 
@@ -111,4 +122,63 @@ func TestHistoryValidatesSeriesAndSpan(t *testing.T) {
 			t.Fatalf("%s: code=%d body=%s", target, response.Code, response.Body.String())
 		}
 	}
+}
+
+func TestWANEndpointAndStatusExposeWANSnapshot(t *testing.T) {
+	store := history.NewStore(10)
+	wan := wanStub{snapshot: dish.WANStatus{Available: true, Interface: "wan0", Up: true, RouterDownBPS: 123}}
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{snapshot: dish.Snapshot{Topology: dish.TopologyWANOnly}},
+		History: store, WAN: wan,
+	})
+	response := request(handler, http.MethodGet, "/api/wan", "secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("wan code=%d body=%s", response.Code, response.Body.String())
+	}
+	var got dish.WANStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Interface != "wan0" || got.RouterDownBPS != 123 {
+		t.Fatalf("wan: %+v", got)
+	}
+	response = request(handler, http.MethodGet, "/api/status", "secret")
+	var status dish.Snapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.WAN.Interface != "wan0" {
+		t.Fatalf("status wan: %+v", status.WAN)
+	}
+}
+
+func TestHistoryReturnsSelectedPersistentTier(t *testing.T) {
+	minimum, maximum := float32(1), float32(5)
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{},
+		History: spanStub{result: history.QueryResult{Tier: history.TierMinute, Points: []history.Point{{
+			Time: time.Date(2026, 7, 15, 11, 0, 0, 0, time.UTC), Value: 3, Min: &minimum, Max: &maximum,
+		}}}},
+	})
+	response := request(handler, http.MethodGet, "/api/history?series=latency_ms&span=24h", "secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Tier   history.Tier    `json:"tier"`
+		Points []history.Point `json:"points"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Tier != history.TierMinute || len(body.Points) != 1 || valueOf(body.Points[0].Min) != 1 || valueOf(body.Points[0].Max) != 5 {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+func valueOf(value *float32) float32 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }

@@ -26,6 +26,8 @@ var ErrUnknownSeries = errors.New("unknown history series")
 type Point struct {
 	Time  time.Time `json:"time"`
 	Value float32   `json:"value"`
+	Min   *float32  `json:"min,omitempty"`
+	Max   *float32  `json:"max,omitempty"`
 }
 
 type Writer interface {
@@ -79,18 +81,39 @@ func (s *Store) Query(series string, since time.Time, limit int) ([]Point, error
 		start = sort.Search(len(all), func(i int) bool { return !all[i].Time.Before(since) })
 	}
 	all = all[start:]
-	if limit <= 0 || len(all) <= limit {
-		return all, nil
+	return downsample(all, limit), nil
+}
+
+func (s *Store) QuerySpan(series string, since time.Time, _ time.Duration, limit int) (QueryResult, error) {
+	points, err := s.Query(series, since, limit)
+	return QueryResult{Tier: TierRAM, Points: points}, err
+}
+
+func downsample(points []Point, limit int) []Point {
+	if limit <= 0 || len(points) <= limit {
+		return points
 	}
 	if limit == 1 {
-		return []Point{all[len(all)-1]}, nil
+		return []Point{points[len(points)-1]}
 	}
 	result := make([]Point, limit)
 	for i := range result {
-		index := i * (len(all) - 1) / (limit - 1)
-		result[i] = all[index]
+		index := i * (len(points) - 1) / (limit - 1)
+		result[i] = points[index]
 	}
-	return result, nil
+	return result
+}
+
+func knownSeries(name string) bool {
+	for _, candidate := range []string{
+		DishDownBPS, DishUpBPS, RouterDownBPS, RouterUpBPS, LatencyMS,
+		DropRate, PowerW, ObstructionFraction, WANProbeRTTMS, WANProbeLoss,
+	} {
+		if name == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) Series() []string {

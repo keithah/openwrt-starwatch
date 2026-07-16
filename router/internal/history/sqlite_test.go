@@ -1,0 +1,197 @@
+package history
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func openTestSQLite(t *testing.T, now time.Time) (*SQLiteStore, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "history.db")
+	store, recovered, err := OpenSQLite(path, SQLiteOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered {
+		t.Fatal("new database reported recovery")
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store, path
+}
+
+func TestSQLiteFlushAggregatesMinuteAndQuarter(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 16, 0, 0, time.UTC)
+	ram := NewStore(100)
+	for _, point := range []Point{
+		{Time: time.Date(2026, 7, 15, 12, 1, 5, 0, time.UTC), Value: 1},
+		{Time: time.Date(2026, 7, 15, 12, 1, 25, 0, time.UTC), Value: 3},
+		{Time: time.Date(2026, 7, 15, 12, 1, 50, 0, time.UTC), Value: 5},
+		{Time: time.Date(2026, 7, 15, 12, 2, 10, 0, time.UTC), Value: 9},
+	} {
+		if err := ram.Append(LatencyMS, point); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, _ := openTestSQLite(t, now)
+	if err := store.Flush(context.Background(), ram, now); err != nil {
+		t.Fatal(err)
+	}
+	minute, err := store.QueryTier(LatencyMS, TierMinute, now.Add(-time.Hour), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(minute) != 2 || minute[0].Value != 3 || valueOf(minute[0].Min) != 1 || valueOf(minute[0].Max) != 5 {
+		t.Fatalf("minute: %#v", minute)
+	}
+	quarter, err := store.QueryTier(LatencyMS, TierQuarter, now.Add(-time.Hour), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarter) != 1 || quarter[0].Value != 4.5 || valueOf(quarter[0].Min) != 1 || valueOf(quarter[0].Max) != 9 {
+		t.Fatalf("quarter: %#v", quarter)
+	}
+}
+
+func TestSQLiteUsesMemoryJournalAndCreatesAllTables(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	store, _ := openTestSQLite(t, now)
+	var journal string
+	if err := store.db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil || journal != "memory" {
+		t.Fatalf("journal=%q err=%v", journal, err)
+	}
+	for _, table := range []string{"minute", "quarter", "events", "outages", "speedtests"} {
+		var count int
+		if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("table %s count=%d err=%v", table, count, err)
+		}
+	}
+}
+
+func TestSQLiteFlushPrunesRetentionAndCapsEvents(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	store, _ := openTestSQLite(t, now)
+	if _, err := store.db.Exec(`INSERT INTO minute(series, ts, min, avg, max, samples) VALUES(?, ?, 1, 1, 1, 1)`,
+		LatencyMS, now.Add(-8*24*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO quarter(series, ts, min, avg, max, samples) VALUES(?, ?, 1, 1, 1, 1)`,
+		LatencyMS, now.Add(-31*24*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10_005; i++ {
+		store.AddEvent(Event{At: now.Add(time.Duration(i) * time.Second), Kind: "test"})
+	}
+	if err := store.Flush(context.Background(), NewStore(1), now); err != nil {
+		t.Fatal(err)
+	}
+	for table, want := range map[string]int{"minute": 0, "quarter": 0, "events": 10_000} {
+		var got int
+		if err := store.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("%s rows: got %d want %d", table, got, want)
+		}
+	}
+}
+
+func TestSQLiteDefersWritesWithInsaneClock(t *testing.T) {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	ram := NewStore(10)
+	_ = ram.Append(LatencyMS, Point{Time: now, Value: 3})
+	store, _ := openTestSQLite(t, now)
+	store.AddEvent(Event{At: now, Kind: "daemon_started"})
+	if err := store.Flush(context.Background(), ram, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"minute", "events"} {
+		var count int
+		if err := store.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows with insane clock: %d", table, count)
+		}
+	}
+	sane := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	if err := store.Flush(context.Background(), ram, sane); err != nil {
+		t.Fatal(err)
+	}
+	var minuteCount int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM minute").Scan(&minuteCount); err != nil || minuteCount != 0 {
+		t.Fatalf("insane RAM points persisted: count=%d err=%v", minuteCount, err)
+	}
+	var eventTimestamp int64
+	if err := store.db.QueryRow("SELECT ts FROM events WHERE kind='daemon_started'").Scan(&eventTimestamp); err != nil || eventTimestamp != sane.Unix() {
+		t.Fatalf("re-anchored event timestamp=%d err=%v", eventTimestamp, err)
+	}
+}
+
+func TestSQLiteCorruptionMovesAsideAndRecreates(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.db")
+	if err := os.WriteFile(path, []byte("not a sqlite database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, recovered, err := OpenSQLite(path, SQLiteOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if !recovered {
+		t.Fatal("corruption was not reported")
+	}
+	backups, err := filepath.Glob(path + ".corrupt-*")
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("backups=%#v err=%v", backups, err)
+	}
+	store.AddEvent(Event{At: now, Kind: "sqlite_recreated"})
+	if err := store.Flush(context.Background(), NewStore(1), now); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM events WHERE kind='sqlite_recreated'").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("recovery event count=%d err=%v", count, err)
+	}
+}
+
+func TestTieredReaderSelectsTierBySpan(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	ram := NewStore(10)
+	_ = ram.Append(LatencyMS, Point{Time: now, Value: 1})
+	persistent, _ := openTestSQLite(t, now)
+	if _, err := persistent.db.Exec(`INSERT INTO minute(series, ts, min, avg, max, samples) VALUES(?, ?, 2, 3, 4, 1)`,
+		LatencyMS, now.Add(-4*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistent.db.Exec(`INSERT INTO quarter(series, ts, min, avg, max, samples) VALUES(?, ?, 5, 6, 7, 1)`,
+		LatencyMS, now.Add(-8*24*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewTieredReader(ram, persistent, 3*time.Hour)
+	for _, test := range []struct {
+		span time.Duration
+		tier Tier
+	}{
+		{3 * time.Hour, TierRAM}, {7 * 24 * time.Hour, TierMinute}, {30 * 24 * time.Hour, TierQuarter},
+	} {
+		result, err := reader.QuerySpan(LatencyMS, now.Add(-test.span), test.span, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Tier != test.tier {
+			t.Fatalf("span %v tier=%q want %q", test.span, result.Tier, test.tier)
+		}
+	}
+}
+
+func valueOf(value *float32) float32 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}

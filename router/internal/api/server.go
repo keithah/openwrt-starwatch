@@ -19,10 +19,15 @@ type SnapshotProvider interface {
 	Snapshot() dish.Snapshot
 }
 
+type WANProvider interface {
+	Snapshot() dish.WANStatus
+}
+
 type Deps struct {
 	Token    string
 	Snapshot SnapshotProvider
-	History  history.Reader
+	History  history.SpanReader
+	WAN      WANProvider
 	Now      func() time.Time
 }
 
@@ -38,6 +43,7 @@ func NewServer(deps Deps) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/history", s.auth(s.history))
+	mux.HandleFunc("GET /api/wan", s.auth(s.wan))
 	return mux
 }
 
@@ -70,7 +76,19 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func (s *server) status(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.deps.Snapshot.Snapshot())
+	snapshot := s.deps.Snapshot.Snapshot()
+	if s.deps.WAN != nil {
+		snapshot.WAN = s.deps.WAN.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (s *server) wan(w http.ResponseWriter, _ *http.Request) {
+	if s.deps.WAN == nil {
+		writeJSON(w, http.StatusOK, dish.WANStatus{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.deps.WAN.Snapshot())
 }
 
 func (s *server) history(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +106,7 @@ func (s *server) history(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	points, err := s.deps.History.Query(series, s.deps.Now().Add(-span), 1000)
+	result, err := s.deps.History.QuerySpan(series, s.deps.Now().Add(-span), span, 1000)
 	if errors.Is(err, history.ErrUnknownSeries) {
 		http.Error(w, fmt.Sprintf("unknown series %q", series), http.StatusBadRequest)
 		return
@@ -100,8 +118,9 @@ func (s *server) history(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Series string          `json:"series"`
 		Span   string          `json:"span"`
+		Tier   history.Tier    `json:"tier"`
 		Points []history.Point `json:"points"`
-	}{Series: series, Span: spanText, Points: points})
+	}{Series: series, Span: spanText, Tier: result.Tier, Points: result.Points})
 }
 
 func parseSpan(value string) (time.Duration, error) {

@@ -29,7 +29,15 @@ type Snapshot struct {
 }
 
 type WANStatus struct {
-	Available bool `json:"available"`
+	Available     bool    `json:"available"`
+	Interface     string  `json:"interface"`
+	Up            bool    `json:"up"`
+	RouterDownBPS float32 `json:"router_down_bps"`
+	RouterUpBPS   float32 `json:"router_up_bps"`
+	ProbeRTT30sMS float32 `json:"probe_rtt_30s_ms"`
+	ProbeLoss30s  float32 `json:"probe_loss_30s"`
+	ProbeRTT5mMS  float32 `json:"probe_rtt_5m_ms"`
+	ProbeLoss5m   float32 `json:"probe_loss_5m"`
 }
 
 type Status struct {
