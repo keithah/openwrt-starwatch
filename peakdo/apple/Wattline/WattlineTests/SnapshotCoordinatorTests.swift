@@ -79,6 +79,13 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let pendingWrites = await backend.writeCount
         XCTAssertEqual(pendingWrites, 1, "control/pending state must not write a snapshot")
     }
+
+    func testAppModelUsesProductionAppGroupSnapshotCoordinatorByDefault() {
+        let defaults = UserDefaults(suiteName: "ProductionSnapshotCoordinator-\(UUID().uuidString)")!
+        let persistence = AppPersistence(defaults: defaults)
+        let model = AppModel(persistence: persistence, transportFactory: { DemoTransport(seed: 1) })
+        XCTAssertTrue(model.hasSnapshotCoordinatorForTesting)
+    }
 }
 
 private final class RecordingSnapshotBackend: @unchecked Sendable, SnapshotKeyValueStore {

@@ -216,7 +216,7 @@ final class AppModel {
         brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
         connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {},
         maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
-        snapshotCoordinator: SnapshotCoordinator? = nil
+        snapshotCoordinator: SnapshotCoordinator? = SnapshotCoordinator.production()
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
@@ -233,6 +233,10 @@ final class AppModel {
             startReturningSession()
         }
     }
+
+    #if DEBUG
+    var hasSnapshotCoordinatorForTesting: Bool { snapshotCoordinator != nil }
+    #endif
 
     var sortedDevices: [DiscoveredDevice] {
         discoveredDevices.sorted { lhs, rhs in

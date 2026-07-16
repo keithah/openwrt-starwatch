@@ -18,6 +18,12 @@ final class SnapshotCoordinator {
     private var pending: SharedDeviceSnapshot?
     private var lastWidgetReloadAt: Date?
 
+    /// Production coordinator used by the app and its system-surface adapters.
+    /// Tests and Demo Mode continue to inject their own backend/coordinator.
+    static func production() -> SnapshotCoordinator {
+        SnapshotCoordinator(store: SharedSnapshotStore(backend: AppGroupSnapshotBackend()))
+    }
+
     init(store: SharedSnapshotStore, now: @escaping @Sendable () -> Date = Date.init, isDemo: Bool = false) {
         self.store = store
         self.now = now
