@@ -165,10 +165,13 @@ final class AppModel {
     private var brokerContextLifecycle: DeviceOperationBroker.ContextLifecycle?
     private var brokerPublicationTask: Task<Void, Never>?
     private var brokerReconnectAttempt: DeviceOperationBroker.ConnectionAttempt?
+    private var brokerReconnectTask: Task<Void, Never>?
+    private var ignoredDisconnectEventCount = 0
+    private var connectionOperationKey: ConnectionOperationKey?
 
     @ObservationIgnored
     private(set) lazy var deviceOperationBroker = DeviceOperationBroker { [weak self] attempt in
-        await self?.requestBrokerReconnect(attempt)
+        await self?.startBrokerReconnect(attempt)
     }
 
     init(
@@ -274,6 +277,12 @@ final class AppModel {
             peripheralID: device.id,
             generation: context.transportGeneration
         )
+        let connectionKey = ConnectionOperationKey(
+            transportGeneration: context.transportGeneration,
+            operationGeneration: context.operationGeneration,
+            peripheralID: device.id
+        )
+        connectionOperationKey = connectionKey
         operationTask = Task { [weak self] in
             do {
                 await self?.publishBrokerContext(brokerContext)
@@ -281,8 +290,11 @@ final class AppModel {
                 await context.transport.stopScan()
                 guard self.isCurrent(context) else { return }
                 try await context.transport.connect(to: device.id)
+                guard self.isCurrent(context) else { return }
+                await self.completeConnectionOperation(connectionKey)
             } catch {
                 guard let self, self.isCurrent(context) else { return }
+                self.connectionOperationKey = nil
                 connectionStatus = .disconnected(String(describing: error))
                 route = .connected
             }
@@ -298,13 +310,22 @@ final class AppModel {
             peripheralID: selectedPeripheralID,
             generation: context.transportGeneration
         )
+        let connectionKey = ConnectionOperationKey(
+            transportGeneration: context.transportGeneration,
+            operationGeneration: context.operationGeneration,
+            peripheralID: selectedPeripheralID
+        )
+        connectionOperationKey = connectionKey
         operationTask = Task { [weak self] in
             do {
                 await self?.publishBrokerContext(brokerContext)
                 guard let self, self.isCurrent(context) else { return }
                 try await context.transport.connect(to: selectedPeripheralID)
+                guard self.isCurrent(context) else { return }
+                await self.completeConnectionOperation(connectionKey)
             } catch {
                 guard let self, self.isCurrent(context) else { return }
+                self.connectionOperationKey = nil
                 connectionStatus = .disconnected(String(describing: error))
             }
         }
@@ -446,11 +467,20 @@ final class AppModel {
         connectionStatus = .reconnecting
         route = .connected
         let operation = beginOperation(for: generation, transport: restoredTransport)
+        let connectionKey = ConnectionOperationKey(
+            transportGeneration: operation.transportGeneration,
+            operationGeneration: operation.operationGeneration,
+            peripheralID: storedID
+        )
+        connectionOperationKey = connectionKey
         operationTask = Task { [weak self] in
             do {
                 try await restoredTransport.connect(to: storedID)
+                guard let self, self.isCurrent(operation) else { return }
+                await self.completeConnectionOperation(connectionKey)
             } catch {
                 guard let self, self.isCurrent(operation) else { return }
+                self.connectionOperationKey = nil
                 selectedPeripheralID = nil
                 connectionStatus = .disconnected(String(describing: error))
                 scanMessage = "Couldn’t reconnect. Scanning for nearby devices."
@@ -481,6 +511,10 @@ final class AppModel {
         sessionStateTask?.cancel()
         otaRecoveryTask?.cancel()
         otaRecoveryTask = nil
+        brokerReconnectTask?.cancel()
+        brokerReconnectTask = nil
+        ignoredDisconnectEventCount = 0
+        connectionOperationKey = nil
         if let previousTransport {
             Task { await previousTransport.disconnect() }
         }
@@ -532,6 +566,7 @@ final class AppModel {
                       let self,
                       self.transportGeneration == generation
                 else { return }
+                guard self.acceptsTransportEvent(event, generation: generation) else { continue }
                 await session.receive(event)
                 guard self.transportGeneration == generation else { return }
                 await self.receive(event, generation: generation)
@@ -577,6 +612,30 @@ final class AppModel {
         brokerContextPeripheralID = nil
         brokerContextLifecycle = nil
         brokerReconnectAttempt = nil
+        brokerReconnectTask?.cancel()
+        brokerReconnectTask = nil
+    }
+
+    private func startBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
+        brokerReconnectTask?.cancel()
+        let task = Task { [weak self] in
+            await self?.requestBrokerReconnect(attempt)
+            return
+        }
+        brokerReconnectTask = task
+        await task.value
+    }
+
+    private func completeConnectionOperation(_ key: ConnectionOperationKey) async {
+        guard connectionOperationKey == key,
+              transportGeneration == key.transportGeneration,
+              operationGeneration == key.operationGeneration
+        else { return }
+        await deviceOperationBroker.markConnected(
+            peripheralID: key.peripheralID,
+            generation: key.transportGeneration
+        )
+        connectionOperationKey = nil
     }
 
     private func requestBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
@@ -599,6 +658,13 @@ final class AppModel {
         route = .connected
         do {
             try await transport.connect(to: attempt.peripheralID)
+            guard transportGeneration == attempt.generation,
+                  selectedPeripheralID == attempt.peripheralID,
+                  brokerReconnectAttempt == attempt,
+                  !Task.isCancelled
+            else { return }
+            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
+            brokerReconnectAttempt = nil
         } catch {
             guard transportGeneration == attempt.generation,
                   brokerReconnectAttempt == attempt
@@ -606,6 +672,30 @@ final class AppModel {
             connectionStatus = .disconnected(String(describing: error))
             await deviceOperationBroker.handleConnectionEvent(.terminal, attempt: attempt)
         }
+    }
+
+    private func acceptsTransportEvent(_ event: DeviceEvent, generation: UInt) -> Bool {
+        guard transportGeneration == generation else { return false }
+        switch event {
+        case let .connected(id), let .reconnecting(id):
+            guard selectedPeripheralID == nil || selectedPeripheralID == id || otaRecoveryPeripheralID == id else {
+                ignoredDisconnectEventCount += 1
+                return false
+            }
+        case let .handshakeCompleted(snapshot):
+            guard selectedPeripheralID == nil
+                    || selectedPeripheralID == snapshot.peripheralID
+                    || otaRecoveryPeripheralID == snapshot.peripheralID
+            else { return false }
+        case .disconnected:
+            if ignoredDisconnectEventCount > 0 {
+                ignoredDisconnectEventCount -= 1
+                return false
+            }
+        case .discovered, .battery, .dc, .typeC, .transactionDepth:
+            break
+        }
+        return true
     }
 
     private func receive(_ event: DeviceEvent, generation: UInt) async {
@@ -625,12 +715,7 @@ final class AppModel {
             }
             let brokerContext = prepareBrokerContext(peripheralID: id, generation: generation)
             await publishBrokerContext(brokerContext)
-            if let attempt = brokerReconnectAttempt,
-               attempt.generation == generation,
-               attempt.peripheralID == id {
-                await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
-                brokerReconnectAttempt = nil
-            } else {
+            if brokerReconnectAttempt == nil && connectionOperationKey == nil {
                 await deviceOperationBroker.markConnected(peripheralID: id, generation: generation)
             }
             if !isDemo {
@@ -937,6 +1022,12 @@ final class AppModel {
         let transportGeneration: UInt
         let operationGeneration: UInt
         let transport: any DeviceTransport
+    }
+
+    private struct ConnectionOperationKey: Equatable {
+        let transportGeneration: UInt
+        let operationGeneration: UInt
+        let peripheralID: UUID
     }
 
     private func beginOperationForCurrentTransport() -> OperationContext? {

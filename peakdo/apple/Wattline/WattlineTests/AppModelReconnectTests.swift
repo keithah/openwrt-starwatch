@@ -427,6 +427,78 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(factoryCallCount, 1, "Broker reconnect must reuse AppModel's transport")
     }
 
+    func testLateConnectedAndDisconnectedForA_DoNotReplaceConnectedB() async throws {
+        let transport = ControlledConnectionTransport()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let persistence = AppPersistence(defaults: defaults)
+        let model = AppModel(persistence: persistence, transportFactory: { transport })
+        let a = UUID()
+        let b = UUID()
+        model.requestBluetoothAfterPriming()
+
+        model.choose(.init(id: a, localName: "A", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        model.choose(.init(id: b, localName: "B", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 2 }
+        await transport.succeedConnect(at: 1)
+        try await eventually {
+            model.connectionStatus == .connected && persistence.lastSuccessfulPeripheralID == b
+        }
+
+        await transport.emit(.connected(a))
+        await transport.emit(.disconnected(TransportFailure(message: "stale A")))
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(persistence.lastSuccessfulPeripheralID, b)
+        XCTAssertEqual(model.connectionStatus, .connected)
+        let reused = try await model.deviceOperationBroker.withConnection(to: b) { $0.peripheralID }
+        XCTAssertEqual(reused, b)
+    }
+
+    func testOldSamePeripheralConnectSuccessCannotResolveCurrentBrokerAttempt() async throws {
+        let transport = ControlledConnectionTransport()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport }
+        )
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        await transport.emit(.disconnected(TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+
+        let first = Task {
+            try await model.deviceOperationBroker.withConnection(to: id) { _ in true }
+        }
+        try await eventually { await transport.connectCount == 2 }
+        let second = Task {
+            try await model.deviceOperationBroker.withConnection(to: id) { _ in true }
+        }
+        try await eventually { await transport.connectCount == 3 }
+
+        await transport.succeedConnect(at: 1)
+        try await Task.sleep(for: .milliseconds(50))
+        let pendingConnectionCount = await model.deviceOperationBroker.pendingConnectionCount
+        XCTAssertEqual(pendingConnectionCount, 1)
+
+        await transport.succeedConnect(at: 2)
+        _ = try await second.value
+        do {
+            _ = try await first.value
+            XCTFail("The superseded first waiter must fail")
+        } catch let error as DeviceOperationBroker.BrokerError {
+            XCTAssertEqual(error, .superseded)
+        }
+    }
+
     func testSetFailureUsesSuccessfulRecoveryGetAsConfirmedLimit() async {
         let transport = MutationTransport(steps: [
             .failure,
@@ -1021,6 +1093,38 @@ private actor RecordingTransport: DeviceTransport {
     }
 
     func disconnect() async { disconnectCount += 1 }
+    func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
+    func refreshTelemetry() async throws {}
+    func synchronizeDeviceTime() async throws {}
+    func readDeviceTimeIfSupported() async throws -> Date? { nil }
+}
+
+private actor ControlledConnectionTransport: DeviceTransport {
+    nonisolated let events: AsyncStream<DeviceEvent>
+    private let continuation: AsyncStream<DeviceEvent>.Continuation
+    private var connectContinuations: [CheckedContinuation<Void, Error>] = []
+    private(set) var connectedIDs: [UUID] = []
+    var connectCount: Int { connectedIDs.count }
+
+    init() {
+        let pair = AsyncStream<DeviceEvent>.makeStream()
+        events = pair.stream
+        continuation = pair.continuation
+    }
+
+    func emit(_ event: DeviceEvent) { continuation.yield(event) }
+    func startScan() async throws {}
+    func stopScan() async {}
+    func connect(to id: UUID) async throws {
+        connectedIDs.append(id)
+        try await withCheckedThrowingContinuation { connectContinuations.append($0) }
+    }
+    func succeedConnect(at index: Int) {
+        let id = connectedIDs[index]
+        connectContinuations[index].resume()
+        continuation.yield(.connected(id))
+    }
+    func disconnect() async {}
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
     func refreshTelemetry() async throws {}
     func synchronizeDeviceTime() async throws {}

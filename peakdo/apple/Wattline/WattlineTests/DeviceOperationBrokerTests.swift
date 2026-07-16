@@ -146,6 +146,48 @@ final class DeviceOperationBrokerTests: XCTestCase {
         XCTAssertEqual(nextResult, nextPeripheralID)
     }
 
+    func testSamePeripheralLifecycleReplacementSupersedesOldWaiter() async {
+        let harness = await makeHarness(generation: 3)
+        let result = Task {
+            try await harness.broker.withConnection(to: harness.peripheralID) { _ in true }
+        }
+        await harness.reconnect.waitForRequestCount(1)
+
+        let replacementTransport = ReplayTransport()
+        await harness.broker.attach(.init(
+            generation: 3,
+            peripheralID: harness.peripheralID,
+            transport: replacementTransport,
+            session: DeviceSession(transport: replacementTransport)
+        ))
+
+        await assertThrows(.superseded) { try await result.value }
+        let attempt = await harness.reconnect.requests[0]
+        await harness.broker.handleConnectionEvent(.connected, attempt: attempt)
+        let pendingConnectionCount = await harness.broker.pendingConnectionCount
+        XCTAssertEqual(pendingConnectionCount, 0)
+    }
+
+    func testConnectionAttemptUsesCollisionFreeIdentity() async {
+        let harness = await makeHarness(generation: 3)
+        let first = Task {
+            try await harness.broker.withConnection(to: harness.peripheralID) { _ in true }
+        }
+        await harness.reconnect.waitForRequestCount(1)
+        let second = Task {
+            try await harness.broker.withConnection(to: harness.peripheralID) { _ in true }
+        }
+        await harness.reconnect.waitForRequestCount(2)
+
+        let attempts = await harness.reconnect.requests
+        XCTAssertNotEqual(attempts[0].token, attempts[1].token)
+        let _: UUID = attempts[0].token
+
+        second.cancel()
+        await assertCancellation { try await second.value }
+        await assertThrows(.superseded) { try await first.value }
+    }
+
     func testClockOperationsUseTheAttachedTransport() async throws {
         let expectedDate = Date(timeIntervalSince1970: 1_700_000_000)
         let replay = ReplayTransport(steps: [.timeSync, .deviceTime(expectedDate)])
@@ -256,7 +298,8 @@ final class DeviceOperationBrokerTests: XCTestCase {
         let staleAttempt = DeviceOperationBroker.ConnectionAttempt(
             generation: 8,
             peripheralID: harness.peripheralID,
-            token: 0
+            lifecycleID: UUID(),
+            token: UUID()
         )
         await harness.broker.handleConnectionEvent(.connected, attempt: staleAttempt)
         let pendingBeforeCurrentCallback = await harness.broker.pendingConnectionCount

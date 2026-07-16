@@ -3,6 +3,7 @@ import WattlineCore
 
 actor DeviceOperationBroker {
     final class ContextLifecycle: @unchecked Sendable {
+        let id = UUID()
         private let lock = NSLock()
         private var active = true
 
@@ -44,7 +45,8 @@ actor DeviceOperationBroker {
     struct ConnectionAttempt: Equatable, Sendable {
         let generation: UInt
         let peripheralID: UUID
-        let token: UInt64
+        let lifecycleID: UUID
+        let token: UUID
     }
 
     enum BrokerError: Error, Equatable {
@@ -72,7 +74,6 @@ actor DeviceOperationBroker {
     private var connectedGeneration: UInt?
     private var connectedPeripheralID: UUID?
     private var connectionWaiters: [UInt: ConnectionWaiter] = [:]
-    private var nextConnectionAttemptToken: UInt64 = 0
 
     init(
         clock: any DeviceClock = ContinuousDeviceClock(),
@@ -96,6 +97,7 @@ actor DeviceOperationBroker {
         let supersededWaiters = connectionWaiters.values.filter {
             $0.attempt.generation != context.generation
                 || $0.attempt.peripheralID != context.peripheralID
+                || $0.attempt.lifecycleID != context.lifecycle.id
         }
         self.context = context
         if !preservesConnectedContext || connectedGeneration != context.generation {
@@ -142,6 +144,7 @@ actor DeviceOperationBroker {
         guard let context,
               context.generation == attempt.generation,
               context.peripheralID == attempt.peripheralID,
+              context.lifecycle.id == attempt.lifecycleID,
               context.lifecycle.isActive
         else {
             resolveWaiter(attempt: attempt, result: .failure(BrokerError.superseded))
@@ -214,11 +217,16 @@ actor DeviceOperationBroker {
         generation: UInt,
         timeout: Duration
     ) async throws -> Context {
-        nextConnectionAttemptToken &+= 1
+        guard let context,
+              context.generation == generation,
+              context.peripheralID == peripheralID,
+              context.lifecycle.isActive
+        else { throw BrokerError.superseded }
         let attempt = ConnectionAttempt(
             generation: generation,
             peripheralID: peripheralID,
-            token: nextConnectionAttemptToken
+            lifecycleID: context.lifecycle.id,
+            token: UUID()
         )
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
