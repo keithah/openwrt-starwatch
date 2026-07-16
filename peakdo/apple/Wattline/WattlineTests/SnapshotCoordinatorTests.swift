@@ -101,7 +101,11 @@ final class SnapshotCoordinatorTests: XCTestCase {
     }
 
     func testDashboardDeepLinkSelectsConnectedRouteAndInfoPlistRegistersScheme() throws {
-        let model = AppModel(persistence: AppPersistence(defaults: UserDefaults(suiteName: "DeepLink-\(UUID().uuidString)")!), snapshotCoordinator: nil)
+        let defaults = UserDefaults(suiteName: "DeepLink-\(UUID().uuidString)")!
+        let persistence = AppPersistence(defaults: defaults)
+        // Deep links are only actionable after onboarding; exercise the connected-capable route.
+        persistence.onboardingComplete = true
+        let model = AppModel(persistence: persistence, snapshotCoordinator: nil)
         model.handleDeepLink(URL(string: "wattline://dashboard")!)
         XCTAssertEqual(model.route, .connected)
         let plist = try String(contentsOfFile: "Wattline/Info.plist")
