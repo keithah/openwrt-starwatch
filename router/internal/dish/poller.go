@@ -13,6 +13,7 @@ import (
 type PollerOptions struct {
 	StatusInterval   time.Duration
 	MetadataInterval time.Duration
+	HistoryInterval  time.Duration
 	RetryInterval    time.Duration
 	RPCTimeout       time.Duration
 	Now              func() time.Time
@@ -26,6 +27,12 @@ type Poller struct {
 	mu       sync.RWMutex
 	snapshot Snapshot
 	failures map[string]int
+
+	historyMu    sync.Mutex
+	highWater    map[string]time.Time
+	backfillDone bool
+	historyPower *float32
+	statusPower  bool
 }
 
 func NewPoller(api API, writer history.Writer, options PollerOptions) *Poller {
@@ -35,11 +42,14 @@ func NewPoller(api API, writer history.Writer, options PollerOptions) *Poller {
 	if options.MetadataInterval <= 0 {
 		options.MetadataInterval = time.Minute
 	}
+	if options.HistoryInterval <= 0 {
+		options.HistoryInterval = time.Hour
+	}
 	if options.RetryInterval <= 0 {
 		options.RetryInterval = time.Minute
 	}
 	if options.RPCTimeout <= 0 {
-		options.RPCTimeout = 5 * time.Second
+		options.RPCTimeout = 2 * time.Second
 	}
 	if options.Now == nil {
 		options.Now = time.Now
@@ -47,7 +57,7 @@ func NewPoller(api API, writer history.Writer, options PollerOptions) *Poller {
 	return &Poller{
 		api: api, history: writer, options: options,
 		snapshot: Snapshot{Topology: TopologyWANOnly, FieldAvailability: make(map[string]bool)},
-		failures: make(map[string]int),
+		failures: make(map[string]int), highWater: make(map[string]time.Time),
 	}
 }
 
@@ -70,9 +80,11 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 	statusTicker := time.NewTicker(p.options.StatusInterval)
 	metadataTicker := time.NewTicker(p.options.MetadataInterval)
+	historyTicker := time.NewTicker(p.options.HistoryInterval)
 	retryTicker := time.NewTicker(p.options.RetryInterval)
 	defer statusTicker.Stop()
 	defer metadataTicker.Stop()
+	defer historyTicker.Stop()
 	defer retryTicker.Stop()
 
 	for {
@@ -87,6 +99,10 @@ func (p *Poller) Run(ctx context.Context) {
 			if p.topology() == TopologyFull {
 				p.discover(ctx)
 				p.pollConfig(ctx)
+			}
+		case <-historyTicker.C:
+			if p.topology() == TopologyFull {
+				p.backfill(ctx)
 			}
 		case <-retryTicker.C:
 			if p.topology() == TopologyWANOnly && p.discover(ctx) {
@@ -147,11 +163,14 @@ func (p *Poller) pollStatus(parent context.Context) {
 	}
 	p.succeeded(FieldStatus)
 	now := p.options.Now()
+	if now.Year() >= 2025 && p.initialBackfillPending() {
+		p.backfill(parent)
+	}
 	dishStatus := &Status{
 		UpdatedAt: now, UptimeSeconds: status.GetDeviceState().GetUptimeS(),
 		LatencyMS: status.GetPopPingLatencyMs(), DropRate: status.GetPopPingDropRate(),
 		DownlinkThroughputBPS: status.GetDownlinkThroughputBps(), UplinkThroughputBPS: status.GetUplinkThroughputBps(),
-		Outage: status.GetOutage(), Alerts: status.GetAlerts(), MobilityClass: status.GetMobilityClass().String(),
+		Outage: outageSnapshot(status.GetOutage()), Alerts: alertSnapshot(status.GetAlerts()), MobilityClass: status.GetMobilityClass().String(),
 		ClassOfService: status.GetClassOfService().String(),
 	}
 	if obstruction := status.GetObstructionStats(); obstruction != nil {
@@ -176,8 +195,19 @@ func (p *Poller) pollStatus(parent context.Context) {
 		p.succeeded(FieldPower)
 		value := power.GetDishPower()
 		dishStatus.PowerW = &value
+		p.mu.Lock()
+		p.statusPower = true
+		p.mu.Unlock()
 	} else {
-		p.failed(FieldPower)
+		p.mu.Lock()
+		p.statusPower = false
+		p.mu.Unlock()
+		if fallback := p.powerFallback(); fallback != nil {
+			p.succeeded(FieldPower)
+			dishStatus.PowerW = fallback
+		} else {
+			p.failed(FieldPower)
+		}
 	}
 	p.mu.Lock()
 	p.snapshot.Dish = dishStatus
@@ -218,6 +248,10 @@ func (p *Poller) pollConfig(parent context.Context) {
 }
 
 func (p *Poller) backfill(parent context.Context) {
+	now := p.options.Now()
+	if now.Year() < 2025 {
+		return
+	}
 	ctx, cancel := p.callContext(parent)
 	defer cancel()
 	response, err := p.api.GetHistory(ctx)
@@ -226,27 +260,26 @@ func (p *Poller) backfill(parent context.Context) {
 		return
 	}
 	p.succeeded(FieldHistory)
-	now := p.options.Now()
-	if now.Year() < 2025 {
-		return
-	}
 	length := maxLength(response)
 	valid := min(int(response.GetCurrent()), length)
-	if valid == 0 || length == 0 {
-		return
+	if valid > 0 && length > 0 {
+		start := 0
+		if response.GetCurrent() >= uint64(length) {
+			start = int(response.GetCurrent() % uint64(length))
+		}
+		for offset := 0; offset < valid; offset++ {
+			index := (start + offset) % length
+			at := now.Add(-time.Duration(valid-1-offset) * time.Second)
+			p.appendIndex(history.LatencyMS, at, response.GetPopPingLatencyMs(), index)
+			p.appendIndex(history.DropRate, at, response.GetPopPingDropRate(), index)
+			p.appendIndex(history.DishDownBPS, at, response.GetDownlinkThroughputBps(), index)
+			p.appendIndex(history.DishUpBPS, at, response.GetUplinkThroughputBps(), index)
+			p.appendIndex(history.PowerW, at, response.GetPowerIn(), index)
+		}
 	}
-	start := 0
-	if response.GetCurrent() >= uint64(length) {
-		start = int(response.GetCurrent() % uint64(length))
-	}
-	for offset := 0; offset < valid; offset++ {
-		index := (start + offset) % length
-		at := now.Add(-time.Duration(valid-1-offset) * time.Second)
-		p.appendIndex(history.LatencyMS, at, response.GetPopPingLatencyMs(), index)
-		p.appendIndex(history.DropRate, at, response.GetPopPingDropRate(), index)
-		p.appendIndex(history.DishDownBPS, at, response.GetDownlinkThroughputBps(), index)
-		p.appendIndex(history.DishUpBPS, at, response.GetUplinkThroughputBps(), index)
-		p.appendIndex(history.PowerW, at, response.GetPowerIn(), index)
+	p.setBackfillDone()
+	if power, ok := newestHistoryValue(response.GetPowerIn(), response.GetCurrent()); ok {
+		p.setPowerFallback(power)
 	}
 }
 
@@ -270,7 +303,87 @@ func (p *Poller) appendIndex(series string, at time.Time, values []float32, inde
 }
 
 func (p *Poller) append(series string, at time.Time, value float32) {
-	_ = p.history.Append(series, history.Point{Time: at, Value: value})
+	p.historyMu.Lock()
+	defer p.historyMu.Unlock()
+	if last, ok := p.highWater[series]; ok && !at.After(last) {
+		return
+	}
+	if err := p.history.Append(series, history.Point{Time: at, Value: value}); err == nil {
+		p.highWater[series] = at
+	}
+}
+
+func (p *Poller) initialBackfillPending() bool {
+	p.historyMu.Lock()
+	defer p.historyMu.Unlock()
+	return !p.backfillDone
+}
+
+func (p *Poller) setBackfillDone() {
+	p.historyMu.Lock()
+	p.backfillDone = true
+	p.historyMu.Unlock()
+}
+
+func (p *Poller) powerFallback() *float32 {
+	p.historyMu.Lock()
+	defer p.historyMu.Unlock()
+	if p.historyPower == nil {
+		return nil
+	}
+	value := *p.historyPower
+	return &value
+}
+
+func (p *Poller) setPowerFallback(value float32) {
+	p.historyMu.Lock()
+	p.historyPower = &value
+	p.historyMu.Unlock()
+	p.succeeded(FieldPower)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.statusPower || p.snapshot.Dish == nil {
+		return
+	}
+	dishStatus := *p.snapshot.Dish
+	dishStatus.PowerW = &value
+	p.snapshot.Dish = &dishStatus
+}
+
+func newestHistoryValue(values []float32, current uint64) (float32, bool) {
+	if len(values) == 0 || current == 0 {
+		return 0, false
+	}
+	index := int(current-1) % len(values)
+	return values[index], true
+}
+
+func outageSnapshot(outage *device.DishOutage) *Outage {
+	if outage == nil {
+		return nil
+	}
+	return &Outage{
+		Cause: outage.GetCause().String(), StartTimestampNS: outage.GetStartTimestampNs(),
+		DurationNS: outage.GetDurationNs(), DidSwitch: outage.GetDidSwitch(),
+	}
+}
+
+func alertSnapshot(alerts *device.DishAlerts) map[string]bool {
+	if alerts == nil {
+		return nil
+	}
+	return map[string]bool{
+		"motors_stuck": alerts.GetMotorsStuck(), "thermal_throttle": alerts.GetThermalThrottle(),
+		"thermal_shutdown": alerts.GetThermalShutdown(), "mast_not_near_vertical": alerts.GetMastNotNearVertical(),
+		"unexpected_location": alerts.GetUnexpectedLocation(), "slow_ethernet_speeds": alerts.GetSlowEthernetSpeeds(),
+		"slow_ethernet_speeds_100": alerts.GetSlowEthernetSpeeds_100(), "roaming": alerts.GetRoaming(),
+		"install_pending": alerts.GetInstallPending(), "is_heating": alerts.GetIsHeating(),
+		"power_supply_thermal_throttle": alerts.GetPowerSupplyThermalThrottle(), "is_power_save_idle": alerts.GetIsPowerSaveIdle(),
+		"dbf_telem_stale": alerts.GetDbfTelemStale(), "low_motor_current": alerts.GetLowMotorCurrent(),
+		"lower_signal_than_predicted": alerts.GetLowerSignalThanPredicted(), "obstruction_map_reset": alerts.GetObstructionMapReset(),
+		"dish_water_detected": alerts.GetDishWaterDetected(), "router_water_detected": alerts.GetRouterWaterDetected(),
+		"upsu_router_port_slow": alerts.GetUpsuRouterPortSlow(), "no_ethernet_link": alerts.GetNoEthernetLink(),
+	}
 }
 
 func (p *Poller) succeeded(fields ...string) {

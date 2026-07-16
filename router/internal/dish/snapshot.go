@@ -1,10 +1,6 @@
 package dish
 
-import (
-	"time"
-
-	device "github.com/clarkzjw/starlink-grpc-golang/pkg/spacex.com/api/device"
-)
+import "time"
 
 type Topology string
 
@@ -37,19 +33,26 @@ type WANStatus struct {
 }
 
 type Status struct {
-	UpdatedAt             time.Time          `json:"updated_at"`
-	UptimeSeconds         uint64             `json:"uptime_seconds"`
-	LatencyMS             float32            `json:"latency_ms"`
-	DropRate              float32            `json:"drop_rate"`
-	DownlinkThroughputBPS float32            `json:"downlink_throughput_bps"`
-	UplinkThroughputBPS   float32            `json:"uplink_throughput_bps"`
-	PowerW                *float32           `json:"power_w,omitempty"`
-	Obstruction           *Obstruction       `json:"obstruction,omitempty"`
-	Alignment             *Alignment         `json:"alignment,omitempty"`
-	Outage                *device.DishOutage `json:"outage,omitempty"`
-	Alerts                *device.DishAlerts `json:"alerts,omitempty"`
-	MobilityClass         string             `json:"mobility_class"`
-	ClassOfService        string             `json:"class_of_service"`
+	UpdatedAt             time.Time       `json:"updated_at"`
+	UptimeSeconds         uint64          `json:"uptime_seconds"`
+	LatencyMS             float32         `json:"latency_ms"`
+	DropRate              float32         `json:"drop_rate"`
+	DownlinkThroughputBPS float32         `json:"downlink_throughput_bps"`
+	UplinkThroughputBPS   float32         `json:"uplink_throughput_bps"`
+	PowerW                *float32        `json:"power_w,omitempty"`
+	Obstruction           *Obstruction    `json:"obstruction,omitempty"`
+	Alignment             *Alignment      `json:"alignment,omitempty"`
+	Outage                *Outage         `json:"outage,omitempty"`
+	Alerts                map[string]bool `json:"alerts,omitempty"`
+	MobilityClass         string          `json:"mobility_class"`
+	ClassOfService        string          `json:"class_of_service"`
+}
+
+type Outage struct {
+	Cause            string `json:"cause"`
+	StartTimestampNS int64  `json:"start_timestamp_ns"`
+	DurationNS       uint64 `json:"duration_ns"`
+	DidSwitch        bool   `json:"did_switch"`
 }
 
 type Obstruction struct {

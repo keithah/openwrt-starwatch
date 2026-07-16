@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 type UCISection struct {
@@ -36,39 +37,48 @@ func ParseUCI(src string) (*UCIDoc, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		fields := strings.SplitN(line, " ", 2)
-		if len(fields) != 2 {
+		keyword, rest, ok := splitFirst(line)
+		if !ok {
 			return nil, fmt.Errorf("line %d: malformed %q", lineNumber+1, line)
 		}
-		rest := strings.TrimSpace(fields[1])
-		switch fields[0] {
+		switch keyword {
 		case "config":
-			parts := strings.SplitN(rest, " ", 2)
+			typ, sectionName, named := splitFirst(rest)
 			name := ""
-			if len(parts) == 2 {
-				name = unquote(strings.TrimSpace(parts[1]))
+			if named {
+				name = unquote(sectionName)
 			}
-			current = newSection(unquote(parts[0]), name)
+			current = newSection(unquote(typ), name)
 			doc.Sections = append(doc.Sections, current)
 		case "option", "list":
 			if current == nil {
-				return nil, fmt.Errorf("line %d: %s outside section", lineNumber+1, fields[0])
+				return nil, fmt.Errorf("line %d: %s outside section", lineNumber+1, keyword)
 			}
-			parts := strings.SplitN(rest, " ", 2)
-			if len(parts) != 2 {
+			key, value, ok := splitFirst(rest)
+			if !ok {
 				return nil, fmt.Errorf("line %d: malformed %q", lineNumber+1, line)
 			}
-			key, value := unquote(parts[0]), unquote(strings.TrimSpace(parts[1]))
-			if fields[0] == "option" {
+			key, value = unquote(key), unquote(value)
+			if keyword == "option" {
 				current.Options[key] = value
 			} else {
 				current.Lists[key] = append(current.Lists[key], value)
 			}
 		default:
-			return nil, fmt.Errorf("line %d: unknown keyword %q", lineNumber+1, fields[0])
+			return nil, fmt.Errorf("line %d: unknown keyword %q", lineNumber+1, keyword)
 		}
 	}
 	return doc, nil
+}
+
+func splitFirst(value string) (string, string, bool) {
+	index := strings.IndexFunc(value, unicode.IsSpace)
+	if index < 0 {
+		return value, "", false
+	}
+	first := value[:index]
+	rest := strings.TrimLeftFunc(value[index:], unicode.IsSpace)
+	return first, rest, rest != ""
 }
 
 func (d *UCIDoc) Find(typ, name string) *UCISection {

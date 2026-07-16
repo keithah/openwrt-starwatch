@@ -27,3 +27,14 @@ func TestParseUCIRejectsOptionOutsideSection(t *testing.T) {
 		t.Fatal("expected malformed UCI error")
 	}
 }
+
+func TestParseUCIAcceptsTabsBetweenTokens(t *testing.T) {
+	doc, err := ParseUCI("config\tstarwatch\t'main'\noption\tport\t'9633'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := doc.Find("starwatch", "main")
+	if section == nil || section.Options["port"] != "9633" {
+		t.Fatalf("section: %#v", section)
+	}
+}

@@ -59,10 +59,8 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	poller := dish.NewPoller(client, store, dish.PollerOptions{StatusInterval: cfg.PollStatus})
 	go poller.Run(runCtx)
 
-	server := &http.Server{
-		Addr:    bindAddr(cfg),
-		Handler: api.NewServer(api.Deps{Token: cfg.Token, Snapshot: poller, History: store}),
-	}
+	warnEmptyToken(cfg.Token, log.Printf)
+	server := newHTTPServer(bindAddr(cfg), api.NewServer(api.Deps{Token: cfg.Token, Snapshot: poller, History: store}))
 	listener, err := deps.listen("tcp", server.Addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", server.Addr, err)
@@ -92,6 +90,16 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 			return fmt.Errorf("api shutdown: %w", err)
 		}
 		return nil
+	}
+}
+
+func newHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+}
+
+func warnEmptyToken(token string, logf func(string, ...any)) {
+	if token == "" {
+		logf("starwatchd: warning: API token is empty; all API requests will be denied")
 	}
 }
 

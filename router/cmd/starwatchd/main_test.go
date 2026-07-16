@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"net"
 	"net/http"
 	"testing"
@@ -18,6 +20,27 @@ func TestBindAddr(t *testing.T) {
 	cfg.Listen = "::1"
 	if got := bindAddr(cfg); got != "[::1]:9633" {
 		t.Fatalf("IPv6 got %q", got)
+	}
+}
+
+func TestNewHTTPServerSetsReadHeaderTimeout(t *testing.T) {
+	server := newHTTPServer("127.0.0.1:9633", http.NewServeMux())
+	if server.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("timeout: %v", server.ReadHeaderTimeout)
+	}
+}
+
+func TestWarnEmptyToken(t *testing.T) {
+	var output bytes.Buffer
+	logger := log.New(&output, "", 0)
+	warnEmptyToken("", logger.Printf)
+	if !bytes.Contains(output.Bytes(), []byte("token is empty")) {
+		t.Fatalf("warning: %q", output.String())
+	}
+	output.Reset()
+	warnEmptyToken("secret", logger.Printf)
+	if output.Len() != 0 {
+		t.Fatalf("unexpected warning: %q", output.String())
 	}
 }
 
