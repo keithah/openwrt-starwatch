@@ -25,5 +25,5 @@ private struct PlaceholderProvider: TimelineProvider {
 
 @main
 struct WattlineWidgetsBundle: WidgetBundle {
-    var body: some Widget { WattlinePlaceholderWidget() }
+    var body: some Widget { WattlinePlaceholderWidget(); WattlineLiveActivity() }
 }

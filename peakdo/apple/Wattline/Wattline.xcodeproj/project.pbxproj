@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10000000000000000000090 /* WattlineActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000091 /* WattlineActivityAttributes.swift */; };
 		A10000000000000000000001 /* WattlineCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000031 /* WattlineCore */; };
 		A10000000000000000000002 /* WattlineUI in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000032 /* WattlineUI */; };
 		A10000000000000000000060 /* WattlineCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000061 /* WattlineCore */; };
@@ -20,6 +21,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A10000000000000000000091 /* WattlineActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WattlineWidgets/WattlineActivityAttributes.swift; sourceTree = "<group>"; };
 		A10000000000000000000004 /* Wattline.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = Wattline.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000005 /* WattlineUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = WattlineUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000063 /* WattlineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = WattlineTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -47,7 +49,7 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A1000000000000000000000A = {isa = PBXGroup; children = (A10000000000000000000006 /* Wattline */, A10000000000000000000070 /* WattlineShared */, A10000000000000000000064 /* WattlineTests */, A10000000000000000000007 /* WattlineUITests */, A10000000000000000000079 /* WattlineWidgets */, A1000000000000000000000B /* Products */, ); sourceTree = "<group>"; };
+		A1000000000000000000000A = {isa = PBXGroup; children = (A10000000000000000000006 /* Wattline */, A10000000000000000000070 /* WattlineShared */, A10000000000000000000064 /* WattlineTests */, A10000000000000000000007 /* WattlineUITests */, A10000000000000000000079 /* WattlineWidgets */, A10000000000000000000091 /* WattlineActivityAttributes.swift */, A1000000000000000000000B /* Products */, ); sourceTree = "<group>"; };
 		A1000000000000000000000B /* Products */ = {isa = PBXGroup; children = (A10000000000000000000004 /* Wattline.app */, A10000000000000000000063 /* WattlineTests.xctest */, A10000000000000000000005 /* WattlineUITests.xctest */, A10000000000000000000073 /* WattlineWidgets.appex */, ); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
@@ -70,7 +72,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A10000000000000000000021 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000021 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000090 /* WattlineActivityAttributes.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000024 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000068 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A1000000000000000000007C = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
