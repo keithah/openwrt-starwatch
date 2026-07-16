@@ -15,21 +15,24 @@ state.
 - Every `/api/*` route requires `Authorization: Bearer <token>`.
 - `?token=<token>` is also accepted for browser and WebSocket bootstrap. Clients
   should avoid it elsewhere because URLs are commonly logged.
-- JSON request bodies reject unknown fields. The maximum body size is 128 KiB
-  unless an endpoint states otherwise.
-- Timestamps are RFC 3339 strings unless a field is explicitly named `*_ns` or
+- JSON request bodies generally reject unknown fields and have a 128 KiB limit.
+  In 1.0.2, `POST /api/control/{action}` is an exception: it accepts unknown
+  fields and has a 64 KiB limit. Every 1.1.0 PATCH handler must call
+  `json.Decoder.DisallowUnknownFields` and enforce the 128 KiB limit.
+- Date-time values are RFC 3339 strings unless a field is explicitly named `*_ns` or
   `*_seconds`.
 - Rates use bits per second, durations use nanoseconds, power uses watts,
   temperatures use degrees Celsius, and radio rates use megabits per second.
 - Missing data is omitted or represented by an availability object. A numeric
   zero is never used to mean unavailable.
-- Existing errors are UTF-8 `text/plain`. New endpoints retain that behavior:
-  `400` invalid input, `401` authentication failure, `409` stale/conflicting
-  state, `422` valid but unsafe/unsupported input, `502` upstream gRPC failure,
-  and `503` unavailable component.
-- Mutations are synchronous through upstream readback. `202` means the gRPC
-  write succeeded and the requested fields were confirmed by a subsequent read;
-  it does not promise that radios or clients have finished reconnecting.
+- Existing errors are UTF-8 `text/plain`. The principal 1.0.2 endpoint-specific
+  codes are `400` invalid input, `401` authentication failure, `409` conflicting
+  state, `502` upstream gRPC failure, and `503` unavailable component.
+- Mutation success codes are endpoint-specific in 1.0.2. Dish controls,
+  speed-test start, and alert-test enqueue return `202`; config PUT, failover
+  assist POST, and token regeneration return `200`. A 1.0.2 `202` means the
+  immediate operation was accepted or its upstream call returned without error,
+  not that every requested field was compared with a subsequent readback.
 
 ## Authentication
 
@@ -114,14 +117,15 @@ Returns at most 1000 ordered points. Supported spans are `15m`, `3h`, `24h`,
   "span": "24h",
   "tier": "minute",
   "points": [
-    {"timestamp": "2026-07-16T20:00:00Z", "value": 45.2, "min": 42.1, "max": 49.8}
+    {"time": "2026-07-16T20:00:00Z", "value": 45.2, "min": 42.1, "max": 49.8}
   ]
 }
 ```
 
 Current series are `latency_ms`, `drop_rate`, `dish_down_bps`, `dish_up_bps`,
-`power_w`, `wan_probe_rtt_ms`, `wan_probe_loss`, `router_down_bps`, and
-`router_up_bps`.
+`power_w`, `obstruction_fraction`, `wan_probe_rtt_ms`, `wan_probe_loss`,
+`router_down_bps`, and `router_up_bps`. Every point uses the `time` key shown
+above.
 
 ### `GET /api/wan`
 
@@ -162,9 +166,12 @@ starts one test; a concurrent POST returns `409`.
 
 ### `POST /api/control/{action}`
 
-Current actions are `reboot`, `stow`, `unstow`, `snow-melt`, `sleep-schedule`,
-`gps`, `gps-enable`, `gps-disable`, `clear-obstruction-map`,
-`firmware-update`, `firmware-update-check`, and `firmware-update-apply`.
+Current canonical actions are `reboot`, `stow`, `unstow`, `snow-melt`,
+`sleep-schedule`, `gps`, `gps-enable`, `gps-disable`,
+`clear-obstruction-map`, and `firmware-update`. The aliases `snow-melt-mode`,
+`sleep`, and `software-update` are also accepted. `firmware-update-check` and
+`firmware-update-apply` are deprecated aliases: in 1.0.2 both invoke the same
+`software_update` RPC as `firmware-update`; “check” is not a safe no-op query.
 Every action is audited. The generic `gps` action requires an explicit
 `enabled` boolean.
 
@@ -178,8 +185,9 @@ configurations.
 ### `GET|PUT /api/config`
 
 GET returns daemon settings with the token masked. PUT accepts partial updates
-only for safe live-managed fields. Listen address, port, token, dish address,
-WAN interface override, and database path remain restart-managed.
+only for safe live-managed fields. Listen address, port, token, `dish_addr`,
+`poll_status`, `wan_iface`, `ram_hours`, `db_path`, and `flush_secs` remain
+restart-managed.
 
 ### `POST /api/config/regenerate-token`
 

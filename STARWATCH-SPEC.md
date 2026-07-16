@@ -23,7 +23,7 @@ No Starlink account, no cloud API, no telemetry leaves the router. Everything wo
 ### 1.2 Goals
 
 1. **Everything Starbar shows, on the router.** Latency, ping success, throughput, power draw, obstruction stats + sky map, alignment, hardware/firmware info, events/outages — all from the local gRPC API, all rendered honestly ("unavailable" beats a guess).
-2. **Everything the local API can control, that Starbar can't.** Stow/unstow, reboot, snow-melt mode, sleep schedule, GPS toggle, clear obstruction map, firmware-update check/trigger, dish speed test — with destructive actions gated behind confirmation.
+2. **Everything the local API can control, that Starbar can't.** Stow/unstow, reboot, snow-melt mode, sleep schedule, GPS toggle, clear obstruction map, firmware update, dish speed test — with destructive actions gated behind confirmation.
 3. **History that outlives the dish's 15-minute buffer.** 30 days of graphs and a persistent outage log, stored flash-gently (RAM ring + downsampled sqlite flush).
 4. **WAN-link truth.** Independent latency/loss probes out the Starlink interface so "dish healthy, path bad" and "dish outage" are distinguishable; merged outage timeline; optional mwan3 awareness and a one-click Starlink-primary/cellular-backup assist on GL.iNet.
 5. **Speedify-grade looks.** Card-stack dashboard with live scrolling graphs pushed over WebSocket at 1 Hz — not a LuCI form page.
@@ -175,7 +175,7 @@ Some requests return errors or `not authorized` on some hardware/firmware (docum
 | Sleep schedule | `dish_set_config{power_save_*}` | None | start/duration in minutes past midnight **UTC** — UI converts to router-local time and says so |
 | GPS enable/disable | `dish_inhibit_gps` | Confirm | |
 | Clear obstruction map | `dish_clear_obstruction_map` | Confirm ("map rebuilds over ~12 h") | |
-| Firmware update check/apply | `software_update` | Confirm (reboot implied) | |
+| Firmware update | `software_update` | Confirm (reboot implied) | The released `firmware-update-check` and `firmware-update-apply` aliases call this same mutating RPC; "check" is not a read-only check |
 | Dish speed test | `start_speedtest` → poll `get_speedtest_status` | None | Availability varies by firmware; button shows "unsupported on this dish" when the RPC errors (§13.2) |
 
 ### 5.2 Explicitly not exposed
@@ -323,7 +323,7 @@ Speedify's structure: status header, then a vertical stack of cards. Card order 
 | **Alignment** | Compass-style azimuth/elevation/tilt readout | boresight fields |
 | **Power** | Instant/min/mean/max W + 24 h area chart + kWh/day derived; optional user-configured battery capacity/SOC/reserve/efficiency yields clearly labeled runtime estimates | `power_in` + local battery settings |
 | **WAN health** | Per-WAN cards (Starlink, cellular, …): probe RTT/loss sparkline, state, byte counters; mwan3 status + failover-assist button when applicable | §6 |
-| **Controls** | Snow melt (3-state), sleep schedule editor (local-time UI, UTC stored), GPS toggle, stow/unstow, reboot, firmware check — confirmation-gated per §5.1 | §5 |
+| **Controls** | Snow melt (3-state), sleep schedule editor (local-time UI, UTC stored), GPS toggle, stow/unstow, reboot, firmware update — confirmation-gated per §5.1 | §5 |
 | **Speed test** | Run button, latest + history table | §5.1, `speedtests` |
 | **Alerts** | Active raw dish flags + Starwatch alert history; link to settings | §7 |
 | **Hardware** | Model (friendly name mapped from `hardware_version`), firmware, dish id, country, mobility class, temperatures when available | §4.1 |
