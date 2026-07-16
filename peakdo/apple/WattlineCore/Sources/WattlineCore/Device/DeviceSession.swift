@@ -18,6 +18,13 @@ public struct PendingMutation: Equatable, Sendable, Identifiable {
     public let reconciler: MutationReconciler
     public let startedAt: DeviceTimestamp
     public let timeout: Duration
+
+    public init(id: UUID, reconciler: MutationReconciler, startedAt: DeviceTimestamp, timeout: Duration) {
+        self.id = id
+        self.reconciler = reconciler
+        self.startedAt = startedAt
+        self.timeout = timeout
+    }
 }
 
 public struct DeviceState: Equatable, Sendable {
