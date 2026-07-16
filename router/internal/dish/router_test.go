@@ -2,11 +2,29 @@ package dish
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	device "github.com/clarkzjw/starlink-grpc-golang/pkg/spacex.com/api/device"
 )
+
+func TestGatewayForDestinationPrefersSpecificDishRouteOverMultiWANDefault(t *testing.T) {
+	routes := `Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+connectify0 00000000 00000000 0001 0 0 0 00000080 0 0 0
+rmnet_mhi0 00000000 010000C0 0003 0 0 1 00000000 0 0 0
+eth0 00000000 0101A8C0 0003 0 0 2 00000000 0 0 0
+eth0 0164A8C0 0101A8C0 0007 0 0 2 FFFFFFFF 0 0 0
+`
+
+	got, err := gatewayForDestination(strings.NewReader(routes), "192.168.100.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "192.168.1.1" {
+		t.Fatalf("gateway=%q, want Starlink WAN gateway", got)
+	}
+}
 
 func TestRouterPollerUsesOnlyReadOnlyRPCsAndBuildsSnapshot(t *testing.T) {
 	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {

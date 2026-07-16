@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -187,26 +188,52 @@ func systemGateway(context.Context) (string, error) {
 		return "", err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(file)
+	return gatewayForDestination(file, "192.168.100.1")
+}
+
+func gatewayForDestination(routes io.Reader, destination string) (string, error) {
+	targetIP := net.ParseIP(destination).To4()
+	if targetIP == nil {
+		return "", fmt.Errorf("invalid IPv4 destination %q", destination)
+	}
+	target := binary.LittleEndian.Uint32(targetIP)
+	var bestGateway uint32
+	var bestMask uint32
+	var bestMetric uint64 = ^uint64(0)
+	found := false
+	scanner := bufio.NewScanner(routes)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) < 4 || fields[1] != "00000000" {
+		if len(fields) < 8 {
 			continue
 		}
 		flags, _ := strconv.ParseUint(fields[3], 16, 16)
 		if flags&0x2 == 0 {
 			continue
 		}
-		value, err := strconv.ParseUint(fields[2], 16, 32)
-		if err != nil {
+		route, routeErr := strconv.ParseUint(fields[1], 16, 32)
+		gateway, gatewayErr := strconv.ParseUint(fields[2], 16, 32)
+		metric, metricErr := strconv.ParseUint(fields[6], 10, 32)
+		mask, maskErr := strconv.ParseUint(fields[7], 16, 32)
+		if routeErr != nil || gatewayErr != nil || metricErr != nil || maskErr != nil || gateway == 0 {
 			continue
 		}
-		bytes := make([]byte, 4)
-		binary.LittleEndian.PutUint32(bytes, uint32(value))
-		return net.IP(bytes).String(), nil
+		route32, gateway32, mask32 := uint32(route), uint32(gateway), uint32(mask)
+		if target&mask32 != route32&mask32 {
+			continue
+		}
+		if found && (mask32 < bestMask || mask32 == bestMask && metric >= bestMetric) {
+			continue
+		}
+		found, bestGateway, bestMask, bestMetric = true, gateway32, mask32, metric
 	}
 	if err := scanner.Err(); err != nil {
 		return "", err
 	}
-	return "", fmt.Errorf("default gateway not found")
+	if found {
+		bytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(bytes, bestGateway)
+		return net.IP(bytes).String(), nil
+	}
+	return "", fmt.Errorf("gateway for %s not found", destination)
 }

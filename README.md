@@ -42,7 +42,7 @@ macOS pax headers. All payload paths remain below ustar's 100-character limit.
 architecture when needed:
 
 ```sh
-make -C package VERSION=1.0.1 ARCH=aarch64_cortex-a53 all
+make -C package VERSION=1.0.2 ARCH=aarch64_cortex-a53 all
 ```
 
 The committed GL view at
@@ -89,7 +89,7 @@ menu is loaded at login, so log out and back in once after installing
 Build all packages plus `Packages` and `Packages.gz`:
 
 ```sh
-make -C package VERSION=1.0.1 feed
+make -C package VERSION=1.0.2 feed
 # package/out/{*.ipk,Packages,Packages.gz}
 ```
 
