@@ -1,10 +1,10 @@
 import SwiftUI
 import WidgetKit
 
-struct WattlinePlaceholderWidget: Widget {
+struct WattlineWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "WattlinePlaceholder", provider: PlaceholderProvider()) { entry in
-            Text(entry.title)
+        StaticConfiguration(kind: "Wattline", provider: WattlineWidgetProvider()) { entry in
+            WattlineWidgetView(entry: entry)
         }
         .configurationDisplayName("Wattline")
         .description("Power station status")
@@ -12,18 +12,7 @@ struct WattlinePlaceholderWidget: Widget {
     }
 }
 
-private struct PlaceholderEntry: TimelineEntry {
-    let date: Date
-    let title: String
-}
-
-private struct PlaceholderProvider: TimelineProvider {
-    func placeholder(in context: Context) -> PlaceholderEntry { PlaceholderEntry(date: .now, title: "Wattline") }
-    func getSnapshot(in context: Context, completion: @escaping (PlaceholderEntry) -> Void) { completion(PlaceholderEntry(date: .now, title: "Wattline")) }
-    func getTimeline(in context: Context, completion: @escaping (Timeline<PlaceholderEntry>) -> Void) { completion(Timeline(entries: [PlaceholderEntry(date: .now, title: "Wattline")], policy: .never)) }
-}
-
 @main
 struct WattlineWidgetsBundle: WidgetBundle {
-    var body: some Widget { WattlinePlaceholderWidget(); WattlineLiveActivity() }
+    var body: some Widget { WattlineWidget(); WattlineLiveActivity() }
 }
