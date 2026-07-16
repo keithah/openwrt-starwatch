@@ -22,3 +22,14 @@
 - Runtime `test-without-building` was not run because Xcode requires a concrete simulator device; the generic destination is intentionally build-only.
 
 No Tasks 15–18 or macOS app work was included.
+
+## Static-review correction
+
+`Phase2ProjectConfigurationTests` now scopes every assertion to the WattlineWidgets native target and its two build configuration objects. The regression tests explicitly prove that the widget extension alone carries the iOS/macOS floors, conditional bundle identifiers, entitlement/Info.plist paths, and WattlineCore/WattlineUI package dependencies; the iOS Wattline app alone owns the Embed Foundation Extensions phase and is not macOS-capable. This prevents an unrelated target's matching string from making the test pass after a widget configuration mutation.
+
+Verification after correction:
+
+- WattlineTests generic iOS `build-for-testing`: **TEST BUILD SUCCEEDED**.
+- WattlineWidgets generic iOS build: **BUILD SUCCEEDED**.
+- WattlineWidgets generic macOS build: **BUILD SUCCEEDED**.
+- Runtime XCTest was not run because generic destinations do not provide a concrete simulator device.
