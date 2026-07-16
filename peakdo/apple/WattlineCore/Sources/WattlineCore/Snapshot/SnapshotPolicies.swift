@@ -39,7 +39,7 @@ public enum SnapshotMaterialChangePolicy {
 
     private static func portStateChanged(_ a: SharedPortSnapshot?, _ b: SharedPortSnapshot?) -> Bool {
         guard let a, let b else { return a != nil || b != nil }
-        return a.enabled != b.enabled || a.bypassOn != b.bypassOn || a.mode != b.mode || a.isDCInput != b.isDCInput
+        return a.enabled != b.enabled || a.status != b.status || a.bypassOn != b.bypassOn || a.mode != b.mode || a.isDCInput != b.isDCInput
     }
 
     private static func materialPowerChanged(_ a: Double?, _ b: Double?) -> Bool {

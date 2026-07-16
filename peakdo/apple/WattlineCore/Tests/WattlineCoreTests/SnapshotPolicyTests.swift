@@ -18,6 +18,8 @@ final class SnapshotPolicyTests: XCTestCase {
         XCTAssertTrue(SnapshotMaterialChangePolicy.evaluate(previous: base, next: snapshot(status: .charging), lastWidgetReloadAt: t0, now: t0.addingTimeInterval(1)).persist)
         XCTAssertTrue(SnapshotMaterialChangePolicy.evaluate(previous: base, next: snapshot(connection: .disconnected), lastWidgetReloadAt: t0, now: t0.addingTimeInterval(1)).persist)
         XCTAssertTrue(SnapshotMaterialChangePolicy.evaluate(previous: base, next: snapshot(dcEnabled: false), lastWidgetReloadAt: t0, now: t0.addingTimeInterval(1)).persist)
+        let portStatus = SharedDeviceSnapshot(peripheralID: id, featuresRawValue: 1, battery: base.battery, dc: SharedPortSnapshot(enabled: true, status: .charging, voltage: 12, current: 1, power: 10), typeC: nil, connection: .live, observedAt: t0)
+        XCTAssertTrue(SnapshotMaterialChangePolicy.evaluate(previous: base, next: portStatus, lastWidgetReloadAt: t0, now: t0.addingTimeInterval(1)).persist)
         XCTAssertTrue(SnapshotMaterialChangePolicy.evaluate(previous: base, next: snapshot(power: 12), lastWidgetReloadAt: t0, now: t0.addingTimeInterval(1)).persist)
         let noise = snapshot(power: 10.5)
         XCTAssertEqual(SnapshotMaterialChangePolicy.evaluate(previous: base, next: noise, lastWidgetReloadAt: t0, now: t0.addingTimeInterval(1)), SnapshotFanOutDecision(persist: false, updateActivity: false, reloadWidgets: false))
