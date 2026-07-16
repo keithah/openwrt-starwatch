@@ -21,3 +21,7 @@ Verification: WattlineCore `swift test` passes all 142 tests; iOS Simulator `bui
 ## Task 5 lifecycle test hardening
 
 Added controllable-clock lifecycle coverage for ordinary restart write failure (Retry without recovery), expected-disconnect write-error recovery, deterministic reconnect after a simulated 15 seconds without scan, timeout/Retry at simulated 30 seconds, and quarantine of a late old-scope disconnect. The test transport now gates broker reconnects and records scopes so tests exercise AppModel/Broker recovery rather than transport self-connect.
+
+## Lifecycle fixture stabilization
+
+Replaced scheduler-yield synchronization with explicit transport reconnect-waiter readiness barriers, preserving deterministic simulated 15s success and 30s timeout behavior. Demo shutdown assertions now require the persistent DEMO presentation and disconnected scan route. Shutdown lifecycle coverage records and verifies FM bytes (`46 4D`) and the disarm-reconnect policy.
