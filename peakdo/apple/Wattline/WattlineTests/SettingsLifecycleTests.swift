@@ -113,6 +113,10 @@ final class SettingsLifecycleTests: XCTestCase {
         try await eventually { model.connectionStatus == .connected && model.maintenanceState == .idle }
         let ids = await transport.connectedIDs
         XCTAssertEqual(ids.count, 2)
+        guard ids.count >= 2 else {
+            XCTFail("restart should reconnect the saved peripheral")
+            return
+        }
         XCTAssertEqual(ids[0], ids[1])
         let scanStarts = await transport.scanStarts
         XCTAssertEqual(scanStarts, 1, "Restart reconnects the saved peripheral; it must not start a scan")
