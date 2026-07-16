@@ -7,6 +7,8 @@ import (
 	"time"
 
 	device "github.com/clarkzjw/starlink-grpc-golang/pkg/spacex.com/api/device"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"starwatch/internal/history"
 )
@@ -19,6 +21,7 @@ type PollerOptions struct {
 	RetryInterval    time.Duration
 	RPCTimeout       time.Duration
 	Now              func() time.Time
+	LocationEnabled  bool
 }
 
 type Poller struct {
@@ -35,6 +38,7 @@ type Poller struct {
 	backfillDone bool
 	historyPower *float32
 	statusPower  bool
+	mapInterval  chan time.Duration
 }
 
 func NewPoller(api API, writer history.Writer, options PollerOptions) *Poller {
@@ -61,8 +65,8 @@ func NewPoller(api API, writer history.Writer, options PollerOptions) *Poller {
 	}
 	return &Poller{
 		api: api, history: writer, options: options,
-		snapshot: Snapshot{Topology: TopologyWANOnly, FieldAvailability: make(map[string]bool)},
-		failures: make(map[string]int), highWater: make(map[string]time.Time),
+		snapshot: Snapshot{Topology: TopologyWANOnly, FieldAvailability: make(map[string]Availability)},
+		failures: make(map[string]int), highWater: make(map[string]time.Time), mapInterval: make(chan time.Duration, 1),
 	}
 }
 
@@ -70,7 +74,7 @@ func (p *Poller) Snapshot() Snapshot {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	result := p.snapshot
-	result.FieldAvailability = make(map[string]bool, len(p.snapshot.FieldAvailability))
+	result.FieldAvailability = make(map[string]Availability, len(p.snapshot.FieldAvailability))
 	for field, available := range p.snapshot.FieldAvailability {
 		result.FieldAvailability[field] = available
 	}
@@ -92,6 +96,7 @@ func (p *Poller) Run(ctx context.Context) {
 		p.backfill(ctx)
 		p.pollStatus(ctx)
 		p.pollConfig(ctx)
+		p.pollLocation(ctx)
 		_, _ = p.RefreshObstructionMap(ctx)
 	}
 	statusTicker := time.NewTicker(p.options.StatusInterval)
@@ -117,6 +122,7 @@ func (p *Poller) Run(ctx context.Context) {
 			if p.topology() == TopologyFull {
 				p.discover(ctx)
 				p.pollConfig(ctx)
+				p.pollLocation(ctx)
 				if !p.usesStatusPower() {
 					p.refreshHistoryPower(ctx)
 				}
@@ -129,15 +135,74 @@ func (p *Poller) Run(ctx context.Context) {
 			if p.topology() == TopologyFull {
 				_, _ = p.RefreshObstructionMap(ctx)
 			}
+		case interval := <-p.mapInterval:
+			mapTicker.Reset(interval)
 		case <-retryTicker.C:
 			if p.topology() == TopologyWANOnly && p.discover(ctx) {
 				p.backfill(ctx)
 				p.pollStatus(ctx)
 				p.pollConfig(ctx)
+				p.pollLocation(ctx)
 				_, _ = p.RefreshObstructionMap(ctx)
 			}
 		}
 	}
+}
+
+func (p *Poller) SetMapInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.options.MapInterval = interval
+	p.mu.Unlock()
+	select {
+	case p.mapInterval <- interval:
+	default:
+		select {
+		case <-p.mapInterval:
+		default:
+		}
+		p.mapInterval <- interval
+	}
+}
+
+const locationOptInReason = "needs local-access opt-in in the official Starlink app"
+
+func (p *Poller) SetLocationEnabled(enabled bool) {
+	p.mu.Lock()
+	p.options.LocationEnabled = enabled
+	if !enabled {
+		p.snapshot.Location = nil
+		delete(p.snapshot.FieldAvailability, FieldLocation)
+	}
+	p.mu.Unlock()
+}
+
+func (p *Poller) pollLocation(parent context.Context) {
+	p.mu.RLock()
+	enabled := p.options.LocationEnabled
+	p.mu.RUnlock()
+	if !enabled {
+		return
+	}
+	ctx, cancel := p.callContext(parent)
+	defer cancel()
+	response, err := p.api.GetLocation(ctx)
+	if err != nil || response == nil || response.GetLla() == nil {
+		code := status.Code(err)
+		if code == codes.PermissionDenied || code == codes.Unavailable {
+			p.unavailable(FieldLocation, locationOptInReason)
+		} else {
+			p.failed(FieldLocation)
+		}
+		return
+	}
+	lla := response.GetLla()
+	p.succeeded(FieldLocation)
+	p.mu.Lock()
+	p.snapshot.Location = &Location{Latitude: lla.GetLat(), Longitude: lla.GetLon(), Altitude: lla.GetAlt()}
+	p.mu.Unlock()
 }
 
 func (p *Poller) topology() Topology {
@@ -499,7 +564,7 @@ func (p *Poller) succeeded(fields ...string) {
 	defer p.mu.Unlock()
 	for _, field := range fields {
 		p.failures[field] = 0
-		p.snapshot.FieldAvailability[field] = true
+		p.snapshot.FieldAvailability[field] = Availability{Available: true}
 	}
 }
 
@@ -509,9 +574,16 @@ func (p *Poller) failed(fields ...string) {
 	for _, field := range fields {
 		p.failures[field]++
 		if p.failures[field] >= 3 {
-			p.snapshot.FieldAvailability[field] = false
+			p.snapshot.FieldAvailability[field] = Availability{Available: false}
 		}
 	}
+}
+
+func (p *Poller) unavailable(field, reason string) {
+	p.mu.Lock()
+	p.failures[field] = 3
+	p.snapshot.FieldAvailability[field] = Availability{Available: false, Reason: reason}
+	p.mu.Unlock()
 }
 
 func (p *Poller) markDishFailure(at time.Time) {

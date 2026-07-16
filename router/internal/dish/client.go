@@ -15,6 +15,7 @@ type API interface {
 	GetDeviceInfo(context.Context) (*device.DeviceInfo, error)
 	GetHistory(context.Context) (*device.DishGetHistoryResponse, error)
 	DishGetConfig(context.Context) (*device.DishConfig, error)
+	GetLocation(context.Context) (*device.GetLocationResponse, error)
 	DishGetObstructionMap(context.Context) (*device.DishGetObstructionMapResponse, error)
 	Reboot(context.Context) error
 	DishStow(context.Context, bool) error
@@ -24,6 +25,17 @@ type API interface {
 	SoftwareUpdate(context.Context) error
 	StartSpeedtest(context.Context) error
 	GetSpeedtestStatus(context.Context) (*device.SpeedtestStatus, error)
+}
+
+func (c *Client) GetLocation(ctx context.Context) (*device.GetLocationResponse, error) {
+	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_GetLocation{GetLocation: &device.GetLocationRequest{}}})
+	if err != nil {
+		return nil, err
+	}
+	if location := response.GetGetLocation(); location != nil && location.GetLla() != nil {
+		return location, nil
+	}
+	return nil, fmt.Errorf("get_location: dish response missing")
 }
 
 func (c *Client) DishGetObstructionMap(ctx context.Context) (*device.DishGetObstructionMapResponse, error) {

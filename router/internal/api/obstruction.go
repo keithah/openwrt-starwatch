@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"starwatch/internal/dish"
 )
@@ -24,7 +25,11 @@ func (s *server) obstructionMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grid := snapshot.ObstructionMap
-	if grid == nil || s.deps.Now().Sub(grid.FetchedAt) >= s.deps.MapInterval {
+	mapInterval := s.deps.MapInterval
+	if s.deps.Settings != nil {
+		mapInterval = time.Duration(s.deps.Settings.View().Main.PollMap) * time.Second
+	}
+	if grid == nil || s.deps.Now().Sub(grid.FetchedAt) >= mapInterval {
 		var err error
 		grid, err = provider.RefreshObstructionMap(r.Context())
 		if err != nil || grid == nil {

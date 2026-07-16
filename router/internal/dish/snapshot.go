@@ -18,19 +18,41 @@ const (
 	FieldConfig         = "dish_config"
 	FieldHistory        = "history"
 	FieldObstructionMap = "obstruction_map"
+	FieldLocation       = "location"
 )
 
+type Availability struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+}
+
 type Snapshot struct {
-	Topology          Topology        `json:"topology"`
-	Dish              *Status         `json:"dish,omitempty"`
-	DeviceInfo        *DeviceInfo     `json:"device_info,omitempty"`
-	Config            *ConfigReadback `json:"config,omitempty"`
-	DishReachable     bool            `json:"dish_reachable"`
-	DishFailureSince  *time.Time      `json:"dish_failure_since,omitempty"`
-	HistoryOutages    []HistoryOutage `json:"-"`
-	ObstructionMap    *ObstructionMap `json:"-"`
-	FieldAvailability map[string]bool `json:"field_availability"`
-	WAN               WANStatus       `json:"wan"`
+	Topology          Topology                `json:"topology"`
+	Dish              *Status                 `json:"dish,omitempty"`
+	DeviceInfo        *DeviceInfo             `json:"device_info,omitempty"`
+	Config            *ConfigReadback         `json:"config,omitempty"`
+	DishReachable     bool                    `json:"dish_reachable"`
+	DishFailureSince  *time.Time              `json:"dish_failure_since,omitempty"`
+	HistoryOutages    []HistoryOutage         `json:"-"`
+	ObstructionMap    *ObstructionMap         `json:"-"`
+	Location          *Location               `json:"location,omitempty"`
+	StarlinkRouter    *StarlinkRouter         `json:"starlink_router,omitempty"`
+	FieldAvailability map[string]Availability `json:"field_availability"`
+	WAN               WANStatus               `json:"wan"`
+}
+
+type Location struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Altitude  float64 `json:"altitude"`
+}
+
+type StarlinkRouter struct {
+	Reachable       bool   `json:"reachable"`
+	HardwareVersion string `json:"hardware_version"`
+	SoftwareVersion string `json:"software_version"`
+	ClientCount     int    `json:"client_count"`
+	UptimeSeconds   uint64 `json:"uptime_seconds"`
 }
 
 type ObstructionMap struct {
@@ -49,16 +71,37 @@ type HistoryOutage struct {
 }
 
 type WANStatus struct {
-	Available     bool    `json:"available"`
-	Interface     string  `json:"interface"`
-	Up            bool    `json:"up"`
-	RouterDownBPS float32 `json:"router_down_bps"`
-	RouterUpBPS   float32 `json:"router_up_bps"`
-	ProbeRTT30sMS float32 `json:"probe_rtt_30s_ms"`
-	ProbeLoss30s  float32 `json:"probe_loss_30s"`
-	ProbeRTT5mMS  float32 `json:"probe_rtt_5m_ms"`
-	ProbeLoss5m   float32 `json:"probe_loss_5m"`
-	ProbeLossNow  float32 `json:"-"`
+	Available     bool        `json:"available"`
+	Interface     string      `json:"interface"`
+	Up            bool        `json:"up"`
+	RouterDownBPS float32     `json:"router_down_bps"`
+	RouterUpBPS   float32     `json:"router_up_bps"`
+	ProbeRTT30sMS float32     `json:"probe_rtt_30s_ms"`
+	ProbeLoss30s  float32     `json:"probe_loss_30s"`
+	ProbeRTT5mMS  float32     `json:"probe_rtt_5m_ms"`
+	ProbeLoss5m   float32     `json:"probe_loss_5m"`
+	ProbeLossNow  float32     `json:"-"`
+	MWAN3         *MWANStatus `json:"mwan3,omitempty"`
+}
+
+type MWANStatus struct {
+	Interfaces       []MWANInterface `json:"interfaces"`
+	ActivePolicy     string          `json:"active_policy,omitempty"`
+	ActiveInterfaces []string        `json:"active_interfaces,omitempty"`
+	LastSwitch       *MWANLastSwitch `json:"last_switch,omitempty"`
+}
+
+type MWANInterface struct {
+	Name     string `json:"name"`
+	Online   bool   `json:"online"`
+	State    string `json:"state"`
+	Tracking string `json:"tracking,omitempty"`
+}
+
+type MWANLastSwitch struct {
+	From string `json:"from,omitempty"`
+	To   string `json:"to,omitempty"`
+	At   int64  `json:"at,omitempty"`
 }
 
 type Status struct {

@@ -11,17 +11,18 @@ import (
 )
 
 type Config struct {
-	Listen        string
-	Port          int
-	Token         string
-	DishAddr      string
-	PollStatus    time.Duration
-	PollMap       time.Duration
-	WANInterface  string
-	ProbeHosts    []string
-	ProbeInterval time.Duration
-	History       HistoryConfig
-	Alerts        AlertsConfig
+	Listen          string
+	Port            int
+	Token           string
+	DishAddr        string
+	PollStatus      time.Duration
+	PollMap         time.Duration
+	WANInterface    string
+	ProbeHosts      []string
+	ProbeInterval   time.Duration
+	LocationEnabled bool
+	History         HistoryConfig
+	Alerts          AlertsConfig
 }
 
 type HistoryConfig struct {
@@ -105,6 +106,9 @@ func Load(path string) (*Config, error) {
 		if err := parseSeconds(section, "probe_interval", &cfg.ProbeInterval); err != nil {
 			return nil, err
 		}
+		if err := parseBool(section, "location_enabled", &cfg.LocationEnabled); err != nil {
+			return nil, err
+		}
 	}
 	if section := doc.Find("history", ""); section != nil {
 		if err := parseInt(section, "ram_hours", 1, 24*365, &cfg.History.RAMHours); err != nil {
@@ -133,6 +137,7 @@ func Load(path string) (*Config, error) {
 			"motors_stuck_enabled": "motors_stuck", "water_detected_enabled": "water_detected",
 			"mast_not_vertical_enabled": "mast_not_vertical", "slow_ethernet_enabled": "slow_ethernet",
 			"firmware_pending_enabled": "firmware_pending",
+			"failover_event_enabled":   "failover_event",
 		} {
 			rule := cfg.Alerts.Rules[name]
 			if err := parseBool(section, option, &rule.Enabled); err != nil {

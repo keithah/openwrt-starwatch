@@ -3,6 +3,8 @@ package alert
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,6 +89,8 @@ type Engine struct {
 	mu            sync.RWMutex
 	suppressUntil time.Time
 	obstruction   obstructionCache
+	failoverSet   string
+	failoverReady bool
 }
 
 type obstructionCache struct {
@@ -98,7 +102,7 @@ type obstructionCache struct {
 var catalogOrder = []string{
 	"outage_started", "dish_unreachable", "path_degraded", "obstruction_high",
 	"thermal_throttle", "thermal_shutdown", "motors_stuck", "water_detected",
-	"mast_not_vertical", "slow_ethernet", "firmware_pending",
+	"mast_not_vertical", "slow_ethernet", "firmware_pending", "failover_event",
 }
 
 func DefaultRules() map[string]Rule {
@@ -108,7 +112,7 @@ func DefaultRules() map[string]Rule {
 		"thermal_throttle": SeverityWarning, "thermal_shutdown": SeverityCritical,
 		"motors_stuck": SeverityWarning, "water_detected": SeverityWarning,
 		"mast_not_vertical": SeverityInfo, "slow_ethernet": SeverityInfo,
-		"firmware_pending": SeverityInfo,
+		"firmware_pending": SeverityInfo, "failover_event": SeverityWarning,
 	}
 	rules := make(map[string]Rule, len(catalogOrder))
 	for _, name := range catalogOrder {
@@ -148,10 +152,35 @@ func (e *Engine) SetDishUnreachableSuppressUntil(until time.Time) {
 	e.mu.Unlock()
 }
 
+func (e *Engine) SetRules(rules map[string]Rule) {
+	e.mu.Lock()
+	e.rules = cloneRules(rules)
+	e.mu.Unlock()
+}
+
+func (e *Engine) rulesSnapshot() map[string]Rule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return cloneRules(e.rules)
+}
+
+func cloneRules(input map[string]Rule) map[string]Rule {
+	result := make(map[string]Rule, len(input))
+	for name, rule := range input {
+		result[name] = rule
+	}
+	return result
+}
+
 func (e *Engine) Tick(inputs Inputs) {
 	now := e.now()
+	rules := e.rulesSnapshot()
+	e.evaluateFailover(inputs, now, rules["failover_event"])
 	for _, name := range catalogOrder {
-		rule, exists := e.rules[name]
+		if name == "failover_event" {
+			continue
+		}
+		rule, exists := rules[name]
 		if !exists || !rule.Enabled {
 			delete(e.states, name)
 			continue
@@ -192,6 +221,32 @@ func (e *Engine) Tick(inputs Inputs) {
 		e.emit(name, rule.Severity, StateResolved, state, inputs, now)
 		*state = alertState{}
 	}
+}
+
+func (e *Engine) evaluateFailover(inputs Inputs, now time.Time, rule Rule) {
+	if !rule.Enabled || inputs.WAN.MWAN3 == nil {
+		return
+	}
+	active := append([]string(nil), inputs.WAN.MWAN3.ActiveInterfaces...)
+	online := make([]string, 0, len(inputs.WAN.MWAN3.Interfaces))
+	for _, item := range inputs.WAN.MWAN3.Interfaces {
+		if item.Online {
+			online = append(online, item.Name)
+		}
+	}
+	sort.Strings(active)
+	sort.Strings(online)
+	current := "active=" + strings.Join(active, ",") + ";online=" + strings.Join(online, ",")
+	if !e.failoverReady {
+		e.failoverSet, e.failoverReady = current, true
+		return
+	}
+	if current == e.failoverSet {
+		return
+	}
+	state := &alertState{active: true, firedAt: now, subjectStart: now, detail: map[string]any{"previous": e.failoverSet, "active": active, "online": online}}
+	e.failoverSet = current
+	e.emit("failover_event", rule.Severity, StateFiring, state, inputs, now)
 }
 
 type condition struct {

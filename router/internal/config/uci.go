@@ -18,6 +18,95 @@ type UCIDoc struct {
 	Sections []*UCISection
 }
 
+type OptionValue struct {
+	SectionType string
+	SectionName string
+	Option      string
+	Value       string
+}
+
+func RewriteUCI(source string, updates []OptionValue) (string, error) {
+	type sectionKey struct{ typ, name string }
+	pending := make(map[sectionKey][]OptionValue)
+	for _, update := range updates {
+		key := sectionKey{update.SectionType, update.SectionName}
+		pending[key] = append(pending[key], update)
+	}
+	applied := make(map[string]bool)
+	lines := strings.Split(source, "\n")
+	result := make([]string, 0, len(lines)+len(updates))
+	current := sectionKey{}
+	haveSection := false
+	flushMissing := func() {
+		if !haveSection {
+			return
+		}
+		for _, update := range pending[current] {
+			id := updateID(update)
+			if !applied[id] {
+				result = append(result, "\toption "+update.Option+" '"+quoteUCI(update.Value)+"'")
+				applied[id] = true
+			}
+		}
+	}
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		keyword, rest, ok := splitFirst(trimmed)
+		if ok && keyword == "config" {
+			flushMissing()
+			typ, nameText, named := splitFirst(rest)
+			name := ""
+			if named {
+				name = unquote(nameText)
+			}
+			current, haveSection = sectionKey{unquote(typ), name}, true
+			result = append(result, raw)
+			continue
+		}
+		if haveSection && ok && keyword == "option" {
+			option, _, parsed := splitFirst(rest)
+			if parsed {
+				option = unquote(option)
+				for _, update := range pending[current] {
+					if update.Option == option {
+						indent := raw[:len(raw)-len(strings.TrimLeftFunc(raw, unicode.IsSpace))]
+						result = append(result, indent+"option "+option+" '"+quoteUCI(update.Value)+"'")
+						applied[updateID(update)] = true
+						goto nextLine
+					}
+				}
+			}
+		}
+		result = append(result, raw)
+	nextLine:
+	}
+	flushMissing()
+	appendedSections := make(map[sectionKey]bool)
+	for _, update := range updates {
+		if applied[updateID(update)] {
+			continue
+		}
+		key := sectionKey{update.SectionType, update.SectionName}
+		if !appendedSections[key] {
+			header := "config " + update.SectionType
+			if update.SectionName != "" {
+				header += " '" + quoteUCI(update.SectionName) + "'"
+			}
+			result = append(result, header)
+			appendedSections[key] = true
+		}
+		result = append(result, "\toption "+update.Option+" '"+quoteUCI(update.Value)+"'")
+		applied[updateID(update)] = true
+	}
+	return strings.Join(result, "\n"), nil
+}
+
+func updateID(update OptionValue) string {
+	return update.SectionType + "\x00" + update.SectionName + "\x00" + update.Option
+}
+
+func quoteUCI(value string) string { return strings.ReplaceAll(value, "'", "'\\''") }
+
 func newSection(typ, name string) *UCISection {
 	return &UCISection{Type: typ, Name: name, Options: map[string]string{}, Lists: map[string][]string{}}
 }

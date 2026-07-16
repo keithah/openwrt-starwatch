@@ -44,7 +44,7 @@ func TestCatalogContainsEverySupportedSpecAlertAndSeverities(t *testing.T) {
 		"thermal_throttle": SeverityWarning, "thermal_shutdown": SeverityCritical,
 		"motors_stuck": SeverityWarning, "water_detected": SeverityWarning,
 		"mast_not_vertical": SeverityInfo, "slow_ethernet": SeverityInfo,
-		"firmware_pending": SeverityInfo,
+		"firmware_pending": SeverityInfo, "failover_event": SeverityWarning,
 	}
 	if len(rules) != len(want) {
 		t.Fatalf("catalog length=%d want=%d: %#v", len(rules), len(want), rules)
@@ -54,8 +54,23 @@ func TestCatalogContainsEverySupportedSpecAlertAndSeverities(t *testing.T) {
 			t.Fatalf("rule %q: %+v present=%v", name, rule, ok)
 		}
 	}
-	if _, exists := rules["failover_event"]; exists {
-		t.Fatal("failover_event must remain deferred until mwan3 lands")
+}
+
+func TestFailoverEventBaselinesThenFiresOncePerActiveSetChangeWithoutClear(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	notifications := &notificationSink{}
+	rules := map[string]Rule{"failover_event": DefaultRules()["failover_event"]}
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, Delivery: notifications})
+	inputs := Inputs{WAN: dish.WANStatus{MWAN3: &dish.MWANStatus{ActiveInterfaces: []string{"wan"}}}}
+	engine.Tick(inputs)
+	engine.Tick(inputs)
+	inputs.WAN.MWAN3.ActiveInterfaces = []string{"wwan"}
+	engine.Tick(inputs)
+	engine.Tick(inputs)
+	inputs.WAN.MWAN3.Interfaces = []dish.MWANInterface{{Name: "wwan", Online: true}}
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 2 || notifications.notifications[0].Alert != "failover_event" || notifications.notifications[0].State != StateFiring || notifications.notifications[1].State != StateFiring {
+		t.Fatalf("notifications=%#v", notifications.notifications)
 	}
 }
 

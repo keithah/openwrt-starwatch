@@ -143,6 +143,17 @@ func openSQLite(path string, options SQLiteOptions) (*SQLiteStore, error) {
 
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
+func (s *SQLiteStore) SetRetention(minute, quarter time.Duration) {
+	s.mu.Lock()
+	if minute > 0 {
+		s.options.MinuteRetention = minute
+	}
+	if quarter > 0 {
+		s.options.QuarterRetention = quarter
+	}
+	s.mu.Unlock()
+}
+
 func (s *SQLiteStore) AddEvent(event Event) {
 	s.mu.Lock()
 	s.pending = append(s.pending, event)

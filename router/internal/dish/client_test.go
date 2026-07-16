@@ -30,6 +30,10 @@ func (f *fakeDishServer) Handle(ctx context.Context, request *device.Request) (*
 		f.requests = append(f.requests, "history")
 	case *device.Request_DishGetConfig:
 		f.requests = append(f.requests, "config")
+	case *device.Request_GetLocation:
+		f.requests = append(f.requests, "location")
+	case *device.Request_WifiGetClients:
+		f.requests = append(f.requests, "wifi_clients")
 	case *device.Request_DishGetObstructionMap:
 		f.requests = append(f.requests, "obstruction_map")
 	case *device.Request_Reboot:
@@ -50,6 +54,24 @@ func (f *fakeDishServer) Handle(ctx context.Context, request *device.Request) (*
 		f.requests = append(f.requests, "speedtest_status")
 	}
 	return f.handle(ctx, request)
+}
+
+func TestClientGetLocationWrapper(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		if _, ok := request.GetRequest().(*device.Request_GetLocation); ok {
+			return &device.Response{Response: &device.Response_GetLocation{GetLocation: &device.GetLocationResponse{Lla: &device.LLAPosition{Lat: 1, Lon: 2, Alt: 3}}}}, nil
+		}
+		return &device.Response{}, nil
+	}}
+	client, err := Dial(context.Background(), startFakeDish(t, fake))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	location, err := client.GetLocation(context.Background())
+	if err != nil || location.GetLla().GetLat() != 1 {
+		t.Fatalf("location=%+v err=%v", location, err)
+	}
 }
 
 func TestClientTypedControlMapAndSpeedtestWrappers(t *testing.T) {

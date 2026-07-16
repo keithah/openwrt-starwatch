@@ -45,6 +45,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.PollStatus != time.Second || cfg.PollMap != 15*time.Minute || cfg.ProbeInterval != 2*time.Second {
 		t.Fatalf("interval defaults: %+v", cfg)
 	}
+	if cfg.LocationEnabled {
+		t.Fatal("location must default off")
+	}
 	if !reflect.DeepEqual(cfg.ProbeHosts, []string{"1.1.1.1", "8.8.8.8"}) {
 		t.Fatalf("probe hosts: %#v", cfg.ProbeHosts)
 	}
@@ -76,6 +79,7 @@ config starwatch 'main'
 	option wan_iface 'wan2'
 	option probe_hosts '9.9.9.9 149.112.112.112'
 	option probe_interval '7'
+	option location_enabled '1'
 
 config history
 	option ram_hours '6'
@@ -104,13 +108,14 @@ config alerts
 	option mast_not_vertical_enabled '1'
 	option slow_ethernet_enabled '1'
 	option firmware_pending_enabled '0'
+	option failover_event_enabled '0'
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Listen != "127.0.0.1" || cfg.Port != 1234 || cfg.Token != "secret" ||
 		cfg.DishAddr != "localhost:9200" || cfg.PollStatus != 3*time.Second ||
-		cfg.PollMap != 2*time.Minute || cfg.WANInterface != "wan2" || cfg.ProbeInterval != 7*time.Second {
+		cfg.PollMap != 2*time.Minute || cfg.WANInterface != "wan2" || cfg.ProbeInterval != 7*time.Second || !cfg.LocationEnabled {
 		t.Fatalf("main: %+v", cfg)
 	}
 	if !reflect.DeepEqual(cfg.ProbeHosts, []string{"9.9.9.9", "149.112.112.112"}) {
@@ -127,7 +132,7 @@ config alerts
 		cfg.Alerts.Rules["dish_unreachable"].Hold != 75*time.Second || cfg.Alerts.Rules["path_degraded"].Threshold != .25 ||
 		cfg.Alerts.Rules["path_degraded"].Threshold2 != 350 || cfg.Alerts.Rules["path_degraded"].ClearHold != 4*time.Minute ||
 		cfg.Alerts.Rules["obstruction_high"].Threshold != .035 || cfg.Alerts.Rules["thermal_throttle"].Enabled ||
-		cfg.Alerts.Rules["firmware_pending"].Enabled {
+		cfg.Alerts.Rules["firmware_pending"].Enabled || cfg.Alerts.Rules["failover_event"].Enabled {
 		t.Fatalf("alert options: %#v", cfg.Alerts.Rules)
 	}
 }

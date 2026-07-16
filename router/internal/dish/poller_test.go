@@ -36,6 +36,8 @@ func cannedResponse(request *device.Request) (*device.Response, error) {
 		return &device.Response{Response: &device.Response_DishGetConfig{DishGetConfig: &device.DishGetConfigResponse{DishConfig: &device.DishConfig{
 			SnowMeltMode: device.DishConfig_ALWAYS_OFF, PowerSaveMode: true, PowerSaveStartMinutes: 120, PowerSaveDurationMinutes: 60,
 		}}}}, nil
+	case *device.Request_GetLocation:
+		return &device.Response{Response: &device.Response_GetLocation{GetLocation: &device.GetLocationResponse{Lla: &device.LLAPosition{Lat: 45, Lon: -122, Alt: 100}}}}, nil
 	case *device.Request_DishGetObstructionMap:
 		return &device.Response{Response: &device.Response_DishGetObstructionMap{DishGetObstructionMap: &device.DishGetObstructionMapResponse{
 			NumRows: 1, NumCols: 2, Snr: []float32{0, 1}, MinElevationDeg: 25,
@@ -43,6 +45,32 @@ func cannedResponse(request *device.Request) (*device.Response, error) {
 		}}}, nil
 	default:
 		return &device.Response{}, nil
+	}
+}
+
+func TestLocationPollingIsOptInAndSurfacesPermissionReason(t *testing.T) {
+	denied := false
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		if _, ok := request.GetRequest().(*device.Request_GetLocation); ok && denied {
+			return nil, status.Error(codes.PermissionDenied, "not authorized")
+		}
+		return cannedResponse(request)
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.pollLocation(context.Background())
+	if got := requestCount(fake, "location"); got != 0 {
+		t.Fatalf("disabled location calls=%d", got)
+	}
+	poller.SetLocationEnabled(true)
+	poller.pollLocation(context.Background())
+	if got := poller.Snapshot().Location; got == nil || got.Latitude != 45 || got.Longitude != -122 || got.Altitude != 100 {
+		t.Fatalf("location=%+v", got)
+	}
+	denied = true
+	poller.pollLocation(context.Background())
+	availability := poller.Snapshot().FieldAvailability[FieldLocation]
+	if availability.Available || availability.Reason != locationOptInReason {
+		t.Fatalf("availability=%+v", availability)
 	}
 }
 
@@ -141,11 +169,11 @@ func TestPollerMarksUnavailableAfterThreeFailuresAndClearsOnSuccess(t *testing.T
 		poller.pollStatus(context.Background())
 	}
 	availability := poller.Snapshot().FieldAvailability
-	if available, tracked := availability[FieldStatus]; !tracked || available {
+	if available, tracked := availability[FieldStatus]; !tracked || available.Available {
 		t.Fatalf("status must be marked unavailable after three failures: %#v", availability)
 	}
 	poller.pollStatus(context.Background())
-	if available := poller.Snapshot().FieldAvailability[FieldStatus]; !available {
+	if available := poller.Snapshot().FieldAvailability[FieldStatus]; !available.Available {
 		t.Fatalf("status must recover on first success: %#v", poller.Snapshot().FieldAvailability)
 	}
 }

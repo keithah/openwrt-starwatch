@@ -18,6 +18,10 @@ type Prober interface {
 	Probe(ctx context.Context, interfaceName, host string) (time.Duration, error)
 }
 
+type MWANProvider interface {
+	Snapshot() *dish.MWANStatus
+}
+
 type Options struct {
 	DishAddr          string
 	Override          string
@@ -29,6 +33,7 @@ type Options struct {
 	Now               func() time.Time
 	Discoverer        Discoverer
 	Prober            Prober
+	MWAN              MWANProvider
 }
 
 type probeSample struct {
@@ -41,12 +46,15 @@ type Monitor struct {
 	options Options
 	history history.Writer
 
-	mu       sync.RWMutex
-	snapshot dish.WANStatus
-	probes   []probeSample
-	lastRX   uint64
-	lastTX   uint64
-	lastAt   time.Time
+	mu            sync.RWMutex
+	snapshot      dish.WANStatus
+	probes        []probeSample
+	lastRX        uint64
+	lastTX        uint64
+	lastAt        time.Time
+	settingsMu    sync.RWMutex
+	hosts         []string
+	probeInterval time.Duration
 }
 
 func NewMonitor(options Options, writer history.Writer) *Monitor {
@@ -71,7 +79,7 @@ func NewMonitor(options Options, writer history.Writer) *Monitor {
 	if options.Prober == nil {
 		options.Prober = newSystemProber()
 	}
-	return &Monitor{options: options, history: writer}
+	return &Monitor{options: options, history: writer, hosts: append([]string(nil), options.Hosts...), probeInterval: options.ProbeInterval}
 }
 
 func (m *Monitor) Run(ctx context.Context) {
@@ -109,16 +117,30 @@ func (m *Monitor) runDiscoveryLoop(ctx context.Context) {
 }
 
 func (m *Monitor) runProbeLoop(ctx context.Context) {
-	ticker := time.NewTicker(m.options.ProbeInterval)
-	defer ticker.Stop()
 	for {
+		m.settingsMu.RLock()
+		interval := m.probeInterval
+		m.settingsMu.RUnlock()
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			m.probeOnce(ctx)
 		}
 	}
+}
+
+func (m *Monitor) SetProbeConfig(hosts []string, interval time.Duration) {
+	m.settingsMu.Lock()
+	if len(hosts) > 0 {
+		m.hosts = append([]string(nil), hosts...)
+	}
+	if interval > 0 {
+		m.probeInterval = interval
+	}
+	m.settingsMu.Unlock()
 }
 
 func (m *Monitor) runCounterLoop(ctx context.Context) {
@@ -136,8 +158,12 @@ func (m *Monitor) runCounterLoop(ctx context.Context) {
 
 func (m *Monitor) Snapshot() dish.WANStatus {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.snapshot
+	result := m.snapshot
+	m.mu.RUnlock()
+	if m.options.MWAN != nil {
+		result.MWAN3 = m.options.MWAN.Snapshot()
+	}
+	return result
 }
 
 func (m *Monitor) discover() {
@@ -164,14 +190,17 @@ func (m *Monitor) probeOnce(ctx context.Context) {
 		m.discover()
 		name = m.interfaceName()
 	}
-	if name == "" || len(m.options.Hosts) == 0 {
+	m.settingsMu.RLock()
+	hosts := append([]string(nil), m.hosts...)
+	m.settingsMu.RUnlock()
+	if name == "" || len(hosts) == 0 {
 		return
 	}
 	now := m.options.Now()
 	successes := 0
 	var totalRTT time.Duration
-	newSamples := make([]probeSample, 0, len(m.options.Hosts))
-	for _, host := range m.options.Hosts {
+	newSamples := make([]probeSample, 0, len(hosts))
+	for _, host := range hosts {
 		rtt, err := m.options.Prober.Probe(ctx, name, host)
 		sample := probeSample{at: now, rtt: rtt, success: err == nil}
 		newSamples = append(newSamples, sample)
@@ -182,7 +211,7 @@ func (m *Monitor) probeOnce(ctx context.Context) {
 	}
 	m.mu.Lock()
 	m.probes = append(m.probes, newSamples...)
-	m.snapshot.ProbeLossNow = float32(len(m.options.Hosts)-successes) / float32(len(m.options.Hosts))
+	m.snapshot.ProbeLossNow = float32(len(hosts)-successes) / float32(len(hosts))
 	cutoff := now.Add(-5 * time.Minute)
 	first := 0
 	for first < len(m.probes) && m.probes[first].at.Before(cutoff) {
@@ -192,7 +221,7 @@ func (m *Monitor) probeOnce(ctx context.Context) {
 	m.updateProbeWindows(now)
 	m.mu.Unlock()
 	if now.Year() >= 2025 {
-		loss := float32(len(m.options.Hosts)-successes) / float32(len(m.options.Hosts))
+		loss := float32(len(hosts)-successes) / float32(len(hosts))
 		_ = m.history.Append(history.WANProbeLoss, history.Point{Time: now, Value: loss})
 		if successes > 0 {
 			averageMS := float32(totalRTT.Seconds()*1000) / float32(successes)

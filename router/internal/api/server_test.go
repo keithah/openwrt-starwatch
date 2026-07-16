@@ -15,6 +15,7 @@ import (
 	"starwatch/internal/dish"
 	liveevent "starwatch/internal/event"
 	"starwatch/internal/history"
+	"starwatch/internal/mwan"
 	"starwatch/internal/outage"
 )
 
@@ -67,6 +68,14 @@ type speedtestStub struct {
 	err   error
 }
 
+type failoverStub struct {
+	result  mwan.AssistResult
+	applied int
+}
+
+func (s *failoverStub) Assist(context.Context, string) mwan.AssistResult { return s.result }
+func (s *failoverStub) Apply(context.Context, string) error              { s.applied++; return nil }
+
 func (s *speedtestStub) Start(context.Context) error      { return s.err }
 func (s *speedtestStub) Snapshot() dish.SpeedtestSnapshot { return s.state }
 
@@ -76,7 +85,7 @@ func testHandler(t *testing.T, token string, capacity int) (http.Handler, *histo
 	provider := snapshotStub{snapshot: dish.Snapshot{
 		Topology:          dish.TopologyFull,
 		Dish:              &dish.Status{LatencyMS: 42},
-		FieldAvailability: map[string]bool{dish.FieldStatus: true},
+		FieldAvailability: map[string]dish.Availability{dish.FieldStatus: {Available: true}},
 	}}
 	return NewServer(Deps{Token: token, Snapshot: provider, History: store, Now: func() time.Time {
 		return time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
@@ -144,6 +153,17 @@ func TestSpeedtestEndpointReportsConflictAndState(t *testing.T) {
 	}
 }
 
+func TestFailoverAssistGETAndConflictPOST(t *testing.T) {
+	provider := &failoverStub{result: mwan.AssistResult{Reason: "mwan3 is not installed", Proposed: []mwan.Change{}}}
+	handler := NewServer(Deps{Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), WAN: wanStub{snapshot: dish.WANStatus{Interface: "wan"}}, FailoverAssist: provider})
+	if response := request(handler, http.MethodGet, "/api/wan/failover-assist", "secret"); response.Code != http.StatusOK {
+		t.Fatalf("GET code=%d", response.Code)
+	}
+	if response := request(handler, http.MethodPost, "/api/wan/failover-assist", "secret"); response.Code != http.StatusConflict || provider.applied != 0 {
+		t.Fatalf("POST code=%d applied=%d", response.Code, provider.applied)
+	}
+}
+
 func TestAuthAcceptsBearerAndQueryToken(t *testing.T) {
 	handler, _ := testHandler(t, "secret", 10)
 	for name, response := range map[string]*httptest.ResponseRecorder{
@@ -176,7 +196,7 @@ func TestStatusReturnsSnapshot(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Topology != dish.TopologyFull || snapshot.Dish == nil || snapshot.Dish.LatencyMS != 42 || !snapshot.FieldAvailability[dish.FieldStatus] {
+	if snapshot.Topology != dish.TopologyFull || snapshot.Dish == nil || snapshot.Dish.LatencyMS != 42 || !snapshot.FieldAvailability[dish.FieldStatus].Available {
 		t.Fatalf("snapshot: %+v", snapshot)
 	}
 }

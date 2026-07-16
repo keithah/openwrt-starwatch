@@ -47,6 +47,12 @@ func NewDispatcher(options DeliveryOptions) *Dispatcher {
 	return &Dispatcher{options: options, queue: make(chan Notification, options.QueueSize)}
 }
 
+func (d *Dispatcher) SetEndpoints(webhookURL, ntfyURL string) {
+	d.mu.Lock()
+	d.options.WebhookURL, d.options.NtfyURL = webhookURL, ntfyURL
+	d.mu.Unlock()
+}
+
 func (d *Dispatcher) Enqueue(notification Notification) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -79,26 +85,29 @@ func (d *Dispatcher) Run(ctx context.Context) {
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, notification Notification) {
-	if d.options.WebhookURL != "" {
-		if err := d.webhook(ctx, notification); err != nil {
+	d.mu.Lock()
+	webhookURL, ntfyURL := d.options.WebhookURL, d.options.NtfyURL
+	d.mu.Unlock()
+	if webhookURL != "" {
+		if err := d.webhook(ctx, notification, webhookURL); err != nil {
 			d.options.Logf("starwatchd: webhook delivery failed: %v", err)
 		}
 	}
-	if d.options.NtfyURL != "" {
-		if err := d.ntfy(ctx, notification); err != nil {
+	if ntfyURL != "" {
+		if err := d.ntfy(ctx, notification, ntfyURL); err != nil {
 			d.options.Logf("starwatchd: ntfy delivery failed: %v", err)
 		}
 	}
 }
 
-func (d *Dispatcher) webhook(ctx context.Context, notification Notification) error {
+func (d *Dispatcher) webhook(ctx context.Context, notification Notification, endpoint string) error {
 	body, err := json.Marshal(notification)
 	if err != nil {
 		return err
 	}
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, d.options.WebhookURL, bytes.NewReader(body))
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
@@ -123,12 +132,12 @@ func (d *Dispatcher) webhook(ctx context.Context, notification Notification) err
 	return lastErr
 }
 
-func (d *Dispatcher) ntfy(ctx context.Context, notification Notification) error {
+func (d *Dispatcher) ntfy(ctx context.Context, notification Notification, endpoint string) error {
 	body, err := json.Marshal(notification)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, d.options.NtfyURL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

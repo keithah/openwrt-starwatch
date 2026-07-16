@@ -16,9 +16,11 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"starwatch/internal/config"
 	"starwatch/internal/dish"
 	"starwatch/internal/event"
 	"starwatch/internal/history"
+	"starwatch/internal/mwan"
 	"starwatch/internal/outage"
 )
 
@@ -56,8 +58,21 @@ type SpeedtestProvider interface {
 	Snapshot() dish.SpeedtestSnapshot
 }
 
+type FailoverAssistProvider interface {
+	Assist(context.Context, string) mwan.AssistResult
+	Apply(context.Context, string) error
+}
+
+type SettingsProvider interface {
+	Token() string
+	View() config.PublicConfig
+	Update(config.Update) error
+	RegenerateToken() (string, error)
+}
+
 type Deps struct {
 	Token          string
+	TokenProvider  func() string
 	Snapshot       SnapshotProvider
 	History        history.SpanReader
 	WAN            WANProvider
@@ -68,6 +83,8 @@ type Deps struct {
 	Obstruction    ObstructionProvider
 	Speedtest      SpeedtestProvider
 	MapInterval    time.Duration
+	FailoverAssist FailoverAssistProvider
+	Settings       SettingsProvider
 	Now            func() time.Time
 	WSInterval     time.Duration
 	WSBuffer       int
@@ -119,6 +136,11 @@ func NewServer(deps Deps) *server {
 	mux.HandleFunc("GET /api/obstruction-map", s.auth(s.obstructionMap))
 	mux.HandleFunc("GET /api/speedtest", s.auth(s.speedtestStatus))
 	mux.HandleFunc("POST /api/speedtest", s.auth(s.speedtestStart))
+	mux.HandleFunc("GET /api/wan/failover-assist", s.auth(s.failoverAssistGet))
+	mux.HandleFunc("POST /api/wan/failover-assist", s.auth(s.failoverAssistPost))
+	mux.HandleFunc("GET /api/config", s.auth(s.configGet))
+	mux.HandleFunc("PUT /api/config", s.auth(s.configPut))
+	mux.HandleFunc("POST /api/config/regenerate-token", s.auth(s.configRegenerateToken))
 	s.mux = mux
 	return s
 }
@@ -253,7 +275,11 @@ func (s *server) writeWS(connection *websocket.Conn, value any) bool {
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.deps.Token == "" {
+		configuredToken := s.deps.Token
+		if s.deps.TokenProvider != nil {
+			configuredToken = s.deps.TokenProvider()
+		}
+		if configuredToken == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -265,7 +291,7 @@ func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 		if token == "" {
 			token = r.URL.Query().Get("token")
 		}
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.deps.Token)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(configuredToken)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

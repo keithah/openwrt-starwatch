@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseUCI(t *testing.T) {
 	doc, err := ParseUCI(`
@@ -36,5 +39,25 @@ func TestParseUCIAcceptsTabsBetweenTokens(t *testing.T) {
 	section := doc.Find("starwatch", "main")
 	if section == nil || section.Options["port"] != "9633" {
 		t.Fatalf("section: %#v", section)
+	}
+}
+
+func TestRewriteUCIPreservesUnknownContentAndComments(t *testing.T) {
+	source := `# keep this comment
+config starwatch 'main'
+	option probe_interval '2'
+	option future_option 'keep-me'
+
+config plugin 'unknown'
+	list mystery 'one'
+`
+	result, err := RewriteUCI(source, []OptionValue{{SectionType: "starwatch", SectionName: "main", Option: "probe_interval", Value: "5"}, {SectionType: "starwatch", SectionName: "main", Option: "poll_map", Value: "900"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"# keep this comment", "option probe_interval '5'", "option poll_map '900'", "option future_option 'keep-me'", "config plugin 'unknown'", "list mystery 'one'"} {
+		if !strings.Contains(result, expected) {
+			t.Fatalf("missing %q in:\n%s", expected, result)
+		}
 	}
 }

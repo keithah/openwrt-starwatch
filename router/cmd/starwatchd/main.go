@@ -20,13 +20,19 @@ import (
 	"starwatch/internal/dish"
 	"starwatch/internal/event"
 	"starwatch/internal/history"
+	"starwatch/internal/mwan"
 	"starwatch/internal/outage"
 	"starwatch/internal/wan"
 )
 
 type runtimeDeps struct {
-	listen func(network, address string) (net.Listener, error)
-	now    func() time.Time
+	listen         func(network, address string) (net.Listener, error)
+	now            func() time.Time
+	configPath     string
+	mwanRunner     mwan.Runner
+	glManaged      func(context.Context) bool
+	resolveGateway func(context.Context) (string, error)
+	wanDiscoverer  wan.Discoverer
 }
 
 func main() {
@@ -44,7 +50,7 @@ func run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	return runConfig(ctx, cfg, runtimeDeps{})
+	return runConfig(ctx, cfg, runtimeDeps{configPath: configPath})
 }
 
 func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error {
@@ -65,12 +71,19 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 
 	store := history.NewStore(cfg.History.RAMHours * 60 * 60)
 	liveEvents := event.NewBus()
-	poller := dish.NewPoller(client, store, dish.PollerOptions{StatusInterval: cfg.PollStatus, MapInterval: cfg.PollMap, Now: deps.now})
+	poller := dish.NewPoller(client, store, dish.PollerOptions{StatusInterval: cfg.PollStatus, MapInterval: cfg.PollMap, LocationEnabled: cfg.LocationEnabled, Now: deps.now})
 	pollerDone := make(chan struct{})
 	go func() {
 		poller.Run(runCtx)
 		close(pollerDone)
 	}()
+	resolveGateway := deps.resolveGateway
+	if resolveGateway == nil && deps.configPath == "" {
+		resolveGateway = func(context.Context) (string, error) { return "", fmt.Errorf("router discovery disabled") }
+	}
+	routerPoller := dish.NewRouterPoller(dish.RouterPollerOptions{Topology: poller, ResolveGateway: resolveGateway})
+	routerDone := make(chan struct{})
+	go func() { routerPoller.Run(runCtx); close(routerDone) }()
 	reader := history.SpanReader(store)
 	persistent, recovered, sqliteErr := history.OpenSQLite(cfg.History.DBPath, sqliteOptions(cfg, deps.now))
 	var flushDone chan struct{}
@@ -99,9 +112,21 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		}()
 	}
 	timeline := outage.NewTimeline(outage.Options{Now: deps.now, Persistence: persistent, Events: liveEvents})
+	mwanOptions := mwan.Options{Runner: deps.mwanRunner, GLManaged: deps.glManaged}
+	if mwanOptions.Runner == nil && deps.configPath == "" {
+		mwanOptions.Runner = unavailableRunner{}
+		mwanOptions.GLManaged = func(context.Context) bool { return false }
+	}
+	mwanManager := mwan.NewManager(mwanOptions)
+	mwanDone := make(chan struct{})
+	go func() { mwanManager.Run(runCtx); close(mwanDone) }()
+	discoverer := deps.wanDiscoverer
+	if discoverer == nil && deps.configPath == "" {
+		discoverer = unavailableDiscoverer{}
+	}
 	wanMonitor := wan.NewMonitor(wan.Options{
 		DishAddr: cfg.DishAddr, Override: cfg.WANInterface, Hosts: cfg.ProbeHosts,
-		ProbeInterval: cfg.ProbeInterval, Now: deps.now,
+		ProbeInterval: cfg.ProbeInterval, Now: deps.now, MWAN: mwanManager, Discoverer: discoverer,
 	}, store)
 	wanDone := make(chan struct{})
 	go func() {
@@ -123,6 +148,35 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		engineOptions.Events = persistent
 	}
 	alertEngine := alert.NewEngine(engineOptions)
+	var settings *config.Manager
+	if deps.configPath != "" {
+		managerOptions := config.ManagerOptions{Now: deps.now, Live: liveEvents, Apply: func(updated *config.Config) {
+			poller.SetLocationEnabled(updated.LocationEnabled)
+			poller.SetMapInterval(updated.PollMap)
+			wanMonitor.SetProbeConfig(updated.ProbeHosts, updated.ProbeInterval)
+			alertEngine.SetRules(alertRules(updated.Alerts))
+			dispatcher.SetEndpoints(updated.Alerts.WebhookURL, updated.Alerts.NtfyURL)
+			if persistent != nil {
+				persistent.SetRetention(time.Duration(updated.History.MinuteDays)*24*time.Hour, time.Duration(updated.History.QuarterDays)*24*time.Hour)
+			}
+		}}
+		if persistent != nil {
+			managerOptions.Events = persistent
+		}
+		settings, err = config.NewManager(deps.configPath, cfg, managerOptions)
+		if err != nil {
+			cancel()
+			<-pollerDone
+			<-routerDone
+			<-wanDone
+			<-mwanDone
+			<-deliveryDone
+			if flushDone != nil {
+				<-flushDone
+			}
+			return fmt.Errorf("settings manager: %w", err)
+		}
+	}
 	controllerOptions := dish.ControlOptions{
 		Now: deps.now, Live: liveEvents, SuppressDishUnreachableUntil: alertEngine.SetDishUnreachableSuppressUntil,
 		ExpectDishUnreachableUntil: timeline.ExpectDishUnreachableUntil,
@@ -144,7 +198,9 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	defer func() {
 		cancel()
 		<-pollerDone
+		<-routerDone
 		<-wanDone
+		<-mwanDone
 		<-evaluationDone
 		<-deliveryDone
 		speedtests.Wait()
@@ -154,11 +210,17 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	}()
 
 	warnEmptyToken(cfg.Token, log.Printf)
-	apiHandler := api.NewServer(api.Deps{
-		Token: cfg.Token, Snapshot: poller, History: reader, WAN: wanMonitor,
+	apiDeps := api.Deps{
+		Token: cfg.Token, Snapshot: combinedSnapshot{dish: poller, router: routerPoller}, History: reader, WAN: wanMonitor,
 		Outages: timeline, Events: persistent, Live: liveEvents, Now: deps.now,
 		Controls: controller, Obstruction: poller, Speedtest: speedtests, MapInterval: cfg.PollMap,
-	})
+		FailoverAssist: mwanManager,
+	}
+	if settings != nil {
+		apiDeps.Settings = settings
+		apiDeps.TokenProvider = settings.Token
+	}
+	apiHandler := api.NewServer(apiDeps)
 	defer apiHandler.Close()
 	server := newHTTPServer(bindAddr(cfg), apiHandler)
 	listener, err := deps.listen("tcp", server.Addr)
@@ -193,6 +255,31 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		apiHandler.Close()
 		return nil
 	}
+}
+
+type unavailableRunner struct{}
+
+func (unavailableRunner) Run(context.Context, string, []string, string) ([]byte, error) {
+	return nil, fmt.Errorf("command unavailable")
+}
+
+type unavailableDiscoverer struct{}
+
+func (unavailableDiscoverer) Discover(string, string) (string, error) {
+	return "", fmt.Errorf("discovery unavailable")
+}
+
+type combinedSnapshot struct {
+	dish   interface{ Snapshot() dish.Snapshot }
+	router interface{ Snapshot() *dish.StarlinkRouter }
+}
+
+func (s combinedSnapshot) Snapshot() dish.Snapshot {
+	result := s.dish.Snapshot()
+	if s.router != nil {
+		result.StarlinkRouter = s.router.Snapshot()
+	}
+	return result
 }
 
 type evaluationPoller interface {
