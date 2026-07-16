@@ -155,7 +155,7 @@ func (m *Manager) Assist(ctx context.Context, primary string) AssistResult {
 	if primary == "" || backup == "" {
 		return AssistResult{Reason: "at least two WAN interfaces are required", Proposed: []Change{}}
 	}
-	return AssistResult{Available: true, Proposed: proposedChanges(primary, backup)}
+	return AssistResult{Available: true, Proposed: proposedChanges(primary, backup, hasPristineDefaultRule(string(configOutput)))}
 }
 
 func (m *Manager) Apply(ctx context.Context, primary string) error {
@@ -174,8 +174,20 @@ func (m *Manager) Apply(ctx context.Context, primary string) error {
 	return nil
 }
 
-func proposedChanges(primary, backup string) []Change {
-	return []Change{
+func proposedChanges(primary, backup string, replaceExampleRule bool) []Change {
+	changes := []Change{
+		{Package: "mwan3", Section: primary, Value: "interface"},
+		{Package: "mwan3", Section: primary, Option: "enabled", Value: "1"},
+		{Package: "mwan3", Section: primary, Option: "family", Value: "ipv4"},
+		{Package: "mwan3", Section: primary, Option: "track_ip", Value: "1.1.1.1"},
+		{Package: "mwan3", Section: primary, Option: "track_ip", Value: "8.8.8.8"},
+		{Package: "mwan3", Section: primary, Option: "reliability", Value: "1"},
+		{Package: "mwan3", Section: backup, Value: "interface"},
+		{Package: "mwan3", Section: backup, Option: "enabled", Value: "1"},
+		{Package: "mwan3", Section: backup, Option: "family", Value: "ipv4"},
+		{Package: "mwan3", Section: backup, Option: "track_ip", Value: "1.1.1.1"},
+		{Package: "mwan3", Section: backup, Option: "track_ip", Value: "8.8.8.8"},
+		{Package: "mwan3", Section: backup, Option: "reliability", Value: "1"},
 		{Package: "mwan3", Section: "starwatch_primary_m1", Value: "member"},
 		{Package: "mwan3", Section: "starwatch_primary_m1", Option: "interface", Value: primary},
 		{Package: "mwan3", Section: "starwatch_primary_m1", Option: "metric", Value: "1"},
@@ -191,6 +203,12 @@ func proposedChanges(primary, backup string) []Change {
 		{Package: "mwan3", Section: "starwatch_default", Option: "dest_ip", Value: "0.0.0.0/0"},
 		{Package: "mwan3", Section: "starwatch_default", Option: "use_policy", Value: "starwatch_failover"},
 	}
+	// The generated shape still needs the §13.4 on-device verification pass on
+	// current generic OpenWrt and GL.iNet firmware before that question closes.
+	if replaceExampleRule {
+		changes = append(changes, Change{Package: "mwan3", Section: "default_rule_v4", Option: "enabled", Value: "0"})
+	}
+	return changes
 }
 
 func renderBatch(changes []Change) string {
@@ -201,14 +219,17 @@ func renderBatch(changes []Change) string {
 		}
 	}
 	var result strings.Builder
+	seen := make(map[string]int)
 	for _, change := range changes {
 		path := change.Package + "." + change.Section
 		verb := "set"
 		if change.Option != "" {
 			path += "." + change.Option
-			if counts[change.Section+"\x00"+change.Option] > 1 {
+			key := change.Section + "\x00" + change.Option
+			if counts[key] > 1 && seen[key] > 0 {
 				verb = "add_list"
 			}
+			seen[key]++
 		}
 		fmt.Fprintf(&result, "%s %s='%s'\n", verb, path, strings.ReplaceAll(change.Value, "'", "'\\''"))
 	}
@@ -222,13 +243,103 @@ func hasCustomConfig(output string) bool {
 		if !strings.HasPrefix(line, "mwan3.") || !strings.Contains(line, "=") {
 			continue
 		}
-		section := strings.SplitN(strings.TrimPrefix(line, "mwan3."), ".", 2)[0]
-		section = strings.SplitN(section, "=", 2)[0]
-		if !strings.HasPrefix(section, "starwatch_") {
+		path, rawValue, _ := strings.Cut(strings.TrimPrefix(line, "mwan3."), "=")
+		section, option, _ := strings.Cut(path, ".")
+		if section == "globals" || strings.HasPrefix(section, "starwatch_") {
+			continue
+		}
+		options, ok := pristineOpenWrtExample[section]
+		if !ok || options[option] != canonicalUCIValue(rawValue) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasPristineDefaultRule(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == "mwan3.default_rule_v4=rule" {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalUCIValue(raw string) string {
+	fields := strings.Fields(raw)
+	for index := range fields {
+		fields[index] = strings.Trim(fields[index], "'\"")
+	}
+	return strings.Join(fields, " ")
+}
+
+var pristineOpenWrtExample = map[string]map[string]string{
+	"wan": {
+		"": "interface", "enabled": "1", "family": "ipv4", "reliability": "2", "track_ip": "1.0.0.1 1.1.1.1 208.67.222.222 208.67.220.220",
+	},
+	"wan6": {
+		"": "interface", "enabled": "0", "family": "ipv6", "reliability": "2", "track_ip": "2606:4700:4700::1001 2606:4700:4700::1111 2620:0:ccd::2 2620:0:ccc::2",
+	},
+	"wanb": {
+		"": "interface", "enabled": "0", "family": "ipv4", "reliability": "1", "track_ip": "1.0.0.1 1.1.1.1 208.67.222.222 208.67.220.220",
+	},
+	"wanb6": {
+		"": "interface", "enabled": "0", "family": "ipv6", "reliability": "1", "track_ip": "2606:4700:4700::1001 2606:4700:4700::1111 2620:0:ccd::2 2620:0:ccc::2",
+	},
+	"wan_m1_w3": {
+		"": "member", "interface": "wan", "metric": "1", "weight": "3",
+	},
+	"wan_m2_w3": {
+		"": "member", "interface": "wan", "metric": "2", "weight": "3",
+	},
+	"wanb_m1_w2": {
+		"": "member", "interface": "wanb", "metric": "1", "weight": "2",
+	},
+	"wanb_m1_w3": {
+		"": "member", "interface": "wanb", "metric": "1", "weight": "3",
+	},
+	"wanb_m2_w2": {
+		"": "member", "interface": "wanb", "metric": "2", "weight": "2",
+	},
+	"wan6_m1_w3": {
+		"": "member", "interface": "wan6", "metric": "1", "weight": "3",
+	},
+	"wan6_m2_w3": {
+		"": "member", "interface": "wan6", "metric": "2", "weight": "3",
+	},
+	"wanb6_m1_w2": {
+		"": "member", "interface": "wanb6", "metric": "1", "weight": "2",
+	},
+	"wanb6_m1_w3": {
+		"": "member", "interface": "wanb6", "metric": "1", "weight": "3",
+	},
+	"wanb6_m2_w2": {
+		"": "member", "interface": "wanb6", "metric": "2", "weight": "2",
+	},
+	"wan_only": {
+		"": "policy", "use_member": "wan_m1_w3 wan6_m1_w3",
+	},
+	"wanb_only": {
+		"": "policy", "use_member": "wanb_m1_w2 wanb6_m1_w2",
+	},
+	"balanced": {
+		"": "policy", "use_member": "wan_m1_w3 wanb_m1_w3 wan6_m1_w3 wanb6_m1_w3",
+	},
+	"wan_wanb": {
+		"": "policy", "use_member": "wan_m1_w3 wanb_m2_w2 wan6_m1_w3 wanb6_m2_w2",
+	},
+	"wanb_wan": {
+		"": "policy", "use_member": "wan_m2_w3 wanb_m1_w2 wan6_m2_w3 wanb6_m1_w2",
+	},
+	"https": {
+		"": "rule", "sticky": "1", "dest_port": "443", "proto": "tcp", "use_policy": "balanced",
+	},
+	"default_rule_v4": {
+		"": "rule", "dest_ip": "0.0.0.0/0", "use_policy": "balanced", "family": "ipv4",
+	},
+	"default_rule_v6": {
+		"": "rule", "dest_ip": "::/0", "use_policy": "balanced", "family": "ipv6",
+	},
 }
 
 func parseUbusStatus(data []byte) *dish.MWANStatus {
