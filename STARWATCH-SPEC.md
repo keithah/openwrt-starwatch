@@ -146,7 +146,7 @@ All calls are request-oneof members of `SpaceX.API.Device.Device/Handle`.
 
 | UI element | gRPC request | Fields used | Cadence |
 |---|---|---|---|
-| Status header, latency, ping success, throughput, instant power, outage flag | `get_status` | `pop_ping_latency_ms`, `pop_ping_drop_rate`, `downlink_throughput_bps`, `uplink_throughput_bps`, `outage`, `alerts` | 1 s |
+| Status header, latency, ping success, throughput, instant power, outage flag | `get_status` | `pop_ping_latency_ms`, `pop_ping_drop_rate`, `downlink_throughput_bps`, `uplink_throughput_bps`, `outage`, `alerts` — instant power prefers `upsu_stats.dish_power`; when absent, falls back to the newest `get_history.power_in` sample (refreshed at 60 s cadence) and reports `power_source: history` | 1 s |
 | Obstruction card (numbers) | `get_status` | `obstruction_stats` (fraction obstructed, valid-s, time obstructed) | 1 s (same call) |
 | Alignment card | `get_status` | `boresight_azimuth_deg`, `boresight_elevation_deg`, `alignment_stats`, `tilt_angle` | 1 s (same call) |
 | Hardware card | `get_device_info` | id, `hardware_version`, `software_version`, country code, + `mobility_class`, `class_of_service` from status | 60 s |
@@ -192,7 +192,7 @@ Every control action is appended to the events table (§8.2) with timestamp, act
 
 ### 6.1 Interface discovery
 
-Find the WAN interface carrying the dish: the interface holding the route to `dish_addr`, else the mwan3/netifd interface named `wan`, else UCI override `wan_iface`. Cellular/backup interfaces are discovered from mwan3 config when present.
+Find the WAN interface carrying the dish: an explicit UCI `wan_iface` override always wins; otherwise autodetect — the interface holding the route to `dish_addr`, else the mwan3/netifd interface named `wan`. Discovery re-runs periodically (60 s) so interface renames are picked up without a restart. Cellular/backup interfaces are discovered from mwan3 config when present.
 
 ### 6.2 Path probes
 
