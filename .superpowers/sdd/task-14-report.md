@@ -33,3 +33,9 @@ Verification after correction:
 - WattlineWidgets generic iOS build: **BUILD SUCCEEDED**.
 - WattlineWidgets generic macOS build: **BUILD SUCCEEDED**.
 - Runtime XCTest was not run because generic destinations do not provide a concrete simulator device.
+
+## Root-path correction
+
+The configuration test now resolves `#filePath` by removing both `WattlineTests` and `Wattline`, then explicitly addresses `Wattline/Wattline.xcodeproj`, `Wattline/Wattline/Info.plist`, and `Wattline/WattlineWidgets/WattlineWidgets.entitlements` from the Apple project root. This matches the checked-in source layout and prevents accidental dependence on the test bundle's intermediate directory.
+
+Verification: generic WattlineTests iOS build-for-testing and generic WattlineWidgets iOS build both succeeded.
