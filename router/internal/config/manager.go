@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,6 +42,7 @@ type PublicConfig struct {
 	Main    MainView    `json:"main"`
 	History HistoryView `json:"history"`
 	Alerts  AlertsView  `json:"alerts"`
+	Battery BatteryView `json:"battery"`
 }
 type MainView struct {
 	Listen          string   `json:"listen"`
@@ -74,10 +76,20 @@ type RuleView struct {
 	ClearSeconds int     `json:"clear_seconds"`
 }
 
+type BatteryView struct {
+	Enabled                     bool       `json:"enabled"`
+	CapacityWh                  float64    `json:"capacity_wh"`
+	StateOfChargePercent        float64    `json:"state_of_charge_percent"`
+	ReservePercent              float64    `json:"reserve_percent"`
+	ConversionEfficiencyPercent float64    `json:"conversion_efficiency_percent"`
+	StateOfChargeUpdatedAt      *time.Time `json:"state_of_charge_updated_at,omitempty"`
+}
+
 type Update struct {
 	Main    *MainUpdate    `json:"main,omitempty"`
 	History *HistoryUpdate `json:"history,omitempty"`
 	Alerts  *AlertsUpdate  `json:"alerts,omitempty"`
+	Battery *BatteryUpdate `json:"battery,omitempty"`
 }
 type MainUpdate struct {
 	Listen          *string   `json:"listen,omitempty"`
@@ -109,6 +121,14 @@ type RuleUpdate struct {
 	Threshold2   *float64 `json:"threshold2,omitempty"`
 	HoldSeconds  *int     `json:"hold_seconds,omitempty"`
 	ClearSeconds *int     `json:"clear_seconds,omitempty"`
+}
+
+type BatteryUpdate struct {
+	Enabled                     *bool    `json:"enabled,omitempty"`
+	CapacityWh                  *float64 `json:"capacity_wh,omitempty"`
+	StateOfChargePercent        *float64 `json:"state_of_charge_percent,omitempty"`
+	ReservePercent              *float64 `json:"reserve_percent,omitempty"`
+	ConversionEfficiencyPercent *float64 `json:"conversion_efficiency_percent,omitempty"`
 }
 
 func NewManager(path string, cfg *Config, options ManagerOptions) (*Manager, error) {
@@ -144,7 +164,7 @@ func (m *Manager) Update(update Update) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	candidate := cloneConfig(m.config)
-	changes, err := applyUpdate(candidate, update)
+	changes, err := applyUpdate(candidate, update, m.options.Now())
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidUpdate, err)
 	}
@@ -199,7 +219,17 @@ func publicConfig(cfg *Config) PublicConfig {
 	for name, rule := range cfg.Alerts.Rules {
 		rules[name] = RuleView{Enabled: rule.Enabled, Threshold: rule.Threshold, Threshold2: rule.Threshold2, HoldSeconds: int(rule.Hold.Seconds()), ClearSeconds: int(rule.ClearHold.Seconds())}
 	}
-	return PublicConfig{Main: MainView{Listen: cfg.Listen, Port: cfg.Port, Token: maskToken(cfg.Token), DishAddr: cfg.DishAddr, PollStatus: int(cfg.PollStatus.Seconds()), PollMap: int(cfg.PollMap.Seconds()), WANInterface: cfg.WANInterface, ProbeHosts: append([]string(nil), cfg.ProbeHosts...), ProbeInterval: int(cfg.ProbeInterval.Seconds()), LocationEnabled: cfg.LocationEnabled}, History: HistoryView{RAMHours: cfg.History.RAMHours, MinuteDays: cfg.History.MinuteDays, QuarterDays: cfg.History.QuarterDays, DBPath: cfg.History.DBPath, FlushSecs: int(cfg.History.FlushInterval.Seconds())}, Alerts: AlertsView{WebhookURL: cfg.Alerts.WebhookURL, NtfyURL: cfg.Alerts.NtfyURL, Rules: rules}}
+	var updatedAt *time.Time
+	if !cfg.Battery.StateOfChargeUpdatedAt.IsZero() {
+		value := cfg.Battery.StateOfChargeUpdatedAt
+		updatedAt = &value
+	}
+	return PublicConfig{
+		Main:    MainView{Listen: cfg.Listen, Port: cfg.Port, Token: maskToken(cfg.Token), DishAddr: cfg.DishAddr, PollStatus: int(cfg.PollStatus.Seconds()), PollMap: int(cfg.PollMap.Seconds()), WANInterface: cfg.WANInterface, ProbeHosts: append([]string(nil), cfg.ProbeHosts...), ProbeInterval: int(cfg.ProbeInterval.Seconds()), LocationEnabled: cfg.LocationEnabled},
+		History: HistoryView{RAMHours: cfg.History.RAMHours, MinuteDays: cfg.History.MinuteDays, QuarterDays: cfg.History.QuarterDays, DBPath: cfg.History.DBPath, FlushSecs: int(cfg.History.FlushInterval.Seconds())},
+		Alerts:  AlertsView{WebhookURL: cfg.Alerts.WebhookURL, NtfyURL: cfg.Alerts.NtfyURL, Rules: rules},
+		Battery: BatteryView{Enabled: cfg.Battery.Enabled, CapacityWh: cfg.Battery.CapacityWh, StateOfChargePercent: cfg.Battery.StateOfChargePercent, ReservePercent: cfg.Battery.ReservePercent, ConversionEfficiencyPercent: cfg.Battery.ConversionEfficiencyPercent, StateOfChargeUpdatedAt: updatedAt},
+	}
 }
 
 func maskToken(token string) string {
@@ -209,7 +239,7 @@ func maskToken(token string) string {
 	return "****" + token[len(token)-4:]
 }
 
-func applyUpdate(cfg *Config, update Update) ([]OptionValue, error) {
+func applyUpdate(cfg *Config, update Update, now time.Time) ([]OptionValue, error) {
 	var changes []OptionValue
 	add := func(typ, name, option, value string) {
 		changes = append(changes, OptionValue{SectionType: typ, SectionName: name, Option: option, Value: value})
@@ -322,7 +352,51 @@ func applyUpdate(cfg *Config, update Update) ([]OptionValue, error) {
 			cfg.Alerts.Rules[name] = rule
 		}
 	}
+	if input := update.Battery; input != nil {
+		if input.Enabled != nil {
+			cfg.Battery.Enabled = *input.Enabled
+			add("battery", "", "enabled", strconv.FormatBool(*input.Enabled))
+		}
+		if input.CapacityWh != nil {
+			if !finiteNumber(*input.CapacityWh) || *input.CapacityWh <= 0 || *input.CapacityWh > 100_000 {
+				return nil, fmt.Errorf("capacity_wh must be greater than 0 and at most 100000")
+			}
+			cfg.Battery.CapacityWh = *input.CapacityWh
+			add("battery", "", "capacity_wh", formatNumber(*input.CapacityWh))
+		}
+		if input.StateOfChargePercent != nil {
+			if !finiteNumber(*input.StateOfChargePercent) || *input.StateOfChargePercent < 0 || *input.StateOfChargePercent > 100 {
+				return nil, fmt.Errorf("state_of_charge_percent must be between 0 and 100")
+			}
+			cfg.Battery.StateOfChargePercent = *input.StateOfChargePercent
+			cfg.Battery.StateOfChargeUpdatedAt = now.UTC()
+			add("battery", "", "state_of_charge_percent", formatNumber(*input.StateOfChargePercent))
+			add("battery", "", "state_of_charge_updated_at", now.UTC().Format(time.RFC3339Nano))
+		}
+		if input.ReservePercent != nil {
+			if !finiteNumber(*input.ReservePercent) || *input.ReservePercent < 0 || *input.ReservePercent > 95 {
+				return nil, fmt.Errorf("reserve_percent must be between 0 and 95")
+			}
+			cfg.Battery.ReservePercent = *input.ReservePercent
+			add("battery", "", "reserve_percent", formatNumber(*input.ReservePercent))
+		}
+		if input.ConversionEfficiencyPercent != nil {
+			if !finiteNumber(*input.ConversionEfficiencyPercent) || *input.ConversionEfficiencyPercent < 1 || *input.ConversionEfficiencyPercent > 100 {
+				return nil, fmt.Errorf("conversion_efficiency_percent must be between 1 and 100")
+			}
+			cfg.Battery.ConversionEfficiencyPercent = *input.ConversionEfficiencyPercent
+			add("battery", "", "conversion_efficiency_percent", formatNumber(*input.ConversionEfficiencyPercent))
+		}
+	}
 	return changes, nil
+}
+
+func formatNumber(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func finiteNumber(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func thresholdOption(name string, second bool) (string, float64) {

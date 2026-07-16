@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"starwatch/internal/config"
 	"starwatch/internal/dish"
 	"starwatch/internal/history"
 	"starwatch/internal/outage"
@@ -15,6 +16,39 @@ import (
 type diagnosticsHistoryStub struct {
 	results map[string]history.QueryResult
 	err     error
+}
+
+type diagnosticsSettingsStub struct{ view config.PublicConfig }
+
+func (s diagnosticsSettingsStub) Token() string                    { return "secret" }
+func (s diagnosticsSettingsStub) View() config.PublicConfig        { return s.view }
+func (s diagnosticsSettingsStub) Update(config.Update) error       { return nil }
+func (s diagnosticsSettingsStub) RegenerateToken() (string, error) { return "secret", nil }
+
+type diagnosticsQuery struct {
+	series string
+	span   time.Duration
+}
+
+type diagnosticsRecordingHistory struct {
+	queries      []diagnosticsQuery
+	latency      history.QueryResult
+	power        history.QueryResult
+	batteryPower history.QueryResult
+}
+
+func (s *diagnosticsRecordingHistory) QuerySpan(series string, _ time.Time, span time.Duration, _ int) (history.QueryResult, error) {
+	s.queries = append(s.queries, diagnosticsQuery{series: series, span: span})
+	if series == history.LatencyMS {
+		return s.latency, nil
+	}
+	if series == history.PowerW && span == 15*time.Minute {
+		return s.batteryPower, nil
+	}
+	if series == history.PowerW {
+		return s.power, nil
+	}
+	return history.QueryResult{}, history.ErrUnknownSeries
 }
 
 func (s diagnosticsHistoryStub) QuerySpan(series string, _ time.Time, _ time.Duration, _ int) (history.QueryResult, error) {
@@ -72,8 +106,55 @@ func TestDiagnosticsRequiresTokenAndReturnsDerivedAggregateSummary(t *testing.T)
 	if powerBody["mean_w"] != float64(50) || powerBody["min_w"] != float64(40) || powerBody["max_w"] != float64(60) {
 		t.Fatalf("power=%+v", powerBody)
 	}
-	if _, hasBattery := body["battery"]; hasBattery {
-		t.Fatalf("phase 1 emitted battery: %s", response.Body.String())
+	batteryBody := body["battery"].(map[string]any)
+	if batteryBody["configured"] != false || batteryBody["derived"] != true {
+		t.Fatalf("disabled battery=%+v", batteryBody)
+	}
+}
+
+func TestDiagnosticsBatteryUsesSeparateRolling15MinutePower(t *testing.T) {
+	now := time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)
+	updatedAt := now.Add(-time.Hour)
+	historyReader := &diagnosticsRecordingHistory{
+		latency: history.QueryResult{Tier: history.TierMinute, Points: []history.Point{{Time: now.Add(-time.Hour), Value: 25}}},
+		power:   history.QueryResult{Tier: history.TierMinute, Points: []history.Point{{Time: now.Add(-time.Hour), Value: 70}}},
+		batteryPower: history.QueryResult{Tier: history.TierRAM, Points: []history.Point{
+			{Time: now.Add(-10 * time.Minute), Value: 40}, {Time: now.Add(-5 * time.Minute), Value: 50},
+		}},
+	}
+	handler := NewServer(Deps{
+		Token: "secret", Now: func() time.Time { return now }, Snapshot: snapshotStub{}, History: historyReader,
+		Settings: diagnosticsSettingsStub{view: config.PublicConfig{Battery: config.BatteryView{
+			Enabled: true, CapacityWh: 1024, StateOfChargePercent: 76, ReservePercent: 10,
+			ConversionEfficiencyPercent: 90, StateOfChargeUpdatedAt: &updatedAt,
+		}}},
+	})
+	response := request(handler, http.MethodGet, "/api/diagnostics?span=24h", "secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	battery := body["battery"].(map[string]any)
+	if battery["configured"] != true || battery["derived"] != true || battery["load_window"] != "15m" || battery["load_w"] != float64(45) {
+		t.Fatalf("battery=%+v body=%s", battery, response.Body.String())
+	}
+	if battery["full_charge_runtime_hours"] == nil || battery["remaining_runtime_hours"] == nil || battery["state_of_charge_stale"] != false {
+		t.Fatalf("runtime battery=%+v", battery)
+	}
+	foundBatteryQuery := false
+	for _, query := range historyReader.queries {
+		if query.series == history.PowerW && query.span == 15*time.Minute {
+			foundBatteryQuery = true
+		}
+	}
+	if !foundBatteryQuery {
+		t.Fatalf("queries=%+v", historyReader.queries)
+	}
+	if _, exists := body["router"]; exists {
+		t.Fatalf("Phase 2 emitted Phase 3 router object: %s", response.Body.String())
 	}
 }
 

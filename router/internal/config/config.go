@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ type Config struct {
 	LocationEnabled bool
 	History         HistoryConfig
 	Alerts          AlertsConfig
+	Battery         BatteryConfig
 }
 
 type HistoryConfig struct {
@@ -37,6 +39,15 @@ type AlertsConfig struct {
 	WebhookURL string
 	NtfyURL    string
 	Rules      map[string]AlertRuleConfig
+}
+
+type BatteryConfig struct {
+	Enabled                     bool
+	CapacityWh                  float64
+	StateOfChargePercent        float64
+	ReservePercent              float64
+	ConversionEfficiencyPercent float64
+	StateOfChargeUpdatedAt      time.Time
 }
 
 type AlertRuleConfig struct {
@@ -54,7 +65,8 @@ func defaults() *Config {
 		ProbeHosts: []string{"1.1.1.1", "8.8.8.8"}, ProbeInterval: 2 * time.Second,
 		History: HistoryConfig{RAMHours: 3, MinuteDays: 7, QuarterDays: 30,
 			DBPath: "/etc/starwatch/history.db", FlushInterval: 5 * time.Minute},
-		Alerts: defaultAlerts(),
+		Alerts:  defaultAlerts(),
+		Battery: BatteryConfig{CapacityWh: 1000, StateOfChargePercent: 100, ReservePercent: 10, ConversionEfficiencyPercent: 90},
 	}
 }
 
@@ -168,7 +180,48 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.Alerts.Rules["obstruction_high"] = obstruction
 	}
+	if section := doc.Find("battery", ""); section != nil {
+		if err := parseBool(section, "enabled", &cfg.Battery.Enabled); err != nil {
+			return nil, err
+		}
+		if err := parseBatteryNumber(section, "capacity_wh", 0, 100_000, true, &cfg.Battery.CapacityWh); err != nil {
+			return nil, err
+		}
+		if err := parseBatteryNumber(section, "state_of_charge_percent", 0, 100, false, &cfg.Battery.StateOfChargePercent); err != nil {
+			return nil, err
+		}
+		if err := parseBatteryNumber(section, "reserve_percent", 0, 95, false, &cfg.Battery.ReservePercent); err != nil {
+			return nil, err
+		}
+		if err := parseBatteryNumber(section, "conversion_efficiency_percent", 1, 100, false, &cfg.Battery.ConversionEfficiencyPercent); err != nil {
+			return nil, err
+		}
+		if value := section.Options["state_of_charge_updated_at"]; value != "" {
+			parsed, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				return nil, fmt.Errorf("battery.state_of_charge_updated_at must be RFC3339")
+			}
+			cfg.Battery.StateOfChargeUpdatedAt = parsed.UTC()
+		}
+	}
 	return cfg, nil
+}
+
+func parseBatteryNumber(section *UCISection, option string, min, max float64, exclusiveMin bool, destination *float64) error {
+	value := section.Options[option]
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	invalidMin := parsed < min || exclusiveMin && parsed <= min
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || invalidMin || parsed > max {
+		if exclusiveMin {
+			return fmt.Errorf("%s.%s must be greater than %g and at most %g", section.Type, option, min, max)
+		}
+		return fmt.Errorf("%s.%s must be between %g and %g", section.Type, option, min, max)
+	}
+	*destination = parsed
+	return nil
 }
 
 func parseBool(section *UCISection, option string, destination *bool) error {

@@ -61,3 +61,24 @@ config plugin 'unknown'
 		}
 	}
 }
+
+func TestRewriteUCIAddsBatteryOptionsWithoutDroppingUnknownSections(t *testing.T) {
+	source := `config starwatch 'main'
+	option token 'secret'
+
+config vendor 'future'
+	option opaque 'preserve'
+`
+	result, err := RewriteUCI(source, []OptionValue{
+		{SectionType: "battery", Option: "enabled", Value: "true"},
+		{SectionType: "battery", Option: "capacity_wh", Value: "1024"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"config battery", "option enabled 'true'", "option capacity_wh '1024'", "config vendor 'future'", "option opaque 'preserve'"} {
+		if !strings.Contains(result, expected) {
+			t.Fatalf("missing %q in:\n%s", expected, result)
+		}
+	}
+}

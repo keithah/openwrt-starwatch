@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,5 +139,123 @@ func TestEmptyInputReturnsAvailabilityReasonsWithoutZeros(t *testing.T) {
 		if bytes.Contains(encoded, []byte(forbidden)) {
 			t.Fatalf("fabricated zero in %s", encoded)
 		}
+	}
+}
+
+func TestBatteryRuntimeFormulaAndDimensionalUnits(t *testing.T) {
+	now := time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)
+	updatedAt := now.Add(-time.Hour)
+	input := Input{
+		Now: now,
+		Battery: BatteryInput{
+			Enabled: true, CapacityWh: 1024, StateOfChargePercent: 76, ReservePercent: 10,
+			ConversionEfficiencyPercent: 90, StateOfChargeUpdatedAt: updatedAt,
+		},
+		BatteryPower: history.QueryResult{Tier: history.TierRAM, Points: []history.Point{
+			{Time: now.Add(-10 * time.Minute), Value: 40},
+			{Time: now.Add(-5 * time.Minute), Value: 50},
+		}},
+	}
+	got := Summarize(input).Battery
+	if usable := usableWattHours(1024, 76, 10, 90); usable != 608.256 {
+		t.Fatalf("usable Wh=%v", usable)
+	}
+	if !got.Configured || !got.Derived || got.LoadWindow != "15m" || got.LoadW == nil || *got.LoadW != 45 {
+		t.Fatalf("battery=%+v", got)
+	}
+	if got.FullChargeRuntimeHours == nil || math.Abs(*got.FullChargeRuntimeHours-18.432) > 1e-12 ||
+		got.RemainingRuntimeHours == nil || math.Abs(*got.RemainingRuntimeHours-13.5168) > 1e-12 {
+		t.Fatalf("runtime=%+v", got)
+	}
+	if got.StateOfChargeStale == nil || *got.StateOfChargeStale || got.StateOfChargeUpdatedAt == nil || !got.StateOfChargeUpdatedAt.Equal(updatedAt) {
+		t.Fatalf("SOC metadata=%+v", got)
+	}
+
+	dimensional := Summarize(Input{
+		Now:          now,
+		Battery:      BatteryInput{Enabled: true, CapacityWh: 1000, StateOfChargePercent: 100, ConversionEfficiencyPercent: 100, StateOfChargeUpdatedAt: now},
+		BatteryPower: history.QueryResult{Tier: history.TierRAM, Points: []history.Point{{Time: now, Value: 100}}},
+	}).Battery
+	if dimensional.FullChargeRuntimeHours == nil || *dimensional.FullChargeRuntimeHours != 10 || dimensional.RemainingRuntimeHours == nil || *dimensional.RemainingRuntimeHours != 10 {
+		t.Fatalf("Wh/W dimensional runtime=%+v", dimensional)
+	}
+}
+
+func TestBatteryDisabledHasNoEstimates(t *testing.T) {
+	got := Summarize(Input{Battery: BatteryInput{Enabled: false}}).Battery
+	if got.Configured || !got.Derived || got.LoadW != nil || got.FullChargeRuntimeHours != nil || got.RemainingRuntimeHours != nil {
+		t.Fatalf("disabled battery=%+v", got)
+	}
+}
+
+func TestBatteryRejectsUnavailableLoadAndClock(t *testing.T) {
+	saneNow := time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)
+	battery := BatteryInput{Enabled: true, CapacityWh: 1000, StateOfChargePercent: 80, ReservePercent: 10, ConversionEfficiencyPercent: 90, StateOfChargeUpdatedAt: saneNow}
+	for _, test := range []struct {
+		name   string
+		now    time.Time
+		points []history.Point
+		reason string
+	}{
+		{"no samples", saneNow, nil, "no positive power"},
+		{"zero and negative", saneNow, []history.Point{{Time: saneNow, Value: 0}, {Time: saneNow, Value: -5}, {Time: saneNow, Value: float32(math.NaN())}}, "no positive power"},
+		{"stale power", saneNow, []history.Point{{Time: saneNow.Add(-15*time.Minute - time.Nanosecond), Value: 50}}, "stale"},
+		{"future power", saneNow, []history.Point{{Time: saneNow.Add(time.Second), Value: 50}}, "clock"},
+		{"insane current clock", time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), []history.Point{{Time: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Value: 50}}, "clock"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Summarize(Input{Now: test.now, Battery: battery, BatteryPower: history.QueryResult{Tier: history.TierRAM, Points: test.points}}).Battery
+			if got.LoadW != nil || got.FullChargeRuntimeHours != nil || got.RemainingRuntimeHours != nil ||
+				got.FullChargeRuntimeAvailability == nil || got.RemainingRuntimeAvailability == nil ||
+				!strings.Contains(strings.ToLower(got.FullChargeRuntimeAvailability.Reason), test.reason) ||
+				!strings.Contains(strings.ToLower(got.RemainingRuntimeAvailability.Reason), test.reason) {
+				t.Fatalf("battery=%+v", got)
+			}
+		})
+	}
+}
+
+func TestBatteryReserveAndSOCStalenessBoundariesKeepFullRuntime(t *testing.T) {
+	now := time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)
+	point := history.Point{Time: now, Value: 50}
+	for _, test := range []struct {
+		name      string
+		updatedAt time.Time
+		soc       float64
+		reserve   float64
+		stale     bool
+		reason    string
+		full      bool
+		remaining bool
+	}{
+		{"exactly 24h", now.Add(-24 * time.Hour), 80, 10, false, "", true, true},
+		{"over 24h", now.Add(-24*time.Hour - time.Nanosecond), 80, 10, true, "stale", true, false},
+		{"missing SOC timestamp", time.Time{}, 80, 10, false, "timestamp unavailable", true, false},
+		{"future SOC timestamp", now.Add(time.Second), 80, 10, false, "clock", false, false},
+		{"reserve equals SOC", now, 20, 20, false, "reserve", true, false},
+		{"reserve exceeds SOC", now, 10, 20, false, "reserve", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Summarize(Input{
+				Now:          now,
+				Battery:      BatteryInput{Enabled: true, CapacityWh: 1000, StateOfChargePercent: test.soc, ReservePercent: test.reserve, ConversionEfficiencyPercent: 100, StateOfChargeUpdatedAt: test.updatedAt},
+				BatteryPower: history.QueryResult{Tier: history.TierRAM, Points: []history.Point{point}},
+			}).Battery
+			if got.StateOfChargeStale == nil || *got.StateOfChargeStale != test.stale {
+				t.Fatalf("battery=%+v", got)
+			}
+			if test.full && got.FullChargeRuntimeHours == nil {
+				t.Fatalf("full runtime missing: %+v", got)
+			}
+			if !test.full && (got.FullChargeRuntimeHours != nil || got.FullChargeRuntimeAvailability == nil || !strings.Contains(strings.ToLower(got.FullChargeRuntimeAvailability.Reason), test.reason)) {
+				t.Fatalf("full availability=%+v", got)
+			}
+			if test.remaining && got.RemainingRuntimeHours == nil {
+				t.Fatalf("remaining runtime missing: %+v", got)
+			}
+			if !test.remaining && (got.RemainingRuntimeHours != nil || got.RemainingRuntimeAvailability == nil || !strings.Contains(strings.ToLower(got.RemainingRuntimeAvailability.Reason), test.reason)) {
+				t.Fatalf("remaining availability=%+v", got)
+			}
+		})
 	}
 }

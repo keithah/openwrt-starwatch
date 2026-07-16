@@ -13,20 +13,33 @@ import (
 
 var distributionEdges = [...]float64{20, 40, 60, 80, 100, 150, 200, 500}
 
+const batteryLoadWindow = 15 * time.Minute
+
 type Availability struct {
 	Available bool   `json:"available"`
 	Reason    string `json:"reason"`
 }
 
 type Input struct {
-	Span     string
-	Now      time.Time
-	Since    time.Time
-	Latency  history.QueryResult
-	Power    history.QueryResult
-	Snapshot dish.Snapshot
-	WAN      dish.WANStatus
-	Outages  []outage.Entry
+	Span         string
+	Now          time.Time
+	Since        time.Time
+	Latency      history.QueryResult
+	Power        history.QueryResult
+	Snapshot     dish.Snapshot
+	WAN          dish.WANStatus
+	Outages      []outage.Entry
+	Battery      BatteryInput
+	BatteryPower history.QueryResult
+}
+
+type BatteryInput struct {
+	Enabled                     bool
+	CapacityWh                  float64
+	StateOfChargePercent        float64
+	ReservePercent              float64
+	ConversionEfficiencyPercent float64
+	StateOfChargeUpdatedAt      time.Time
 }
 
 type Response struct {
@@ -35,6 +48,7 @@ type Response struct {
 	Ping    PingSummary    `json:"ping"`
 	Outages OutageSummary  `json:"outages"`
 	Power   PowerSummary   `json:"power"`
+	Battery BatterySummary `json:"battery"`
 }
 
 type LatencySummary struct {
@@ -82,12 +96,151 @@ type PowerSummary struct {
 	SleepEnabled *bool    `json:"sleep_enabled,omitempty"`
 }
 
+type BatterySummary struct {
+	Configured                    bool          `json:"configured"`
+	CapacityWh                    *float64      `json:"capacity_wh,omitempty"`
+	StateOfChargePercent          *float64      `json:"state_of_charge_percent,omitempty"`
+	ReservePercent                *float64      `json:"reserve_percent,omitempty"`
+	ConversionEfficiencyPercent   *float64      `json:"conversion_efficiency_percent,omitempty"`
+	LoadWindow                    string        `json:"load_window,omitempty"`
+	LoadW                         *float64      `json:"load_w,omitempty"`
+	LoadAvailability              *Availability `json:"load_w_availability,omitempty"`
+	FullChargeRuntimeHours        *float64      `json:"full_charge_runtime_hours,omitempty"`
+	FullChargeRuntimeAvailability *Availability `json:"full_charge_runtime_hours_availability,omitempty"`
+	RemainingRuntimeHours         *float64      `json:"remaining_runtime_hours,omitempty"`
+	RemainingRuntimeAvailability  *Availability `json:"remaining_runtime_hours_availability,omitempty"`
+	StateOfChargeUpdatedAt        *time.Time    `json:"state_of_charge_updated_at,omitempty"`
+	StateOfChargeStale            *bool         `json:"state_of_charge_stale,omitempty"`
+	Derived                       bool          `json:"derived"`
+}
+
 func Summarize(input Input) Response {
 	return Response{
 		Span: input.Span, Latency: summarizeLatency(input), Ping: summarizePing(input),
-		Outages: summarizeOutages(input), Power: summarizePower(input),
+		Outages: summarizeOutages(input), Power: summarizePower(input), Battery: summarizeBattery(input),
 	}
 }
+
+func summarizeBattery(input Input) BatterySummary {
+	result := BatterySummary{Configured: input.Battery.Enabled, Derived: true}
+	if !input.Battery.Enabled {
+		return result
+	}
+	result.CapacityWh = float64Pointer(input.Battery.CapacityWh)
+	result.StateOfChargePercent = float64Pointer(input.Battery.StateOfChargePercent)
+	result.ReservePercent = float64Pointer(input.Battery.ReservePercent)
+	result.ConversionEfficiencyPercent = float64Pointer(input.Battery.ConversionEfficiencyPercent)
+	result.LoadWindow = "15m"
+	if !input.Battery.StateOfChargeUpdatedAt.IsZero() {
+		updatedAt := input.Battery.StateOfChargeUpdatedAt
+		result.StateOfChargeUpdatedAt = &updatedAt
+	}
+	stale := !input.Battery.StateOfChargeUpdatedAt.IsZero() &&
+		!input.Battery.StateOfChargeUpdatedAt.After(input.Now) &&
+		input.Now.Sub(input.Battery.StateOfChargeUpdatedAt) > 24*time.Hour
+	result.StateOfChargeStale = &stale
+
+	if reason := validateBatteryInput(input.Battery); reason != "" {
+		result.LoadAvailability = unavailable(reason)
+		result.FullChargeRuntimeAvailability = unavailable(reason)
+		result.RemainingRuntimeAvailability = unavailable(reason)
+		return result
+	}
+	load, reason := batteryLoad(input.Now, input.BatteryPower.Points)
+	if reason != "" {
+		result.LoadAvailability = unavailable(reason)
+		result.FullChargeRuntimeAvailability = unavailable(reason)
+		result.RemainingRuntimeAvailability = unavailable(reason)
+		return result
+	}
+	result.LoadW = &load
+	if input.Battery.StateOfChargeUpdatedAt.After(input.Now) {
+		result.FullChargeRuntimeAvailability = unavailable("state of charge timestamp is in the future; clock is not sane")
+		result.RemainingRuntimeAvailability = unavailable("state of charge timestamp is in the future; clock is not sane")
+		return result
+	}
+	fullRuntime := usableWattHours(input.Battery.CapacityWh, 100, input.Battery.ReservePercent, input.Battery.ConversionEfficiencyPercent) / load
+	result.FullChargeRuntimeHours = &fullRuntime
+	if input.Battery.StateOfChargeUpdatedAt.IsZero() {
+		result.RemainingRuntimeAvailability = unavailable("state of charge timestamp unavailable")
+		return result
+	}
+	if stale {
+		result.RemainingRuntimeAvailability = unavailable("state of charge is stale (older than 24h)")
+		return result
+	}
+	if input.Battery.ReservePercent >= input.Battery.StateOfChargePercent {
+		result.RemainingRuntimeAvailability = unavailable("reserve is at or above state of charge")
+		return result
+	}
+	remainingRuntime := usableWattHours(
+		input.Battery.CapacityWh, input.Battery.StateOfChargePercent,
+		input.Battery.ReservePercent, input.Battery.ConversionEfficiencyPercent,
+	) / load
+	result.RemainingRuntimeHours = &remainingRuntime
+	return result
+}
+
+func batteryLoad(now time.Time, points []history.Point) (float64, string) {
+	if now.Year() < 2025 {
+		return 0, "clock is not sane"
+	}
+	positive := make([]history.Point, 0, len(points))
+	for _, point := range points {
+		if validPositive(float64(point.Value)) {
+			positive = append(positive, point)
+		}
+	}
+	if len(positive) == 0 {
+		return 0, "no positive power sample in load window"
+	}
+	validTime := make([]history.Point, 0, len(positive))
+	var latest time.Time
+	for _, point := range positive {
+		if point.Time.Year() < 2025 || point.Time.After(now) {
+			continue
+		}
+		validTime = append(validTime, point)
+		if point.Time.After(latest) {
+			latest = point.Time
+		}
+	}
+	if len(validTime) == 0 {
+		return 0, "power telemetry clock is invalid"
+	}
+	cutoff := now.Add(-batteryLoadWindow)
+	if latest.Before(cutoff) {
+		return 0, "power telemetry is stale"
+	}
+	values := make([]weightedValue, 0, len(validTime))
+	for _, point := range validTime {
+		if point.Time.Before(cutoff) {
+			continue
+		}
+		weight := point.Samples
+		if weight <= 0 {
+			weight = 1
+		}
+		values = append(values, weightedValue{value: float64(point.Value), weight: weight})
+	}
+	return weightedMean(values), ""
+}
+
+func usableWattHours(capacityWh, stateOfChargePercent, reservePercent, efficiencyPercent float64) float64 {
+	return capacityWh * math.Max(0, stateOfChargePercent-reservePercent) * efficiencyPercent / 10_000
+}
+
+func validateBatteryInput(battery BatteryInput) string {
+	if !validPositive(battery.CapacityWh) || battery.CapacityWh > 100_000 ||
+		!finite(battery.StateOfChargePercent) || battery.StateOfChargePercent < 0 || battery.StateOfChargePercent > 100 ||
+		!finite(battery.ReservePercent) || battery.ReservePercent < 0 || battery.ReservePercent > 95 ||
+		!validPositive(battery.ConversionEfficiencyPercent) || battery.ConversionEfficiencyPercent > 100 {
+		return "battery configuration is invalid"
+	}
+	return ""
+}
+
+func float64Pointer(value float64) *float64 { return &value }
 
 type weightedValue struct {
 	value  float64

@@ -33,6 +33,25 @@ func (s *server) diagnostics(w http.ResponseWriter, r *http.Request) {
 		s.writeDiagnosticsError(w, err)
 		return
 	}
+	var battery diagnosticspkg.BatteryInput
+	var batteryPower history.QueryResult
+	if s.deps.Settings != nil {
+		view := s.deps.Settings.View().Battery
+		battery = diagnosticspkg.BatteryInput{
+			Enabled: view.Enabled, CapacityWh: view.CapacityWh, StateOfChargePercent: view.StateOfChargePercent,
+			ReservePercent: view.ReservePercent, ConversionEfficiencyPercent: view.ConversionEfficiencyPercent,
+		}
+		if view.StateOfChargeUpdatedAt != nil {
+			battery.StateOfChargeUpdatedAt = *view.StateOfChargeUpdatedAt
+		}
+		if battery.Enabled {
+			batteryPower, err = s.queryDiagnosticSeries(history.PowerW, now.Add(-15*time.Minute), 15*time.Minute)
+			if err != nil {
+				s.writeDiagnosticsError(w, err)
+				return
+			}
+		}
+	}
 	snapshot := s.deps.Snapshot.Snapshot()
 	wanSnapshot := snapshot.WAN
 	if s.deps.WAN != nil {
@@ -48,7 +67,7 @@ func (s *server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, diagnosticspkg.Summarize(diagnosticspkg.Input{
 		Span: spanText, Now: now, Since: since, Latency: latency, Power: power,
-		Snapshot: snapshot, WAN: wanSnapshot, Outages: outages,
+		Snapshot: snapshot, WAN: wanSnapshot, Outages: outages, Battery: battery, BatteryPower: batteryPower,
 	}))
 }
 

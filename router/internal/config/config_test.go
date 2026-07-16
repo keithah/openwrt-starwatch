@@ -55,6 +55,10 @@ func TestLoadDefaults(t *testing.T) {
 		cfg.History.DBPath != "/etc/starwatch/history.db" || cfg.History.FlushInterval != 5*time.Minute {
 		t.Fatalf("history defaults: %+v", cfg.History)
 	}
+	if cfg.Battery.Enabled || cfg.Battery.CapacityWh != 1000 || cfg.Battery.StateOfChargePercent != 100 ||
+		cfg.Battery.ReservePercent != 10 || cfg.Battery.ConversionEfficiencyPercent != 90 || !cfg.Battery.StateOfChargeUpdatedAt.IsZero() {
+		t.Fatalf("battery defaults: %+v", cfg.Battery)
+	}
 	for _, name := range []string{"outage_started", "dish_unreachable", "path_degraded", "obstruction_high", "thermal_throttle", "thermal_shutdown", "motors_stuck", "water_detected", "mast_not_vertical", "slow_ethernet", "firmware_pending"} {
 		if !cfg.Alerts.Rules[name].Enabled {
 			t.Fatalf("default alert %q is disabled: %#v", name, cfg.Alerts.Rules[name])
@@ -109,6 +113,14 @@ config alerts
 	option slow_ethernet_enabled '1'
 	option firmware_pending_enabled '0'
 	option failover_event_enabled '0'
+
+config battery
+	option enabled '1'
+	option capacity_wh '1024'
+	option state_of_charge_percent '76'
+	option reserve_percent '10'
+	option conversion_efficiency_percent '90'
+	option state_of_charge_updated_at '2026-07-16T20:00:00Z'
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +140,11 @@ config alerts
 	if cfg.Alerts.WebhookURL != "https://example.test/hook" || cfg.Alerts.NtfyURL != "https://ntfy.test/topic" {
 		t.Fatalf("alerts: %+v", cfg.Alerts)
 	}
+	if !cfg.Battery.Enabled || cfg.Battery.CapacityWh != 1024 || cfg.Battery.StateOfChargePercent != 76 ||
+		cfg.Battery.ReservePercent != 10 || cfg.Battery.ConversionEfficiencyPercent != 90 ||
+		!cfg.Battery.StateOfChargeUpdatedAt.Equal(time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)) {
+		t.Fatalf("battery: %+v", cfg.Battery)
+	}
 	if cfg.Alerts.Rules["outage_started"].Enabled || cfg.Alerts.Rules["outage_started"].Hold != 45*time.Second ||
 		cfg.Alerts.Rules["dish_unreachable"].Hold != 75*time.Second || cfg.Alerts.Rules["path_degraded"].Threshold != .25 ||
 		cfg.Alerts.Rules["path_degraded"].Threshold2 != 350 || cfg.Alerts.Rules["path_degraded"].ClearHold != 4*time.Minute ||
@@ -139,11 +156,18 @@ config alerts
 
 func TestLoadRejectsInvalidNumbers(t *testing.T) {
 	for name, body := range map[string]string{
-		"port":        "config starwatch 'main'\n option port '70000'\n",
-		"poll_status": "config starwatch 'main'\n option poll_status '0'\n",
-		"ram_hours":   "config history\n option ram_hours '-1'\n",
-		"alert_bool":  "config alerts\n option motors_stuck_enabled 'maybe'\n",
-		"alert_value": "config alerts\n option path_loss_percent '101'\n",
+		"port":                  "config starwatch 'main'\n option port '70000'\n",
+		"poll_status":           "config starwatch 'main'\n option poll_status '0'\n",
+		"ram_hours":             "config history\n option ram_hours '-1'\n",
+		"alert_bool":            "config alerts\n option motors_stuck_enabled 'maybe'\n",
+		"alert_value":           "config alerts\n option path_loss_percent '101'\n",
+		"battery_capacity_zero": "config battery\n option capacity_wh '0'\n",
+		"battery_capacity_high": "config battery\n option capacity_wh '100001'\n",
+		"battery_capacity_nan":  "config battery\n option capacity_wh 'NaN'\n",
+		"battery_soc":           "config battery\n option state_of_charge_percent '101'\n",
+		"battery_reserve":       "config battery\n option reserve_percent '96'\n",
+		"battery_efficiency":    "config battery\n option conversion_efficiency_percent '0'\n",
+		"battery_timestamp":     "config battery\n option state_of_charge_updated_at 'not-a-time'\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(configFile(t, body)); err == nil {

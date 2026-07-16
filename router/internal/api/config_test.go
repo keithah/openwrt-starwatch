@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"starwatch/internal/config"
 	"starwatch/internal/history"
@@ -66,5 +67,68 @@ func TestConfigAPIUpdatesSafeFieldsRejectsRestartManagedAndRotatesToken(t *testi
 	}
 	if response := request(handler, http.MethodGet, "/api/config", tokenResponse.Token); response.Code != http.StatusOK {
 		t.Fatalf("new token code=%d", response.Code)
+	}
+}
+
+func TestConfigAPIBatteryPartialUpdateBoundsAndServerTimestamp(t *testing.T) {
+	now := time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "starwatch")
+	source := "config starwatch 'main'\n\toption token 'secret'\nconfig battery\n\toption future 'keep'\nconfig vendor 'unknown'\n\toption opaque 'yes'\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := config.NewManager(path, cfg, config.ManagerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Deps{TokenProvider: manager.Token, Settings: manager, Snapshot: snapshotStub{}, History: history.NewStore(1)})
+
+	get := request(handler, http.MethodGet, "/api/config", "secret")
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"battery"`) || !strings.Contains(get.Body.String(), `"enabled":false`) {
+		t.Fatalf("GET code=%d body=%s", get.Code, get.Body.String())
+	}
+	for _, body := range []string{
+		`{"battery":{"capacity_wh":0}}`, `{"battery":{"capacity_wh":100001}}`,
+		`{"battery":{"state_of_charge_percent":-1}}`, `{"battery":{"state_of_charge_percent":101}}`,
+		`{"battery":{"reserve_percent":-1}}`, `{"battery":{"reserve_percent":96}}`,
+		`{"battery":{"conversion_efficiency_percent":0}}`, `{"battery":{"conversion_efficiency_percent":101}}`,
+		`{"battery":{"state_of_charge_updated_at":"2000-01-01T00:00:00Z"}}`,
+	} {
+		response := requestBody(handler, http.MethodPut, "/api/config", "secret", body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("body=%s code=%d response=%s", body, response.Code, response.Body.String())
+		}
+	}
+	valid := requestBody(handler, http.MethodPut, "/api/config", "secret", `{"battery":{"enabled":true,"capacity_wh":1024,"state_of_charge_percent":76,"reserve_percent":10,"conversion_efficiency_percent":90}}`)
+	if valid.Code != http.StatusOK {
+		t.Fatalf("PUT code=%d body=%s", valid.Code, valid.Body.String())
+	}
+	var body config.PublicConfig
+	if err := json.Unmarshal(valid.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Battery.Enabled || body.Battery.CapacityWh != 1024 || body.Battery.StateOfChargePercent != 76 ||
+		body.Battery.StateOfChargeUpdatedAt == nil || !body.Battery.StateOfChargeUpdatedAt.Equal(now) {
+		t.Fatalf("battery response=%+v", body.Battery)
+	}
+	partial := requestBody(handler, http.MethodPut, "/api/config", "secret", `{"battery":{"reserve_percent":15}}`)
+	if partial.Code != http.StatusOK {
+		t.Fatalf("partial PUT code=%d body=%s", partial.Code, partial.Body.String())
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Battery.Enabled || reloaded.Battery.CapacityWh != 1024 || reloaded.Battery.StateOfChargePercent != 76 ||
+		reloaded.Battery.ReservePercent != 15 || reloaded.Battery.ConversionEfficiencyPercent != 90 || !reloaded.Battery.StateOfChargeUpdatedAt.Equal(now) {
+		t.Fatalf("reloaded partial battery=%+v", reloaded.Battery)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "option future 'keep'") || !strings.Contains(string(raw), "config vendor 'unknown'") || !strings.Contains(string(raw), "option opaque 'yes'") {
+		t.Fatalf("rewritten UCI:\n%s", raw)
 	}
 }
