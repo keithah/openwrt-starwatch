@@ -167,6 +167,8 @@ final class AppModel {
     private let brokerCompletionBarrier: BrokerCompletionBarrier
     private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
     private let maintenanceClock: any DeviceClock
+    private let snapshotCoordinator: SnapshotCoordinator?
+    private var snapshotFlushTask: Task<Void, Never>?
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
     private var demoTransport: DemoTransport?
@@ -213,7 +215,8 @@ final class AppModel {
         brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {},
         brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
         connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {},
-        maintenanceClock: any DeviceClock = ContinuousDeviceClock()
+        maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
+        snapshotCoordinator: SnapshotCoordinator? = nil
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
@@ -221,6 +224,7 @@ final class AppModel {
         self.brokerCompletionBarrier = brokerCompletionBarrier
         self.connectedLifecycleBarrier = connectedLifecycleBarrier
         self.maintenanceClock = maintenanceClock
+        self.snapshotCoordinator = snapshotCoordinator
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
@@ -244,6 +248,7 @@ final class AppModel {
         let demo = DemoTransport(seed: 0x57415454)
         demoTransport = demo
         isDemo = true
+        snapshotCoordinator?.setDemo(true)
         let generation = attach(transport: demo)
         selectedPeripheralID = DemoTransport.deviceID
         connectionStatus = .reconnecting
@@ -281,6 +286,7 @@ final class AppModel {
     func requestBluetoothAfterPriming() {
         persistence.onboardingComplete = true
         isDemo = false
+        snapshotCoordinator?.setDemo(false)
         demoTransport = nil
         capabilities = DeviceCapabilities(features: [])
         bluetoothIssue = nil
@@ -1201,11 +1207,29 @@ final class AppModel {
         }
     }
 
-    private func applySessionState(_ nextState: DeviceState) {
+    func applySessionState(_ nextState: DeviceState) {
         let newError = nextState.lastError
         let shouldToast = newError != nil && newError != state.lastError
         state = nextState
         if shouldToast, let newError { showToast(newError) }
+        guard let snapshotCoordinator else { return }
+        let generation = transportGeneration
+        let identity = nextState.identity
+        let capabilities = self.capabilities
+        snapshotFlushTask?.cancel()
+        snapshotFlushTask = Task { [weak self] in
+            guard let self else { return }
+            _ = await snapshotCoordinator.receive(
+                state: nextState,
+                identity: identity,
+                capabilities: capabilities,
+                generation: generation
+            )
+            // Yield once so same-turn battery/DC/Type-C callbacks coalesce in the coordinator.
+            await Task.yield()
+            guard !Task.isCancelled, self.transportGeneration == generation else { return }
+            await snapshotCoordinator.flushPendingWrites()
+        }
     }
 
     private func performPortMutation(_ command: DeviceCommand) {

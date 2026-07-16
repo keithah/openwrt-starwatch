@@ -57,6 +57,28 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let entitlement = try String(contentsOfFile: "Wattline/Wattline.entitlements")
         XCTAssertTrue(entitlement.contains("group.com.keithah.wattline"))
     }
+
+    func testAppModelAcceptedStatePersistsButPendingControlStateDoesNot() async throws {
+        let backend = RecordingSnapshotBackend()
+        let store = SharedSnapshotStore(backend: backend)
+        let coordinator = Wattline.SnapshotCoordinator(store: store, now: { Date(timeIntervalSince1970: 200) })
+        let persistence = AppPersistence(defaults: UserDefaults(suiteName: "SnapshotCoordinator-\(UUID().uuidString)")!)
+        let model = AppModel(persistence: persistence, snapshotCoordinator: coordinator)
+        let id = UUID()
+        let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: "Demo", mode: .application, rawFeatures: 7, capabilities: DeviceCapabilities(features: []))
+        let accepted = DeviceState(identity: identity, connection: .live, freshness: .live)
+        model.applySessionState(accepted)
+        try await Task.sleep(for: .milliseconds(30))
+        let acceptedWrites = await backend.writeCount
+        XCTAssertEqual(acceptedWrites, 1, "accepted session telemetry must reach the coordinator")
+
+        var pending = accepted
+        pending.pendingMutations = [PendingMutation(id: UUID(), reconciler: .dcEnabled(false), startedAt: .zero, timeout: .seconds(3))]
+        model.applySessionState(pending)
+        try await Task.sleep(for: .milliseconds(30))
+        let pendingWrites = await backend.writeCount
+        XCTAssertEqual(pendingWrites, 1, "control/pending state must not write a snapshot")
+    }
 }
 
 private final class RecordingSnapshotBackend: @unchecked Sendable, SnapshotKeyValueStore {

@@ -12,7 +12,7 @@ struct SnapshotFanOutEvent: Equatable, Sendable {
 final class SnapshotCoordinator {
     private let store: SharedSnapshotStore
     private let now: @Sendable () -> Date
-    private let isDemo: Bool
+    private var isDemo: Bool
     private var generation: UInt = 0
     private var previous: SharedDeviceSnapshot?
     private var pending: SharedDeviceSnapshot?
@@ -22,6 +22,10 @@ final class SnapshotCoordinator {
         self.store = store
         self.now = now
         self.isDemo = isDemo
+    }
+
+    func setDemo(_ enabled: Bool) {
+        isDemo = enabled
     }
 
     func receive(
