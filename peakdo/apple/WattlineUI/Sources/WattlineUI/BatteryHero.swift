@@ -61,18 +61,7 @@ public struct BatteryHero: View {
             }
             .opacity(freshness.wattlineIsStale ? 0.58 : 1)
 
-            HStack(spacing: 7) {
-                Image(systemName: status.status.wattlineSymbol)
-                    .font(.caption.weight(.bold))
-                Text(status.status.wattlineName)
-                Text("·")
-                    .foregroundStyle(WattlineTheme.secondaryText)
-                Text("\(abs(status.power).wattlineFormatted()) W")
-                    .monospacedDigit()
-            }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(WattlineTheme.color(for: status.status))
-            .opacity(freshness.wattlineIsStale ? 0.58 : 1)
+            BatteryFlowLine(flow: status.status, power: status.power, freshness: freshness)
         }
         .wattlinePanel(compact: compact)
         .accessibilityElement(children: .ignore)
@@ -149,4 +138,29 @@ public struct BatteryHero: View {
 
     private var levelSize: CGFloat { compact ? compactLevelSize : regularLevelSize }
     private var gaugeDiameter: CGFloat { compact ? compactGaugeDiameter : regularGaugeDiameter }
+}
+
+/// Shared power-flow status row (symbol + name + wattage), colored and dimmed by the same
+/// semantic-color and staleness rules everywhere it appears. Extracted so full-size and compact
+/// variants (`BatteryHero`, `CompactBatteryHero`) never fork this formatting.
+struct BatteryFlowLine: View {
+    let flow: PowerFlow
+    let power: Double
+    let freshness: TelemetryFreshness
+    var font: Font = .subheadline.weight(.medium)
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: flow.wattlineSymbol)
+                .font(.caption.weight(.bold))
+            Text(flow.wattlineName)
+            Text("·")
+                .foregroundStyle(WattlineTheme.secondaryText)
+            Text("\(abs(power).wattlineFormatted()) W")
+                .monospacedDigit()
+        }
+        .font(font)
+        .foregroundStyle(WattlineTheme.color(for: flow))
+        .opacity(freshness.wattlineIsStale ? 0.58 : 1)
+    }
 }

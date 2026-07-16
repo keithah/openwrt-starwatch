@@ -99,7 +99,7 @@ public struct PortCard: View {
             voltage: status.voltage,
             current: status.current,
             power: status.power,
-            detail: Self.typeCDetail(status, showsDCInput: showsDCInput),
+            detail: wattlineTypeCDetail(status, showsDCInput: showsDCInput),
             compact: compact,
             canToggle: canToggle,
             isPending: isPending,
@@ -117,11 +117,7 @@ public struct PortCard: View {
     private var card: some View {
         VStack(alignment: .leading, spacing: compact ? 12 : 16) {
             HStack(spacing: 10) {
-                Image(systemName: symbol)
-                    .font(.headline)
-                    .frame(width: 30, height: 30)
-                    .background(WattlineTheme.recessedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .foregroundStyle(WattlineTheme.color(for: flow))
+                PortIdentityBadge(symbol: symbol, flow: flow)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
@@ -235,24 +231,114 @@ public struct PortCard: View {
         .accessibilityValue("\(value.wattlineFormatted()) \(unit), \(freshness.wattlineAccessibilityDescription)")
     }
 
-    private static func typeCDetail(_ status: TypeCPortStatus, showsDCInput: Bool) -> String? {
-        var details: [String] = []
-        if let mode = status.mode {
-            switch mode {
-            case .disabled: details.append("Disabled")
-            case .input: details.append("In")
-            case .output: details.append("Out")
-            case .inputAndOutput: details.append("In · Out")
-            }
-        }
-        if showsDCInput && status.isDCInput == true {
-            details.append("DC input")
-        }
-        return details.isEmpty ? nil : details.joined(separator: " · ")
-    }
-
     private var toggleAccessibilityValue: String {
         let state = enabled ? "On" : "Off"
         return isPending ? "\(state), update pending" : state
+    }
+}
+
+/// Shared USB-C detail-text computation, used by both `PortCard` and `PortCardPresentation` so
+/// the "In / Out / DC input" labeling logic is computed once, not forked. Kept as a plain
+/// (non-isolated) function since it's pure data mapping with no UI concerns.
+func wattlineTypeCDetail(_ status: TypeCPortStatus, showsDCInput: Bool) -> String? {
+    var details: [String] = []
+    if let mode = status.mode {
+        switch mode {
+        case .disabled: details.append("Disabled")
+        case .input: details.append("In")
+        case .output: details.append("Out")
+        case .inputAndOutput: details.append("In · Out")
+        }
+    }
+    if showsDCInput && status.isDCInput == true {
+        details.append("DC input")
+    }
+    return details.isEmpty ? nil : details.joined(separator: " · ")
+}
+
+/// Shared icon badge (symbol in a tinted rounded square) used by both the full-size and compact
+/// port cards, so the semantic-color mapping is never forked between them.
+struct PortIdentityBadge: View {
+    let symbol: String
+    let flow: PowerFlow
+    var compact: Bool = false
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(compact ? .subheadline : .headline)
+            .frame(width: compact ? 22 : 30, height: compact ? 22 : 30)
+            .background(WattlineTheme.recessedSurface, in: RoundedRectangle(cornerRadius: compact ? 6 : 8, style: .continuous))
+            .foregroundStyle(WattlineTheme.color(for: flow))
+    }
+}
+
+/// The presentation data needed to render a port's identity and telemetry, independent of size
+/// (full or compact) and interaction context (toggle callback, pending state, freshness). Both
+/// `PortCard` and `CompactPortCard` are built from this so the DC/USB-C detail text and field
+/// mapping are computed once, not duplicated per variant.
+public struct PortCardPresentation: Equatable, Sendable {
+    public let title: String
+    public let symbol: String
+    public let enabled: Bool
+    public let flow: PowerFlow
+    public let voltage: Double
+    public let current: Double
+    public let power: Double
+    public let detail: String?
+    public let canToggle: Bool
+    public let toggleLabel: String?
+
+    public init(
+        title: String,
+        symbol: String,
+        enabled: Bool,
+        flow: PowerFlow,
+        voltage: Double,
+        current: Double,
+        power: Double,
+        detail: String? = nil,
+        canToggle: Bool = true,
+        toggleLabel: String? = nil
+    ) {
+        self.title = title
+        self.symbol = symbol
+        self.enabled = enabled
+        self.flow = flow
+        self.voltage = voltage
+        self.current = current
+        self.power = power
+        self.detail = detail
+        self.canToggle = canToggle
+        self.toggleLabel = toggleLabel
+    }
+
+    public init(dcStatus status: DCPortStatus, showsBypass: Bool = false, canToggle: Bool = true) {
+        self.init(
+            title: "DC Port",
+            symbol: "powerplug.fill",
+            enabled: status.enabled,
+            flow: status.status,
+            voltage: status.voltage,
+            current: status.current,
+            power: status.power,
+            detail: showsBypass && status.bypassOn == true ? "Bypass" : nil,
+            canToggle: canToggle,
+            toggleLabel: "DC Port"
+        )
+    }
+
+    public init(typeCStatus status: TypeCPortStatus, showsDCInput: Bool = false, canToggle: Bool = true) {
+        self.init(
+            title: "USB-C Port",
+            symbol: "cable.connector",
+            enabled: status.enabled,
+            flow: status.status,
+            voltage: status.voltage,
+            current: status.current,
+            power: status.power,
+            detail: wattlineTypeCDetail(status, showsDCInput: showsDCInput),
+            canToggle: canToggle,
+            toggleLabel: "USB-C Output"
+        )
     }
 }
