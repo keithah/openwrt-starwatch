@@ -666,13 +666,33 @@ final class AppModel {
         guard connectionOperationKey == key,
               transportGeneration == key.transportGeneration,
               operationGeneration == key.operationGeneration,
+              selectedPeripheralID == key.peripheralID,
+              !retiredConnectionScopeIDs.contains(key.scope.sessionID),
+              activeConnectionScope == nil || activeConnectionScope == key.scope
+        else { return }
+        activeConnectionScope = key.scope
+        connectionOperationKey = nil
+        establishConnectedPresentation(scope: key.scope)
+        if let session {
+            await session.receive(.connected(key.scope))
+        }
+        guard transportGeneration == key.transportGeneration,
+              selectedPeripheralID == key.peripheralID,
+              activeConnectionScope == key.scope
+        else { return }
+        let brokerContext = prepareBrokerContext(
+            peripheralID: key.peripheralID,
+            generation: key.transportGeneration
+        )
+        await publishBrokerContext(brokerContext)
+        guard transportGeneration == key.transportGeneration,
+              selectedPeripheralID == key.peripheralID,
               activeConnectionScope == key.scope
         else { return }
         await deviceOperationBroker.markConnected(
             peripheralID: key.peripheralID,
             generation: key.transportGeneration
         )
-        connectionOperationKey = nil
     }
 
     private func requestBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
@@ -701,6 +721,21 @@ final class AppModel {
             guard transportGeneration == attempt.generation,
                   selectedPeripheralID == attempt.peripheralID,
                   brokerReconnectAttempt == attempt,
+                  brokerReconnectScope == scope,
+                  !retiredConnectionScopeIDs.contains(scope.sessionID),
+                  activeConnectionScope == nil || activeConnectionScope == scope,
+                  !Task.isCancelled
+            else { return }
+            activeConnectionScope = scope
+            establishConnectedPresentation(scope: scope)
+            if let session {
+                await session.receive(.connected(scope))
+            }
+            guard transportGeneration == attempt.generation,
+                  selectedPeripheralID == attempt.peripheralID,
+                  brokerReconnectAttempt == attempt,
+                  brokerReconnectScope == scope,
+                  activeConnectionScope == scope,
                   !Task.isCancelled
             else { return }
             await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
@@ -784,32 +819,7 @@ final class AppModel {
             if brokerReconnectAttempt == nil && connectionOperationKey == nil {
                 await deviceOperationBroker.markConnected(peripheralID: id, generation: generation)
             }
-            if !isDemo {
-                persistence.lastSuccessfulPeripheralID = id
-                selectedPeripheralID = id
-                if state.identity?.peripheralID != id,
-                   let advertisedName = discoveredDevices.first(where: { $0.id == id })?.localName
-                    ?? knownDevices[id]?.advertisedName {
-                    let existing = knownDevices[id]
-                    recordSuccessfulHandshake(
-                        deviceID: id,
-                        advertisedName: advertisedName,
-                        deviceInformationName: existing?.deviceInformationName,
-                        macAddress: existing?.macAddress,
-                        modelNumber: existing?.modelNumber,
-                        hardwareRevision: existing?.hardwareRevision,
-                        otaFirmwareRevision: existing?.otaFirmwareRevision,
-                        appFirmwareRevision: existing?.appFirmwareRevision,
-                        cid: existing?.cid,
-                        rawFeatures: existing?.rawFeatures,
-                        isOTAMode: existing?.isOTAMode
-                    )
-                    connectedName = knownDevices[id]?.name
-                }
-            }
-            scanMessage = nil
-            connectionStatus = .connected
-            route = .connected
+            establishConnectedPresentation(scope: scope)
         case let .reconnecting(scope):
             let id = scope.peripheralID
             selectedPeripheralID = id
@@ -883,6 +893,36 @@ final class AppModel {
         case .transactionDepth:
             break
         }
+    }
+
+    private func establishConnectedPresentation(scope: DeviceConnectionScope) {
+        let id = scope.peripheralID
+        if !isDemo {
+            persistence.lastSuccessfulPeripheralID = id
+            selectedPeripheralID = id
+            if state.identity?.peripheralID != id,
+               let advertisedName = discoveredDevices.first(where: { $0.id == id })?.localName
+                ?? knownDevices[id]?.advertisedName {
+                let existing = knownDevices[id]
+                recordSuccessfulHandshake(
+                    deviceID: id,
+                    advertisedName: advertisedName,
+                    deviceInformationName: existing?.deviceInformationName,
+                    macAddress: existing?.macAddress,
+                    modelNumber: existing?.modelNumber,
+                    hardwareRevision: existing?.hardwareRevision,
+                    otaFirmwareRevision: existing?.otaFirmwareRevision,
+                    appFirmwareRevision: existing?.appFirmwareRevision,
+                    cid: existing?.cid,
+                    rawFeatures: existing?.rawFeatures,
+                    isOTAMode: existing?.isOTAMode
+                )
+                connectedName = knownDevices[id]?.name
+            }
+        }
+        scanMessage = nil
+        connectionStatus = .connected
+        route = .connected
     }
 
     private func restoredIdentity(

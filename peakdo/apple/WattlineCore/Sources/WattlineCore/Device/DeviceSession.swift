@@ -161,6 +161,7 @@ public actor DeviceSession {
     }
 
     private func acceptInitialOrCurrent(_ scope: DeviceConnectionScope) -> Bool {
+        guard !retiredConnectionScopeIDs.contains(scope.sessionID) else { return false }
         guard activeConnectionScope == nil || activeConnectionScope == scope else { return false }
         activeConnectionScope = scope
         return true

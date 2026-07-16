@@ -1,6 +1,41 @@
 @preconcurrency import CoreBluetooth
 import Foundation
 
+struct ConnectionScopeAliases {
+    enum TerminalPath {
+        case connectionFailure
+        case disconnect
+        case teardown
+        case centralUnavailable
+    }
+
+    private var storage: [BLEConnectionScope: DeviceConnectionScope] = [:]
+
+    subscript(scope: BLEConnectionScope) -> DeviceConnectionScope? {
+        get { storage[scope] }
+        set { storage[scope] = newValue }
+    }
+
+    mutating func register(_ connectionScope: DeviceConnectionScope, for scope: BLEConnectionScope) {
+        storage[scope] = connectionScope
+    }
+
+    func scopeForTerminalEmission(_ scope: BLEConnectionScope) -> DeviceConnectionScope? {
+        storage[scope]
+    }
+
+    @discardableResult
+    mutating func finishTerminalCleanup(
+        _ scope: BLEConnectionScope,
+        path: TerminalPath
+    ) -> DeviceConnectionScope? {
+        switch path {
+        case .connectionFailure, .disconnect, .teardown, .centralUnavailable:
+            storage.removeValue(forKey: scope)
+        }
+    }
+}
+
 public enum BLETransportError: Error, Equatable, Sendable {
     case bluetoothUnavailable(String)
     case peripheralNotFound(UUID)
@@ -179,7 +214,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     private var discoveredModes: [UUID: DeviceMode] = [:]
     private var discoveredLocalNames: [UUID: String] = [:]
     private var callbackState = BLEBridgeCallbackStateMachine()
-    private var connectionScopeAliases: [BLEConnectionScope: DeviceConnectionScope] = [:]
+    private var connectionScopeAliases = ConnectionScopeAliases()
     private var lifecycle = BLESessionLifecycleStateMachine()
     private var session: Session?
     private var teardown: Teardown?
@@ -541,9 +576,12 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         guard lifecycle.canBeginConnection, teardown == nil else { return nil }
         let scope = callbackState.beginConnection(peripheralID: peripheral.identifier)
         guard lifecycle.beginConnection(scope: scope) else { return nil }
-        connectionScopeAliases[scope] = connectionScope ?? DeviceConnectionScope(
-            peripheralID: peripheral.identifier,
-            sessionID: UUID()
+        connectionScopeAliases.register(
+            connectionScope ?? DeviceConnectionScope(
+                peripheralID: peripheral.identifier,
+                sessionID: UUID()
+            ),
+            for: scope
         )
         let proxy = PeripheralDelegateProxy(bridge: self, scope: scope)
         peripheral.delegate = proxy
@@ -870,13 +908,15 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             waiters.forEach { $0.resume(throwing: error) }
             if let scope = session?.scope {
                 failActive(scope: scope, error: error)
-                if let connectionScope = connectionScopeAliases[scope] {
+                if let connectionScope = connectionScopeAliases.scopeForTerminalEmission(scope) {
                     eventSink(.disconnected(connectionScope, TransportFailure(message: String(describing: error))))
                 }
+                connectionScopeAliases.finishTerminalCleanup(scope, path: .centralUnavailable)
             }
             if let teardown {
                 self.teardown = nil
                 _ = lifecycle.terminate(scope: teardown.scope)
+                connectionScopeAliases.finishTerminalCleanup(teardown.scope, path: .centralUnavailable)
             }
         }
     }
@@ -922,10 +962,11 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             self.teardown = nil
             _ = lifecycle.didDisconnect(scope: teardown.scope)
             if !teardown.eventAlreadyEmitted {
-                if let connectionScope = connectionScopeAliases[teardown.scope] {
+                if let connectionScope = connectionScopeAliases.scopeForTerminalEmission(teardown.scope) {
                     eventSink(.disconnected(connectionScope, error.map { TransportFailure(message: String(describing: $0)) }))
                 }
             }
+            connectionScopeAliases.finishTerminalCleanup(teardown.scope, path: .teardown)
             return
         }
         guard let session,
@@ -936,9 +977,10 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         let failure = connectionFailure(for: peripheral, error: error)
         let scope = session.scope
         failActive(scope: session.scope, error: failure)
-        if let connectionScope = connectionScopeAliases[scope] {
+        if let connectionScope = connectionScopeAliases.scopeForTerminalEmission(scope) {
             eventSink(.disconnected(connectionScope, TransportFailure(message: String(describing: failure))))
         }
+        connectionScopeAliases.finishTerminalCleanup(scope, path: .connectionFailure)
     }
 
     func centralManager(
@@ -953,10 +995,11 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             self.teardown = nil
             _ = lifecycle.didDisconnect(scope: teardown.scope)
             if !teardown.eventAlreadyEmitted {
-                if let connectionScope = connectionScopeAliases[teardown.scope] {
+                if let connectionScope = connectionScopeAliases.scopeForTerminalEmission(teardown.scope) {
                     eventSink(.disconnected(connectionScope, error.map { TransportFailure(message: String(describing: $0)) }))
                 }
             }
+            connectionScopeAliases.finishTerminalCleanup(teardown.scope, path: .teardown)
             return
         }
         guard let session,
@@ -986,8 +1029,9 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         )
 
         let transportFailure = error.map { TransportFailure(message: String(describing: $0)) }
-        guard let connectionScope = connectionScopeAliases[scope] else { return }
+        guard let connectionScope = connectionScopeAliases.scopeForTerminalEmission(scope) else { return }
         eventSink(.disconnected(connectionScope, transportFailure))
+        connectionScopeAliases.finishTerminalCleanup(scope, path: .disconnect)
 
         if let pendingConnect, pendingConnect.scope == scope {
             pendingConnect.continuation.resume(

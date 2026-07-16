@@ -28,6 +28,28 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertEqual(state.lastError, "current terminal")
     }
 
+    func testRetiredScopeCannotReactivateOrReplaceIdentityWhenNoScopeIsActive() async {
+        let peripheralID = UUID()
+        let retired = DeviceConnectionScope(peripheralID: peripheralID, sessionID: UUID())
+        let session = DeviceSession(transport: ReplayTransport())
+        let staleIdentity = DeviceIdentitySnapshot(
+            peripheralID: peripheralID,
+            advertisedName: "Stale",
+            mode: .application,
+            capabilities: DeviceCapabilities(features: [])
+        )
+
+        await session.receive(.connected(retired))
+        await session.receive(.disconnected(retired, TransportFailure(message: "ended")))
+        await session.receive(.connected(retired))
+        await session.receive(.handshakeCompleted(staleIdentity, scope: retired))
+
+        let state = await session.state
+        XCTAssertEqual(state.connection, .disconnected)
+        XCTAssertEqual(state.lastError, "ended")
+        XCTAssertNil(state.identity)
+    }
+
     func testStateStreamPublishesPendingConfirmationAndClearsStaleError() async throws {
         let clock = TestDeviceClock()
         let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])

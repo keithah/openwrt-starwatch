@@ -501,6 +501,69 @@ final class AppModelReconnectTests: XCTestCase {
         try await eventually { model.connectionStatus == .disconnected("current B") }
     }
 
+    func testDirectConnectSuccessDoesNotDependOnConnectedEventDeliveryOrdering() async throws {
+        let transport = ControlledConnectionTransport()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport }
+        )
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+
+        await transport.succeedConnect(at: 0, deliverConnectedEvent: false)
+
+        try await eventually { model.connectionStatus == .connected }
+        let reused = try await model.deviceOperationBroker.withConnection(to: id) { $0.peripheralID }
+        XCTAssertEqual(reused, id)
+
+        let scope = await transport.scope(at: 0)
+        await transport.emitConnected(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        await transport.emit(.disconnected(scope, TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+    }
+
+    func testBrokerReconnectSuccessInstallsScopeBeforeResolvingWithoutConnectedEvent() async throws {
+        let transport = ControlledConnectionTransport()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport }
+        )
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        let initialScope = await transport.scope(at: 0)
+        await transport.emit(.disconnected(initialScope, TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+
+        let reconnect = Task {
+            try await model.deviceOperationBroker.withConnection(to: id) { $0.peripheralID }
+        }
+        try await eventually { await transport.connectCount == 2 }
+        await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
+
+        let reconnectedID = try await reconnect.value
+        XCTAssertEqual(reconnectedID, id)
+        XCTAssertEqual(model.connectionStatus, .connected)
+
+        let reconnectScope = await transport.scope(at: 1)
+        await transport.emitConnected(at: 1)
+        try await eventually { model.connectionStatus == .connected }
+        await transport.emit(.disconnected(reconnectScope, TransportFailure(message: "current terminal")))
+        try await eventually { model.connectionStatus == .disconnected("current terminal") }
+    }
+
     func testOldSamePeripheralConnectSuccessCannotResolveCurrentBrokerAttempt() async throws {
         let transport = ControlledConnectionTransport()
         let suiteName = "WattlineTests.\(UUID().uuidString)"
@@ -1198,10 +1261,13 @@ private actor ControlledConnectionTransport: DeviceTransport {
         scopes.append(scope)
         try await withCheckedThrowingContinuation { connectContinuations.append($0) }
     }
-    func succeedConnect(at index: Int) {
+    func succeedConnect(at index: Int, deliverConnectedEvent: Bool = true) {
         connectContinuations[index].resume()
-        continuation.yield(.connected(scopes[index]))
+        if deliverConnectedEvent {
+            continuation.yield(.connected(scopes[index]))
+        }
     }
+    func emitConnected(at index: Int) { continuation.yield(.connected(scopes[index])) }
     func scope(at index: Int) -> DeviceConnectionScope { scopes[index] }
     func disconnect() async {}
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
