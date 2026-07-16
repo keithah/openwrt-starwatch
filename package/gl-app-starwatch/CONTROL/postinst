@@ -1,0 +1,5 @@
+#!/bin/sh
+# Reload nginx so the new /www/views bundle + oui menu entry are served.
+# The oui menu is read per panel load, so a browser refresh shows the app.
+[ -n "$IPKG_INSTROOT" ] || /etc/init.d/nginx reload 2>/dev/null
+exit 0

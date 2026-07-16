@@ -1,0 +1,8 @@
+{
+	"admin/services/starwatch": {
+		"title": "Starwatch",
+		"order": 60,
+		"action": { "type": "view", "path": "starwatch/dashboard" },
+		"depends": { "acl": ["luci-app-starwatch"] }
+	}
+}

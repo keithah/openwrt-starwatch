@@ -1,0 +1,21 @@
+#!/bin/sh
+
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+case "$1" in
+	list)
+		printf '{"token":{}}\n'
+		;;
+	call)
+		[ "$2" = "token" ] || exit 1
+		token="$(uci -q get starwatch.main.token)"
+		port="$(uci -q get starwatch.main.port)"
+		[ -n "$port" ] || port=9633
+		printf '{"token":"%s","port":"%s"}\n' "$(json_escape "$token")" "$(json_escape "$port")"
+		;;
+	*)
+		exit 1
+		;;
+esac

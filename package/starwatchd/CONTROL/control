@@ -1,0 +1,7 @@
+Package: starwatchd
+Version: 1.0.0
+Architecture: aarch64_cortex-a53
+Maintainer: Keith <keith@kodi.tv>
+Section: utils
+Priority: optional
+Description: Starlink dish telemetry, history, alerts, controls, and offline dashboard daemon for OpenWrt.

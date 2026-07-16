@@ -1,0 +1,44 @@
+#!/bin/sh
+# Generate an API token on first install if unset.
+tok="$(uci -q get starwatch.main.token)"
+if [ -z "$tok" ]; then
+	newtok="$(head -c 24 /dev/urandom | md5sum | cut -c1-32)"
+	uci set starwatch.main.token="$newtok"
+	uci commit starwatch
+fi
+
+# Add the dish host route only when neither UCI nor the live kernel table
+# already contains one. Keep this conservative until §13.4 is verified on
+# additional router/WAN combinations.
+uci_route=0
+if uci -q show network | grep -Eq "\.target='192\.168\.100\.1(/32)?'$"; then
+	uci_route=1
+fi
+kernel_route=0
+if ip -4 route show table all 2>/dev/null | awk '
+	function ipv4(value, octets) {
+		split(value, octets, ".")
+		return (((octets[1] * 256) + octets[2]) * 256 + octets[3]) * 256 + octets[4]
+	}
+	$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ {
+		split($1, route, "/")
+		prefix = route[2] == "" ? 32 : route[2]
+		if (prefix > 0) {
+			block = 2 ^ (32 - prefix)
+			if (int(ipv4(route[1]) / block) == int(ipv4("192.168.100.1") / block)) found=1
+		}
+	}
+	END { exit !found }
+'; then
+	kernel_route=1
+fi
+if [ "$uci_route" -eq 0 ] && [ "$kernel_route" -eq 0 ]; then
+	uci -q batch <<'EOF'
+set network.starwatch_dish='route'
+set network.starwatch_dish.interface='wan'
+set network.starwatch_dish.target='192.168.100.1/32'
+EOF
+	uci commit network
+	/etc/init.d/network reload >/dev/null 2>&1 || true
+fi
+exit 0

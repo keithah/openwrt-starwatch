@@ -1,0 +1,10 @@
+{
+    "index": 90,
+    "view": "starwatch",
+    "title": "Starwatch",
+    "level": 2,
+    "parent": "applications",
+    "parent_icon": "application",
+    "parent_index": 55,
+    "show_mode": ["router"]
+}

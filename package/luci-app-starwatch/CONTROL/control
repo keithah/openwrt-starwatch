@@ -1,0 +1,8 @@
+Package: luci-app-starwatch
+Version: 1.0.0
+Architecture: all
+Maintainer: Keith <keith@kodi.tv>
+Section: luci
+Priority: optional
+Depends: luci-base, starwatchd
+Description: LuCI launcher for the Starwatch Starlink monitoring dashboard.

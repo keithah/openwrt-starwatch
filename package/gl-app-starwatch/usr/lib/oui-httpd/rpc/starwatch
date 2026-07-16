@@ -1,0 +1,15 @@
+-- oui-httpd RPC handler for Starwatch. oui-httpd dofile()s this module and
+-- dispatches get_config through the authenticated GL admin-panel session.
+local uci = require "uci"
+
+local M = {}
+
+function M.get_config()
+    local c = uci.cursor()
+    return {
+        token = c:get("starwatch", "main", "token") or "",
+        port  = c:get("starwatch", "main", "port") or "9633"
+    }
+end
+
+return M

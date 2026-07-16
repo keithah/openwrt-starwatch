@@ -1,0 +1,8 @@
+Package: gl-app-starwatch
+Version: 1.0.0
+Architecture: all
+Maintainer: Keith <keith@kodi.tv>
+Section: gl
+Priority: optional
+Depends: starwatchd
+Description: GL.iNet admin-panel launcher for the Starwatch Starlink monitoring dashboard.

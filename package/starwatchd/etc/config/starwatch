@@ -1,0 +1,46 @@
+config starwatch 'main'
+	# Listen on LAN so the embedded dashboard can be opened directly or framed.
+	option listen '0.0.0.0'
+	option port '9633'
+	# Generated on first install when blank.
+	option token ''
+	option dish_addr '192.168.100.1:9200'
+	option poll_status '1'
+	option poll_map '900'
+	# Blank selects automatic Starlink WAN discovery.
+	option wan_iface ''
+	option probe_hosts '1.1.1.1 8.8.8.8'
+	option probe_interval '2'
+	# Location requires local-access opt-in in the official Starlink app.
+	option location_enabled '0'
+
+config history
+	option ram_hours '3'
+	option minute_days '7'
+	option quarter_days '30'
+	option db_path '/etc/starwatch/history.db'
+	option flush_secs '300'
+
+config alerts
+	option webhook_url ''
+	# Example: https://ntfy.sh/mytopic
+	option ntfy_url ''
+	# Catalog defaults. Set an *_enabled option to 0 to disable that alert.
+	option outage_started_enabled '1'
+	option outage_started_secs '30'
+	option dish_unreachable_enabled '1'
+	option dish_unreachable_secs '60'
+	option path_degraded_enabled '1'
+	option path_loss_percent '20'
+	option path_rtt_ms '300'
+	option path_clear_secs '300'
+	option obstruction_high_enabled '1'
+	option obstruction_percent '2'
+	option thermal_throttle_enabled '1'
+	option thermal_shutdown_enabled '1'
+	option motors_stuck_enabled '1'
+	option water_detected_enabled '1'
+	option mast_not_vertical_enabled '1'
+	option slow_ethernet_enabled '1'
+	option firmware_pending_enabled '1'
+	option failover_event_enabled '1'
