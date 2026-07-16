@@ -166,6 +166,7 @@ final class AppModel {
     private let brokerPublicationBarrier: BrokerPublicationBarrier
     private let brokerCompletionBarrier: BrokerCompletionBarrier
     private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
+    private let maintenanceClock: any DeviceClock
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
     private var demoTransport: DemoTransport?
@@ -189,12 +190,15 @@ final class AppModel {
     private var brokerReconnectScope: DeviceConnectionScope?
     private var brokerReconnectTask: Task<Void, Never>?
     private var restartTimeoutTask: Task<Void, Never>?
+    private var restartRecoveryTask: Task<Void, Never>?
     private var connectionOperationKey: ConnectionOperationKey?
     private var activeConnectionScope: DeviceConnectionScope?
     private var retiredConnectionScopeIDs: Set<UUID> = []
 
     @ObservationIgnored
-    private(set) lazy var deviceOperationBroker = DeviceOperationBroker { [weak self] attempt in
+    private(set) lazy var deviceOperationBroker = DeviceOperationBroker(
+        clock: maintenanceClock
+    ) { [weak self] attempt in
         await self?.startBrokerReconnect(attempt)
     }
 
@@ -203,13 +207,15 @@ final class AppModel {
         transportFactory: @escaping TransportFactory = { BLETransport() },
         brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {},
         brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
-        connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {}
+        connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {},
+        maintenanceClock: any DeviceClock = ContinuousDeviceClock()
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
         self.brokerPublicationBarrier = brokerPublicationBarrier
         self.brokerCompletionBarrier = brokerCompletionBarrier
         self.connectedLifecycleBarrier = connectedLifecycleBarrier
+        self.maintenanceClock = maintenanceClock
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
@@ -295,23 +301,54 @@ final class AppModel {
     }
 
     func restartDevice() async {
-        guard selectedPeripheralID != nil else { return }
+        guard let peripheralID = selectedPeripheralID else { return }
+        let generation = transportGeneration
         restartTimeoutTask?.cancel()
+        restartRecoveryTask?.cancel()
         maintenanceState = .restarting
         do {
-            _ = try await deviceOperationBroker.perform(.restart, generation: transportGeneration)
-            restartTimeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(30))
-                guard !Task.isCancelled, let self, self.maintenanceState == .restarting else { return }
-                self.maintenanceState = .restartFailed("Restart timed out. Try again.")
-            }
+            _ = try await deviceOperationBroker.perform(.restart, generation: generation)
         } catch {
-            maintenanceState = .restartFailed(String(describing: error))
+            // A restart may report a write error while the expected disconnect is
+            // already in flight. Recovery is still attempted against that session.
+        }
+        restartRecoveryTask = Task { [weak self] in
+            await self?.recoverRestart(peripheralID: peripheralID, generation: generation)
         }
     }
 
     func retryRestart() async {
         await restartDevice()
+    }
+
+    private func recoverRestart(peripheralID: UUID, generation: UInt) async {
+        let deadline = (await maintenanceClock.now) + .seconds(30)
+        while !Task.isCancelled,
+              transportGeneration == generation,
+              selectedPeripheralID == peripheralID,
+              maintenanceState == .restarting {
+            let now = await maintenanceClock.now
+            guard now < deadline else {
+                maintenanceState = .restartFailed("Restart timed out. Try again.")
+                return
+            }
+            do {
+                _ = try await deviceOperationBroker.withConnection(to: peripheralID, timeout: deadline - now) { _ in () }
+                guard transportGeneration == generation,
+                      selectedPeripheralID == peripheralID,
+                      maintenanceState == .restarting
+                else { return }
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                do { try await maintenanceClock.sleep(for: .seconds(1)) }
+                catch { return }
+            }
+        }
+        guard !Task.isCancelled else { return }
+        guard transportGeneration == generation, selectedPeripheralID == peripheralID else { return }
+        if maintenanceState == .restarting { maintenanceState = .restartFailed("Restart timed out. Try again.") }
     }
 
     func shutdownDevice() async {
@@ -423,6 +460,8 @@ final class AppModel {
     }
 
     func returnToScan() {
+        restartRecoveryTask?.cancel()
+        restartTimeoutTask?.cancel()
         invalidateBrokerContext()
         connectionOperationKey = nil
         retireActiveConnectionScope()
@@ -1019,6 +1058,8 @@ final class AppModel {
         if maintenanceState == .restarting {
             restartTimeoutTask?.cancel()
             restartTimeoutTask = nil
+            restartRecoveryTask?.cancel()
+            restartRecoveryTask = nil
             maintenanceState = .idle
         }
         route = .connected

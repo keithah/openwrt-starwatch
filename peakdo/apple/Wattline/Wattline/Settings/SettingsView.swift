@@ -5,6 +5,7 @@ import WattlineUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var confirmShutdown = false
+    @State private var confirmRestart = false
 
     var body: some View {
         List {
@@ -51,12 +52,11 @@ struct SettingsView: View {
                     }
                 case .restart:
                     actionSection(title: "Device") {
-                        Button {
-                            Task { await model.restartDevice() }
-                        } label: {
+                        Button { confirmRestart = true } label: {
                             Label("Restart", systemImage: "arrow.clockwise")
                         }
                         .disabled(!isConnected || model.maintenanceState != .idle)
+                        maintenanceStatus
                     }
                 case .shutdown:
                     actionSection(title: "Safety") {
@@ -83,10 +83,34 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .confirmationDialog("Restart this device?", isPresented: $confirmRestart) {
+            Button("Restart", role: .destructive) {
+                Task { await model.restartDevice() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private var isConnected: Bool {
         model.connectionStatus == .connected
+    }
+
+    @ViewBuilder
+    private var maintenanceStatus: some View {
+        switch model.maintenanceState {
+        case .idle: EmptyView()
+        case .restarting:
+            Label("Restarting…", systemImage: "arrow.triangle.2.circlepath")
+                .foregroundStyle(.secondary)
+        case .shuttingDown:
+            Label("Shutting down…", systemImage: "power")
+                .foregroundStyle(.secondary)
+        case let .restartFailed(message):
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message).foregroundStyle(.red)
+                Button("Retry") { Task { await model.retryRestart() } }
+            }
+        }
     }
 
     private var isDCPending: Bool {
