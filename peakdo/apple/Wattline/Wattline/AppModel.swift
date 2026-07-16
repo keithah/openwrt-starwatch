@@ -23,6 +23,13 @@ final class AppModel {
         case disconnected(String?)
     }
 
+    enum MaintenanceState: Equatable {
+        case idle
+        case restarting
+        case restartFailed(String)
+        case shuttingDown
+    }
+
     enum BluetoothIssue: Equatable {
         case deniedOrRestricted
         case unavailable(String)
@@ -131,6 +138,9 @@ final class AppModel {
     var bluetoothIssue: BluetoothIssue?
     var otaRecoveryDevice: DiscoveredDevice?
     var connectionStatus: ConnectionStatus = .disconnected(nil)
+    private(set) var maintenanceState: MaintenanceState = .idle
+    private(set) var scanStartsForTesting = 0
+    private(set) var reconnectAttemptsForTesting = 0
     var connectedName: String?
     var scanMessage: String?
     var state = DeviceState()
@@ -178,6 +188,7 @@ final class AppModel {
     private(set) var brokerReconnectAttempt: DeviceOperationBroker.ConnectionAttempt?
     private var brokerReconnectScope: DeviceConnectionScope?
     private var brokerReconnectTask: Task<Void, Never>?
+    private var restartTimeoutTask: Task<Void, Never>?
     private var connectionOperationKey: ConnectionOperationKey?
     private var activeConnectionScope: DeviceConnectionScope?
     private var retiredConnectionScopeIDs: Set<UUID> = []
@@ -270,6 +281,7 @@ final class AppModel {
     }
 
     func startScanning() {
+        scanStartsForTesting += 1
         guard let context = beginOperationForCurrentTransport() else { return }
         bluetoothIssue = nil
         operationTask = Task { [weak self] in
@@ -279,6 +291,42 @@ final class AppModel {
                 guard let self, self.isCurrent(context) else { return }
                 presentBluetoothFailure(error)
             }
+        }
+    }
+
+    func restartDevice() async {
+        guard selectedPeripheralID != nil else { return }
+        restartTimeoutTask?.cancel()
+        maintenanceState = .restarting
+        do {
+            _ = try await deviceOperationBroker.perform(.restart, generation: transportGeneration)
+            restartTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled, let self, self.maintenanceState == .restarting else { return }
+                self.maintenanceState = .restartFailed("Restart timed out. Try again.")
+            }
+        } catch {
+            maintenanceState = .restartFailed(String(describing: error))
+        }
+    }
+
+    func retryRestart() async {
+        await restartDevice()
+    }
+
+    func shutdownDevice() async {
+        guard selectedPeripheralID != nil else { return }
+        maintenanceState = .shuttingDown
+        do {
+            _ = try await deviceOperationBroker.perform(.shutdown, generation: transportGeneration)
+            maintenanceState = .idle
+            returnToScan()
+        } catch {
+            // A failed FM write is an ordinary device-operation error: retain the
+            // connected route and surface the transport error without presenting it
+            // as a restart failure or clearing the selected peripheral.
+            maintenanceState = .idle
+            connectionStatus = .disconnected(String(describing: error))
         }
     }
 
@@ -737,6 +785,7 @@ final class AppModel {
     }
 
     private func requestBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
+        reconnectAttemptsForTesting += 1
         guard transportGeneration == attempt.generation,
               selectedPeripheralID == attempt.peripheralID,
               let transport
@@ -967,6 +1016,11 @@ final class AppModel {
         }
         scanMessage = nil
         connectionStatus = .connected
+        if maintenanceState == .restarting {
+            restartTimeoutTask?.cancel()
+            restartTimeoutTask = nil
+            maintenanceState = .idle
+        }
         route = .connected
     }
 

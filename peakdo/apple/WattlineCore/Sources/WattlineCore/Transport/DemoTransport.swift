@@ -253,6 +253,24 @@ public actor DemoTransport: DeviceTransport {
 
     private func execute(_ command: DeviceCommand) async throws -> CommandOutcome {
 
+        if command.request.target == .factoryMode {
+            await disconnect()
+            return .sent
+        }
+        if command.request.target == .command,
+           command.request.command?.command == .restart {
+            await disconnect()
+            // Demo restart is deterministic and exercises the same reconnect path
+            // without CoreBluetooth. Reconnect on the next actor turn using a new
+            // scoped connection for the same demo peripheral.
+            Task { [weak self] in
+                guard let self else { return }
+                let scope = await self.makeConnectionScope(for: Self.deviceID)
+                try? await self.connect(to: Self.deviceID, scope: scope)
+            }
+            return .sent
+        }
+
         guard command.request.target == .command, let request = command.request.command else {
             throw DemoTransportError.unsupportedCommand
         }

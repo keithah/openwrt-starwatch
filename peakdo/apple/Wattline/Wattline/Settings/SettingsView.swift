@@ -4,6 +4,7 @@ import WattlineUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @State private var confirmShutdown = false
 
     var body: some View {
         List {
@@ -50,12 +51,19 @@ struct SettingsView: View {
                     }
                 case .restart:
                     actionSection(title: "Device") {
-                        Label("Restart", systemImage: "arrow.clockwise")
+                        Button {
+                            Task { await model.restartDevice() }
+                        } label: {
+                            Label("Restart", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(!isConnected || model.maintenanceState != .idle)
                     }
                 case .shutdown:
                     actionSection(title: "Safety") {
-                        Label("Shut Down", systemImage: "power")
-                            .foregroundStyle(.red)
+                        Button(role: .destructive) { confirmShutdown = true } label: {
+                            Label("Shut Down", systemImage: "power")
+                        }
+                        .disabled(!isConnected || model.maintenanceState != .idle)
                     }
                 }
             }
@@ -69,6 +77,12 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .confirmationDialog("Shut down this device?", isPresented: $confirmShutdown) {
+            Button("Shut Down", role: .destructive) {
+                Task { await model.shutdownDevice() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private var isConnected: Bool {
