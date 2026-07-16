@@ -1,0 +1,24 @@
+# Task 14 report — Widget and Activity target configuration
+
+## Changes
+
+- Added the multi-platform `WattlineWidgets` app-extension target to the Xcode project.
+- Linked the `WattlineCore` and `WattlineUI` package products.
+- Configured iOS 17 and macOS 14 deployment floors and conditional widget bundle IDs:
+  `com.keithah.wattline.widgets` on iOS and `com.keithah.wattline.mac.widgets` on macOS.
+- Added the widget app-group entitlement (`group.com.keithah.wattline`) and extension Info.plist.
+- Embedded the extension in the iOS Wattline app through the existing Embed Foundation Extensions phase.
+- Added `NSSupportsLiveActivities = true` to the iOS app Info.plist.
+- Added project configuration regression tests covering target type, package products, bundle IDs,
+  deployment floors, entitlement, embedding, and Live Activity plist configuration.
+
+## Verification
+
+- Duplicate pbxproj object-ID audit: passed (no duplicate 24-character object IDs).
+- `git diff --check`: passed.
+- `xcodebuild -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineWidgets -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO`: **BUILD SUCCEEDED**.
+- `xcodebuild -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineWidgets -sdk macosx -destination 'generic/platform=macOS' build CODE_SIGNING_ALLOWED=NO`: **BUILD SUCCEEDED**.
+- `xcodebuild -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineTests -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build-for-testing CODE_SIGNING_ALLOWED=NO`: **TEST BUILD SUCCEEDED**.
+- Runtime `test-without-building` was not run because Xcode requires a concrete simulator device; the generic destination is intentionally build-only.
+
+No Tasks 15–18 or macOS app work was included.

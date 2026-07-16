@@ -20,6 +20,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Wattline uses Bluetooth to find and connect to your power device.</string>
 	<key>UIApplicationSceneManifest</key>
