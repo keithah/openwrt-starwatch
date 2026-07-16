@@ -31,3 +31,7 @@ Added controllable-clock lifecycle coverage for ordinary restart write failure (
 ## Lifecycle fixture stabilization
 
 Replaced scheduler-yield synchronization with explicit transport reconnect-waiter readiness barriers, preserving deterministic simulated 15s success and 30s timeout behavior. Demo shutdown assertions now require the persistent DEMO presentation and disconnected scan route. Shutdown lifecycle coverage records and verifies FM bytes (`46 4D`) and the disarm-reconnect policy.
+
+## Cancellation-safe maintenance clock
+
+TestDeviceClock sleepers now use cancellation handlers and UUID registration, removing canceled continuations deterministically. Added regression coverage that cancels a registered maintenance sleep and verifies the sleeper registry returns to zero.

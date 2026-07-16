@@ -5,6 +5,14 @@ import WattlineCore
 
 @MainActor
 final class SettingsLifecycleTests: XCTestCase {
+    func testCanceledMaintenanceClockSleepRemovesRegisteredSleeper() async throws {
+        let clock = TestDeviceClock()
+        let task = Task { try await clock.sleep(for: .seconds(100)) }
+        try await waitUntil { await clock.sleeperCount == 1 }
+        task.cancel()
+        _ = try? await task.value
+        try await waitUntil { await clock.sleeperCount == 0 }
+    }
     func testRestartWriteFailureWhileStillConnectedShowsRetryWithoutRecovery() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(reconnectAfterRestart: false, restartFails: true)
@@ -275,24 +283,44 @@ private actor LifecycleTransport: DeviceTransport {
 }
 
 private actor TestDeviceClock: DeviceClock {
+    private struct Sleeper {
+        let id: UUID
+        let deadline: Duration
+        let continuation: CheckedContinuation<Void, Error>
+    }
     private var elapsed: Duration = .zero
-    private var sleepers: [(Duration, CheckedContinuation<Void, Error>)] = []
+    private var sleepers: [Sleeper] = []
+    var sleeperCount: Int { sleepers.count }
 
     var now: DeviceTimestamp { elapsed }
 
     func sleep(for duration: Duration) async throws {
         let deadline = elapsed + duration
         if elapsed >= deadline { return }
-        try await withCheckedThrowingContinuation { continuation in
-            sleepers.append((deadline, continuation))
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelSleeper(id) }
         }
+    }
+
+    private func cancelSleeper(_ id: UUID) {
+        guard let index = sleepers.firstIndex(where: { $0.id == id }) else { return }
+        sleepers.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 
     func advance(by duration: Duration) {
         elapsed += duration
-        let ready = sleepers.partition { $0.0 <= elapsed }
+        let ready = sleepers.partition { $0.deadline <= elapsed }
         sleepers = Array(ready.partitioned)
-        for (_, continuation) in ready.ready { continuation.resume() }
+        for sleeper in ready.ready { sleeper.continuation.resume() }
     }
 }
 
