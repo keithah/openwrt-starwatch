@@ -8,6 +8,7 @@ import WattlineCore
 final class AppModel {
     typealias TransportFactory = @MainActor () -> any DeviceTransport
     typealias BrokerPublicationBarrier = @Sendable () async -> Void
+    typealias ConnectedLifecycleBarrier = @Sendable () async -> Void
 
     enum Route: Equatable {
         case onboarding
@@ -145,6 +146,7 @@ final class AppModel {
     private let persistence: AppPersistence
     private let transportFactory: TransportFactory
     private let brokerPublicationBarrier: BrokerPublicationBarrier
+    private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
     private var demoTransport: DemoTransport?
@@ -164,7 +166,7 @@ final class AppModel {
     private var brokerContextPeripheralID: UUID?
     private var brokerContextLifecycle: DeviceOperationBroker.ContextLifecycle?
     private var brokerPublicationTask: Task<Void, Never>?
-    private var brokerReconnectAttempt: DeviceOperationBroker.ConnectionAttempt?
+    private(set) var brokerReconnectAttempt: DeviceOperationBroker.ConnectionAttempt?
     private var brokerReconnectScope: DeviceConnectionScope?
     private var brokerReconnectTask: Task<Void, Never>?
     private var connectionOperationKey: ConnectionOperationKey?
@@ -179,11 +181,13 @@ final class AppModel {
     init(
         persistence: AppPersistence = AppPersistence(),
         transportFactory: @escaping TransportFactory = { BLETransport() },
-        brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {}
+        brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {},
+        connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {}
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
         self.brokerPublicationBarrier = brokerPublicationBarrier
+        self.connectedLifecycleBarrier = connectedLifecycleBarrier
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
@@ -727,20 +731,14 @@ final class AppModel {
                   !Task.isCancelled
             else { return }
             activeConnectionScope = scope
-            establishConnectedPresentation(scope: scope)
-            if let session {
-                await session.receive(.connected(scope))
-            }
-            guard transportGeneration == attempt.generation,
-                  selectedPeripheralID == attempt.peripheralID,
-                  brokerReconnectAttempt == attempt,
-                  brokerReconnectScope == scope,
-                  activeConnectionScope == scope,
-                  !Task.isCancelled
-            else { return }
-            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
             brokerReconnectAttempt = nil
             brokerReconnectScope = nil
+            establishConnectedPresentation(scope: scope)
+            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
+            if let session {
+                await connectedLifecycleBarrier()
+                await session.receive(.connected(scope))
+            }
         } catch {
             guard transportGeneration == attempt.generation,
                   brokerReconnectAttempt == attempt
