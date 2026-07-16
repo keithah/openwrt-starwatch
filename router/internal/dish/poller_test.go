@@ -262,6 +262,45 @@ func TestHistoryReconciliationSuppliesPowerFallback(t *testing.T) {
 	}
 }
 
+func TestMetadataRefreshUpdatesHistoryPowerSource(t *testing.T) {
+	var historyCalls atomic.Int32
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		response, err := cannedResponse(request)
+		if statusResponse := response.GetDishGetStatus(); statusResponse != nil {
+			statusResponse.UpsuStats = nil
+		}
+		if historyResponse := response.GetDishGetHistory(); historyResponse != nil {
+			call := historyCalls.Add(1)
+			historyResponse.Current = 1
+			historyResponse.PowerIn = []float32{40 + float32(call)}
+		}
+		return response, err
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.options.MetadataInterval = 10 * time.Millisecond
+	poller.options.HistoryInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go poller.Run(ctx)
+
+	waitFor(t, func() bool { return historyCalls.Load() >= 2 })
+	snapshot := poller.Snapshot()
+	if snapshot.Dish == nil || snapshot.Dish.PowerW == nil || *snapshot.Dish.PowerW < 42 || snapshot.Dish.PowerSource != "history" {
+		t.Fatalf("metadata power fallback: %+v", snapshot.Dish)
+	}
+}
+
+func TestStatusPowerIsLabeledAsStatusSource(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		return cannedResponse(request)
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.pollStatus(context.Background())
+	if got := poller.Snapshot().Dish; got == nil || got.PowerSource != "status" {
+		t.Fatalf("status power source: %+v", got)
+	}
+}
+
 func TestSaneClockTriggersDeferredBackfill(t *testing.T) {
 	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {

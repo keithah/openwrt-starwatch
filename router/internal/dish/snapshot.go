@@ -48,6 +48,7 @@ type Status struct {
 	DownlinkThroughputBPS float32         `json:"downlink_throughput_bps"`
 	UplinkThroughputBPS   float32         `json:"uplink_throughput_bps"`
 	PowerW                *float32        `json:"power_w,omitempty"`
+	PowerSource           string          `json:"power_source,omitempty"`
 	Obstruction           *Obstruction    `json:"obstruction,omitempty"`
 	Alignment             *Alignment      `json:"alignment,omitempty"`
 	Outage                *Outage         `json:"outage,omitempty"`

@@ -10,6 +10,9 @@ import (
 type systemDiscoverer struct{}
 
 func (systemDiscoverer) Discover(dishAddr, override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
 	name, err := DiscoverInterface(DiscoveryOptions{
 		DishAddr:  dishAddr,
 		RoutePath: "/proc/net/route", SysfsRoot: "/sys/class/net",
@@ -32,7 +35,7 @@ func (systemDiscoverer) Discover(dishAddr, override string) (string, error) {
 			}
 		}
 	}
-	return override, nil
+	return "", nil
 }
 
 func newSystemDiscoverer() Discoverer { return systemDiscoverer{} }

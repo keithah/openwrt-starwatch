@@ -19,15 +19,16 @@ type Prober interface {
 }
 
 type Options struct {
-	DishAddr        string
-	Override        string
-	Hosts           []string
-	ProbeInterval   time.Duration
-	CounterInterval time.Duration
-	SysfsRoot       string
-	Now             func() time.Time
-	Discoverer      Discoverer
-	Prober          Prober
+	DishAddr          string
+	Override          string
+	Hosts             []string
+	ProbeInterval     time.Duration
+	CounterInterval   time.Duration
+	DiscoveryInterval time.Duration
+	SysfsRoot         string
+	Now               func() time.Time
+	Discoverer        Discoverer
+	Prober            Prober
 }
 
 type probeSample struct {
@@ -55,6 +56,9 @@ func NewMonitor(options Options, writer history.Writer) *Monitor {
 	if options.CounterInterval <= 0 {
 		options.CounterInterval = time.Second
 	}
+	if options.DiscoveryInterval <= 0 {
+		options.DiscoveryInterval = time.Minute
+	}
 	if options.SysfsRoot == "" {
 		options.SysfsRoot = "/sys/class/net"
 	}
@@ -74,7 +78,11 @@ func (m *Monitor) Run(ctx context.Context) {
 	m.discover()
 	m.sampleCounters()
 	var workers sync.WaitGroup
-	workers.Add(2)
+	workers.Add(3)
+	go func() {
+		defer workers.Done()
+		m.runDiscoveryLoop(ctx)
+	}()
 	go func() {
 		defer workers.Done()
 		m.runProbeLoop(ctx)
@@ -85,6 +93,19 @@ func (m *Monitor) Run(ctx context.Context) {
 	}()
 	<-ctx.Done()
 	workers.Wait()
+}
+
+func (m *Monitor) runDiscoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(m.options.DiscoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.discover()
+		}
+	}
 }
 
 func (m *Monitor) runProbeLoop(ctx context.Context) {

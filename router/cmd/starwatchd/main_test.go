@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"starwatch/internal/config"
+	"starwatch/internal/history"
 )
 
 func TestBindAddr(t *testing.T) {
@@ -45,6 +46,21 @@ func TestWarnEmptyToken(t *testing.T) {
 	if output.Len() != 0 {
 		t.Fatalf("unexpected warning: %q", output.String())
 	}
+}
+
+func TestSQLiteOptionsMapConfiguredRetention(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC) }
+	cfg := &config.Config{History: config.HistoryConfig{MinuteDays: 11, QuarterDays: 47}}
+
+	options := sqliteOptions(cfg, now)
+
+	if options.MinuteRetention != 11*24*time.Hour || options.QuarterRetention != 47*24*time.Hour {
+		t.Fatalf("sqlite options: %+v", options)
+	}
+	if options.Now == nil || !options.Now().Equal(now()) {
+		t.Fatal("sqlite options did not retain the daemon clock")
+	}
+	var _ history.SQLiteOptions = options
 }
 
 func TestRunConfigServesAndStopsOnCancellation(t *testing.T) {

@@ -1,7 +1,9 @@
 package history
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -186,6 +188,46 @@ func TestTieredReaderSelectsTierBySpan(t *testing.T) {
 		if result.Tier != test.tier {
 			t.Fatalf("span %v tier=%q want %q", test.span, result.Tier, test.tier)
 		}
+	}
+}
+
+func TestTieredReaderFallsBackToRAMWhenPersistentTierIsEmpty(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	ram := NewStore(10)
+	if err := ram.Append(LatencyMS, Point{Time: now.Add(-time.Hour), Value: 42}); err != nil {
+		t.Fatal(err)
+	}
+	persistent, _ := openTestSQLite(t, now)
+	reader := NewTieredReader(ram, persistent, 3*time.Hour)
+
+	result, err := reader.QuerySpan(LatencyMS, now.Add(-24*time.Hour), 24*time.Hour, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Tier != TierRAM || len(result.Points) != 1 || result.Points[0].Value != 42 {
+		t.Fatalf("fallback result: %#v", result)
+	}
+}
+
+func TestTieredReaderLogsPersistentErrorOnceAndFallsBack(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	ram := NewStore(10)
+	_ = ram.Append(LatencyMS, Point{Time: now, Value: 7})
+	persistent, _ := openTestSQLite(t, now)
+	if err := persistent.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	reader := NewTieredReaderWithLogger(ram, persistent, 3*time.Hour, log.New(&output, "", 0).Printf)
+
+	for range 2 {
+		result, err := reader.QuerySpan(LatencyMS, now.Add(-24*time.Hour), 24*time.Hour, 1000)
+		if err != nil || result.Tier != TierRAM || len(result.Points) != 1 {
+			t.Fatalf("fallback result=%#v err=%v", result, err)
+		}
+	}
+	if got := bytes.Count(output.Bytes(), []byte("persistent history query")); got != 1 {
+		t.Fatalf("log count=%d output=%q", got, output.String())
 	}
 }
 

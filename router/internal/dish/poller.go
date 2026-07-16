@@ -99,6 +99,9 @@ func (p *Poller) Run(ctx context.Context) {
 			if p.topology() == TopologyFull {
 				p.discover(ctx)
 				p.pollConfig(ctx)
+				if !p.usesStatusPower() {
+					p.refreshHistoryPower(ctx)
+				}
 			}
 		case <-historyTicker.C:
 			if p.topology() == TopologyFull {
@@ -195,6 +198,7 @@ func (p *Poller) pollStatus(parent context.Context) {
 		p.succeeded(FieldPower)
 		value := power.GetDishPower()
 		dishStatus.PowerW = &value
+		dishStatus.PowerSource = "status"
 		p.mu.Lock()
 		p.statusPower = true
 		p.mu.Unlock()
@@ -205,6 +209,7 @@ func (p *Poller) pollStatus(parent context.Context) {
 		if fallback := p.powerFallback(); fallback != nil {
 			p.succeeded(FieldPower)
 			dishStatus.PowerW = fallback
+			dishStatus.PowerSource = "history"
 		} else {
 			p.failed(FieldPower)
 		}
@@ -283,6 +288,20 @@ func (p *Poller) backfill(parent context.Context) {
 	}
 }
 
+func (p *Poller) refreshHistoryPower(parent context.Context) {
+	ctx, cancel := p.callContext(parent)
+	defer cancel()
+	response, err := p.api.GetHistory(ctx)
+	if err != nil || response == nil {
+		p.failed(FieldHistory)
+		return
+	}
+	p.succeeded(FieldHistory)
+	if power, ok := newestHistoryValue(response.GetPowerIn(), response.GetCurrent()); ok {
+		p.setPowerFallback(power)
+	}
+}
+
 func maxLength(response *device.DishGetHistoryResponse) int {
 	result := 0
 	for _, length := range []int{
@@ -347,7 +366,14 @@ func (p *Poller) setPowerFallback(value float32) {
 	}
 	dishStatus := *p.snapshot.Dish
 	dishStatus.PowerW = &value
+	dishStatus.PowerSource = "history"
 	p.snapshot.Dish = &dishStatus
+}
+
+func (p *Poller) usesStatusPower() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.statusPower
 }
 
 func newestHistoryValue(values []float32, current uint64) (float32, bool) {

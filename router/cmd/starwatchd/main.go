@@ -68,7 +68,8 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		close(pollerDone)
 	}()
 	reader := history.SpanReader(store)
-	persistent, recovered, sqliteErr := history.OpenSQLite(cfg.History.DBPath, history.SQLiteOptions{Now: deps.now})
+	persistent, recovered, sqliteErr := history.OpenSQLite(cfg.History.DBPath, sqliteOptions(cfg, deps.now))
+	var flushDone chan struct{}
 	if sqliteErr != nil {
 		log.Printf("starwatchd: sqlite unavailable; continuing with RAM history: %v", sqliteErr)
 	} else {
@@ -78,7 +79,11 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 			log.Printf("starwatchd: corrupt sqlite database moved aside and recreated")
 			persistent.AddEvent(history.Event{At: deps.now(), Kind: "sqlite_recreated"})
 		}
-		go flushHistory(runCtx, persistent, store, cfg.History.FlushInterval, deps.now)
+		flushDone = make(chan struct{})
+		go func() {
+			flushHistory(runCtx, persistent, store, cfg.History.FlushInterval, deps.now)
+			close(flushDone)
+		}()
 		defer func() {
 			persistent.AddEvent(history.Event{At: deps.now(), Kind: "daemon_stopped"})
 			if err := persistent.Flush(context.Background(), store, deps.now()); err != nil {
@@ -102,6 +107,9 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		cancel()
 		<-pollerDone
 		<-wanDone
+		if flushDone != nil {
+			<-flushDone
+		}
 	}()
 
 	warnEmptyToken(cfg.Token, log.Printf)
@@ -137,6 +145,14 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 			return fmt.Errorf("api shutdown: %w", err)
 		}
 		return nil
+	}
+}
+
+func sqliteOptions(cfg *config.Config, now func() time.Time) history.SQLiteOptions {
+	return history.SQLiteOptions{
+		MinuteRetention:  time.Duration(cfg.History.MinuteDays) * 24 * time.Hour,
+		QuarterRetention: time.Duration(cfg.History.QuarterDays) * 24 * time.Hour,
+		Now:              now,
 	}
 }
 

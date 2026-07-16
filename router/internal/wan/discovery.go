@@ -22,6 +22,9 @@ type Discoverer interface {
 }
 
 func DiscoverInterface(options DiscoveryOptions) (string, error) {
+	if options.Override != "" {
+		return options.Override, nil
+	}
 	host, _, err := net.SplitHostPort(options.DishAddr)
 	if err != nil {
 		host = options.DishAddr
@@ -34,7 +37,7 @@ func DiscoverInterface(options DiscoveryOptions) (string, error) {
 	if _, err := os.Stat(filepath.Join(options.SysfsRoot, "wan")); err == nil {
 		return "wan", nil
 	}
-	return options.Override, nil
+	return "", nil
 }
 
 func routeInterface(path string, address uint32) string {

@@ -11,7 +11,7 @@ import (
 	"starwatch/internal/history"
 )
 
-func TestDiscoverInterfaceUsesRouteThenWANThenOverride(t *testing.T) {
+func TestDiscoverInterfaceUsesExplicitOverrideBeforeAutodetection(t *testing.T) {
 	dir := t.TempDir()
 	routePath := filepath.Join(dir, "route")
 	sysfs := filepath.Join(dir, "net")
@@ -24,9 +24,10 @@ func TestDiscoverInterfaceUsesRouteThenWANThenOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := DiscoveryOptions{DishAddr: "192.168.100.1:9200", Override: "wan2", RoutePath: routePath, SysfsRoot: sysfs}
-	if got, err := DiscoverInterface(options); err != nil || got != "starlink0" {
-		t.Fatalf("route interface=%q err=%v", got, err)
+	if got, err := DiscoverInterface(options); err != nil || got != "wan2" {
+		t.Fatalf("override interface=%q err=%v", got, err)
 	}
+	options.Override = ""
 	if err := os.WriteFile(routePath, []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -36,14 +37,25 @@ func TestDiscoverInterfaceUsesRouteThenWANThenOverride(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(sysfs, "wan")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := DiscoverInterface(options); err != nil || got != "wan2" {
-		t.Fatalf("override interface=%q err=%v", got, err)
+	if got, err := DiscoverInterface(options); err != nil || got != "" {
+		t.Fatalf("empty fallback interface=%q err=%v", got, err)
 	}
 }
 
 type fakeDiscoverer struct{ name string }
 
 func (f fakeDiscoverer) Discover(string, string) (string, error) { return f.name, nil }
+
+type changingDiscoverer struct {
+	names []string
+	calls int
+}
+
+func (f *changingDiscoverer) Discover(string, string) (string, error) {
+	name := f.names[min(f.calls, len(f.names)-1)]
+	f.calls++
+	return name, nil
+}
 
 type probeResult struct {
 	rtt time.Duration
@@ -112,5 +124,25 @@ func TestMonitorTracksProbeWindowsAndRouterRates(t *testing.T) {
 		if err != nil || len(points) == 0 {
 			t.Fatalf("series %s points=%#v err=%v", series, points, err)
 		}
+	}
+}
+
+func TestMonitorPeriodicallyRediscoversInterface(t *testing.T) {
+	discoverer := &changingDiscoverer{names: []string{"wan0", "wan1"}}
+	monitor := NewMonitor(Options{
+		Hosts: nil, Discoverer: discoverer, DiscoveryInterval: 10 * time.Millisecond,
+		ProbeInterval: time.Hour, CounterInterval: time.Hour,
+	}, history.NewStore(10))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { monitor.Run(ctx); close(done) }()
+	deadline := time.Now().Add(time.Second)
+	for monitor.Snapshot().Interface != "wan1" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if got := monitor.Snapshot().Interface; got != "wan1" {
+		t.Fatalf("interface after rediscovery: %q", got)
 	}
 }
