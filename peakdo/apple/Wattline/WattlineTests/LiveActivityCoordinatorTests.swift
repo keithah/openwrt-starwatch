@@ -64,6 +64,16 @@ final class LiveActivityCoordinatorTests: XCTestCase {
         XCTAssertEqual(state?.aggregateOutputWatts, 30)
     }
 
+    func testAggregateOutputTreatsLengthTolerantDischargingTypeCAsOutput() async throws {
+        let adapter = RecordingActivityAdapter()
+        let coordinator = LiveActivityCoordinator(adapter: adapter)
+        let s = snapshot(status: .discharging, observedAt: 42,
+                         typeC: .init(enabled: true, status: .discharging, voltage: 9, current: 2, power: 18, mode: nil))
+        await coordinator.consume(s, now: Date(timeIntervalSince1970: 42), preferences: .init())
+        let state = await adapter.events[0].1
+        XCTAssertEqual(state?.aggregateOutputWatts, 18)
+    }
+
     func testDisconnectedObservedAtStaysAtFirstDisconnectThroughHold() async throws {
         let adapter = RecordingActivityAdapter()
         let coordinator = LiveActivityCoordinator(adapter: adapter)

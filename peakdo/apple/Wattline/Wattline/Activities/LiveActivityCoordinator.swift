@@ -38,7 +38,8 @@ final class LiveActivityCoordinator {
         let b = snapshot.battery
         let dcOutput = snapshot.dc.flatMap { $0.isDCInput == true ? nil : $0.power } ?? 0
         let typeCOutput = snapshot.typeC.flatMap { port in
-            guard port.isDCInput != true, port.mode == .output || port.mode == .inputAndOutput else { return nil }
+            guard port.isDCInput != true,
+                  port.mode == .output || port.mode == .inputAndOutput || (port.mode == nil && port.status == .discharging) else { return nil }
             return port.power
         } ?? 0
         let watts = dcOutput + typeCOutput

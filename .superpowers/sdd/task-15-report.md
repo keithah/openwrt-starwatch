@@ -26,6 +26,7 @@ No macOS app or Tasks 16–18 work was started.
 - Added explicit authorization-denied adapter isolation coverage and idle five-minute end coverage.
 - Disconnected activity updates preserve the first disconnected telemetry timestamp through the hold/end window.
 - Aggregate output excludes DC input telemetry and Type-C input-only telemetry; Type-C output is counted only for output-capable modes.
+- Length-tolerant Type-C telemetry with a missing mode is counted when its discharging status proves output direction.
 
 Verification after corrections:
 
