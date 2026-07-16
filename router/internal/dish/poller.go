@@ -2,6 +2,7 @@ package dish
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ type PollerOptions struct {
 	StatusInterval   time.Duration
 	MetadataInterval time.Duration
 	HistoryInterval  time.Duration
+	MapInterval      time.Duration
 	RetryInterval    time.Duration
 	RPCTimeout       time.Duration
 	Now              func() time.Time
@@ -45,6 +47,9 @@ func NewPoller(api API, writer history.Writer, options PollerOptions) *Poller {
 	if options.HistoryInterval <= 0 {
 		options.HistoryInterval = time.Hour
 	}
+	if options.MapInterval <= 0 {
+		options.MapInterval = 15 * time.Minute
+	}
 	if options.RetryInterval <= 0 {
 		options.RetryInterval = time.Minute
 	}
@@ -70,6 +75,11 @@ func (p *Poller) Snapshot() Snapshot {
 		result.FieldAvailability[field] = available
 	}
 	result.HistoryOutages = append([]HistoryOutage(nil), p.snapshot.HistoryOutages...)
+	if p.snapshot.ObstructionMap != nil {
+		obstructionMap := *p.snapshot.ObstructionMap
+		obstructionMap.SNR = append([]float32(nil), p.snapshot.ObstructionMap.SNR...)
+		result.ObstructionMap = &obstructionMap
+	}
 	if p.snapshot.DishFailureSince != nil {
 		failureSince := *p.snapshot.DishFailureSince
 		result.DishFailureSince = &failureSince
@@ -82,14 +92,17 @@ func (p *Poller) Run(ctx context.Context) {
 		p.backfill(ctx)
 		p.pollStatus(ctx)
 		p.pollConfig(ctx)
+		_, _ = p.RefreshObstructionMap(ctx)
 	}
 	statusTicker := time.NewTicker(p.options.StatusInterval)
 	metadataTicker := time.NewTicker(p.options.MetadataInterval)
 	historyTicker := time.NewTicker(p.options.HistoryInterval)
+	mapTicker := time.NewTicker(p.options.MapInterval)
 	retryTicker := time.NewTicker(p.options.RetryInterval)
 	defer statusTicker.Stop()
 	defer metadataTicker.Stop()
 	defer historyTicker.Stop()
+	defer mapTicker.Stop()
 	defer retryTicker.Stop()
 
 	for {
@@ -112,11 +125,16 @@ func (p *Poller) Run(ctx context.Context) {
 			if p.topology() == TopologyFull {
 				p.backfill(ctx)
 			}
+		case <-mapTicker.C:
+			if p.topology() == TopologyFull {
+				_, _ = p.RefreshObstructionMap(ctx)
+			}
 		case <-retryTicker.C:
 			if p.topology() == TopologyWANOnly && p.discover(ctx) {
 				p.backfill(ctx)
 				p.pollStatus(ctx)
 				p.pollConfig(ctx)
+				_, _ = p.RefreshObstructionMap(ctx)
 			}
 		}
 	}
@@ -244,21 +262,58 @@ func (p *Poller) pollStatus(parent context.Context) {
 }
 
 func (p *Poller) pollConfig(parent context.Context) {
+	_, _ = p.RefreshConfig(parent)
+}
+
+func (p *Poller) RefreshConfig(parent context.Context) (*ConfigReadback, error) {
 	ctx, cancel := p.callContext(parent)
 	defer cancel()
 	config, err := p.api.DishGetConfig(ctx)
 	if err != nil || config == nil {
 		p.failed(FieldConfig)
-		return
+		if err == nil {
+			err = fmt.Errorf("dish_get_config: dish response missing")
+		}
+		return nil, err
 	}
 	p.succeeded(FieldConfig)
 	p.mu.Lock()
-	p.snapshot.Config = &ConfigReadback{
+	readback := &ConfigReadback{
 		SnowMeltMode: config.GetSnowMeltMode().String(), PowerSaveMode: config.GetPowerSaveMode(),
 		PowerSaveStartMinutes: config.GetPowerSaveStartMinutes(), PowerSaveDurationMinutes: config.GetPowerSaveDurationMinutes(),
 		LevelDishMode: config.GetLevelDishMode().String(), LocationRequestMode: config.GetLocationRequestMode().String(),
 		SoftwareUpdateRebootHour: config.GetSwupdateRebootHour(), ThreeDayDeferralEnabled: config.GetSwupdateThreeDayDeferralEnabled(),
 	}
+	p.snapshot.Config = readback
+	p.mu.Unlock()
+	return readback, nil
+}
+
+func (p *Poller) RefreshObstructionMap(parent context.Context) (*ObstructionMap, error) {
+	ctx, cancel := p.callContext(parent)
+	defer cancel()
+	response, err := p.api.DishGetObstructionMap(ctx)
+	if err != nil || response == nil {
+		p.failed(FieldObstructionMap)
+		return nil, err
+	}
+	result := &ObstructionMap{
+		Rows: response.GetNumRows(), Cols: response.GetNumCols(), SNR: append([]float32(nil), response.GetSnr()...),
+		MinElevationDeg: response.GetMinElevationDeg(), ReferenceFrame: response.GetMapReferenceFrame().String(),
+		FetchedAt: p.options.Now(),
+	}
+	p.succeeded(FieldObstructionMap)
+	p.mu.Lock()
+	p.snapshot.ObstructionMap = result
+	p.mu.Unlock()
+	copyResult := *result
+	copyResult.SNR = append([]float32(nil), result.SNR...)
+	return &copyResult, nil
+}
+
+func (p *Poller) InvalidateObstructionMap() {
+	p.mu.Lock()
+	p.snapshot.ObstructionMap = nil
 	p.mu.Unlock()
 }
 

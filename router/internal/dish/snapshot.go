@@ -10,13 +10,14 @@ const (
 )
 
 const (
-	FieldStatus      = "status"
-	FieldObstruction = "obstruction_stats"
-	FieldAlignment   = "alignment_stats"
-	FieldPower       = "power_w"
-	FieldDeviceInfo  = "device_info"
-	FieldConfig      = "dish_config"
-	FieldHistory     = "history"
+	FieldStatus         = "status"
+	FieldObstruction    = "obstruction_stats"
+	FieldAlignment      = "alignment_stats"
+	FieldPower          = "power_w"
+	FieldDeviceInfo     = "device_info"
+	FieldConfig         = "dish_config"
+	FieldHistory        = "history"
+	FieldObstructionMap = "obstruction_map"
 )
 
 type Snapshot struct {
@@ -27,8 +28,18 @@ type Snapshot struct {
 	DishReachable     bool            `json:"dish_reachable"`
 	DishFailureSince  *time.Time      `json:"dish_failure_since,omitempty"`
 	HistoryOutages    []HistoryOutage `json:"-"`
+	ObstructionMap    *ObstructionMap `json:"-"`
 	FieldAvailability map[string]bool `json:"field_availability"`
 	WAN               WANStatus       `json:"wan"`
+}
+
+type ObstructionMap struct {
+	Rows            uint32    `json:"rows"`
+	Cols            uint32    `json:"cols"`
+	MinElevationDeg float32   `json:"min_elevation_deg"`
+	ReferenceFrame  string    `json:"reference_frame"`
+	FetchedAt       time.Time `json:"fetched_at"`
+	SNR             []float32 `json:"snr"`
 }
 
 type HistoryOutage struct {

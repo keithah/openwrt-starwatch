@@ -206,6 +206,9 @@ func (e *Engine) evaluate(name string, rule Rule, inputs Inputs, now time.Time) 
 	switch name {
 	case "outage_started", "dish_unreachable":
 		for _, entry := range inputs.Outages {
+			if entry.Cause == "expected_reboot" {
+				continue
+			}
 			if !entry.Ongoing || (name == "dish_unreachable" && entry.Source != outage.SourceUnreachable) {
 				continue
 			}

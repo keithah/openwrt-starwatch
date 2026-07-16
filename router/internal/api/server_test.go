@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -39,6 +40,36 @@ type eventStub struct{ events []history.Event }
 
 func (s eventStub) QueryEvents(time.Time, int) ([]history.Event, error) { return s.events, nil }
 
+type controlStub struct {
+	params dish.ControlParams
+	err    error
+}
+
+func (s *controlStub) Execute(_ context.Context, params dish.ControlParams) (dish.ControlResult, error) {
+	s.params = params
+	return dish.ControlResult{Accepted: s.err == nil}, s.err
+}
+
+type obstructionStub struct {
+	snapshot dish.Snapshot
+	grid     *dish.ObstructionMap
+	refresh  int
+}
+
+func (s *obstructionStub) Snapshot() dish.Snapshot { return s.snapshot }
+func (s *obstructionStub) RefreshObstructionMap(context.Context) (*dish.ObstructionMap, error) {
+	s.refresh++
+	return s.grid, nil
+}
+
+type speedtestStub struct {
+	state dish.SpeedtestSnapshot
+	err   error
+}
+
+func (s *speedtestStub) Start(context.Context) error      { return s.err }
+func (s *speedtestStub) Snapshot() dish.SpeedtestSnapshot { return s.state }
+
 func testHandler(t *testing.T, token string, capacity int) (http.Handler, *history.Store) {
 	t.Helper()
 	store := history.NewStore(capacity)
@@ -60,6 +91,57 @@ func request(handler http.Handler, method, target, token string) *httptest.Respo
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	return response
+}
+
+func requestBody(handler http.Handler, method, target, token, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	return response
+}
+
+func TestControlEndpointAcceptsPostAndRejectsOtherMethods(t *testing.T) {
+	controls := &controlStub{}
+	handler := NewServer(Deps{Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), Controls: controls})
+	response := requestBody(handler, http.MethodPost, "/api/control/snow-melt", "secret", `{"snow_melt_mode":"ALWAYS_ON"}`)
+	if response.Code != http.StatusAccepted || controls.params.Action != "snow-melt" || controls.params.SnowMeltMode != "ALWAYS_ON" {
+		t.Fatalf("code=%d params=%+v body=%s", response.Code, controls.params, response.Body.String())
+	}
+	if response := request(handler, http.MethodGet, "/api/control/reboot", "secret"); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET control code=%d", response.Code)
+	}
+}
+
+func TestObstructionMapRefreshesStaleGridAndReturnsJSON(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	grid := &dish.ObstructionMap{Rows: 1, Cols: 2, SNR: []float32{0, 1}, FetchedAt: now}
+	provider := &obstructionStub{snapshot: dish.Snapshot{Topology: dish.TopologyFull, DishReachable: true}, grid: grid}
+	handler := NewServer(Deps{Token: "secret", Snapshot: provider, History: history.NewStore(1), Obstruction: provider, Now: func() time.Time { return now }})
+	response := request(handler, http.MethodGet, "/api/obstruction-map", "secret")
+	if response.Code != http.StatusOK || provider.refresh != 1 {
+		t.Fatalf("code=%d refresh=%d body=%s", response.Code, provider.refresh, response.Body.String())
+	}
+	var decoded dish.ObstructionMap
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil || decoded.Rows != 1 || len(decoded.SNR) != 2 {
+		t.Fatalf("decoded=%+v err=%v", decoded, err)
+	}
+	provider.snapshot.DishReachable = false
+	if response := request(handler, http.MethodGet, "/api/obstruction-map", "secret"); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unreachable code=%d", response.Code)
+	}
+}
+
+func TestSpeedtestEndpointReportsConflictAndState(t *testing.T) {
+	speedtests := &speedtestStub{state: dish.SpeedtestSnapshot{State: dish.SpeedtestRunning}, err: dish.ErrSpeedtestRunning}
+	handler := NewServer(Deps{Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), Speedtest: speedtests})
+	if response := request(handler, http.MethodPost, "/api/speedtest", "secret"); response.Code != http.StatusConflict {
+		t.Fatalf("POST code=%d body=%s", response.Code, response.Body.String())
+	}
+	response := request(handler, http.MethodGet, "/api/speedtest", "secret")
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"state":"running"`)) {
+		t.Fatalf("GET code=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestAuthAcceptsBearerAndQueryToken(t *testing.T) {

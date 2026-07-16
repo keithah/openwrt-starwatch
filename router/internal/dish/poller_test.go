@@ -36,6 +36,11 @@ func cannedResponse(request *device.Request) (*device.Response, error) {
 		return &device.Response{Response: &device.Response_DishGetConfig{DishGetConfig: &device.DishGetConfigResponse{DishConfig: &device.DishConfig{
 			SnowMeltMode: device.DishConfig_ALWAYS_OFF, PowerSaveMode: true, PowerSaveStartMinutes: 120, PowerSaveDurationMinutes: 60,
 		}}}}, nil
+	case *device.Request_DishGetObstructionMap:
+		return &device.Response{Response: &device.Response_DishGetObstructionMap{DishGetObstructionMap: &device.DishGetObstructionMapResponse{
+			NumRows: 1, NumCols: 2, Snr: []float32{0, 1}, MinElevationDeg: 25,
+			MapReferenceFrame: device.ObstructionMapReferenceFrame_FRAME_EARTH,
+		}}}, nil
 	default:
 		return &device.Response{}, nil
 	}
@@ -98,7 +103,7 @@ func TestPollerPollsAndBackfillsHistory(t *testing.T) {
 	go func() { poller.Run(ctx); close(done) }()
 
 	waitFor(t, func() bool {
-		return poller.Snapshot().Topology == TopologyFull && requestCount(fake, "status") >= 2 && requestCount(fake, "config") >= 1
+		return poller.Snapshot().Topology == TopologyFull && requestCount(fake, "status") >= 2 && requestCount(fake, "config") >= 1 && requestCount(fake, "obstruction_map") >= 1
 	})
 	points, err := store.Query(history.LatencyMS, time.Time{}, 1000)
 	if err != nil {
@@ -110,6 +115,9 @@ func TestPollerPollsAndBackfillsHistory(t *testing.T) {
 	snapshot := poller.Snapshot()
 	if snapshot.Dish == nil || snapshot.Dish.LatencyMS != 42 || snapshot.DeviceInfo == nil || snapshot.Config == nil {
 		t.Fatalf("snapshot: %+v", snapshot)
+	}
+	if snapshot.ObstructionMap == nil || snapshot.ObstructionMap.Rows != 1 || snapshot.ObstructionMap.ReferenceFrame != "FRAME_EARTH" {
+		t.Fatalf("obstruction map: %+v", snapshot.ObstructionMap)
 	}
 
 	cancel()

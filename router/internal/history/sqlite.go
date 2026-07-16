@@ -28,15 +28,23 @@ type Event struct {
 	Detail string    `json:"detail"`
 }
 
+type Speedtest struct {
+	At        time.Time `json:"at"`
+	DownBPS   float64   `json:"down_bps"`
+	UpBPS     float64   `json:"up_bps"`
+	LatencyMS float64   `json:"latency_ms"`
+}
+
 type SQLiteStore struct {
 	db      *sql.DB
 	path    string
 	options SQLiteOptions
 
-	mu             sync.Mutex
-	pending        []Event
-	pendingOutages []outage.Entry
-	lastFlush      time.Time
+	mu                sync.Mutex
+	pending           []Event
+	pendingOutages    []outage.Entry
+	pendingSpeedtests []Speedtest
+	lastFlush         time.Time
 }
 
 const historySchema = `
@@ -138,6 +146,12 @@ func (s *SQLiteStore) Close() error { return s.db.Close() }
 func (s *SQLiteStore) AddEvent(event Event) {
 	s.mu.Lock()
 	s.pending = append(s.pending, event)
+	s.mu.Unlock()
+}
+
+func (s *SQLiteStore) AddSpeedtest(result Speedtest) {
+	s.mu.Lock()
+	s.pendingSpeedtests = append(s.pendingSpeedtests, result)
 	s.mu.Unlock()
 }
 
@@ -273,6 +287,16 @@ func (s *SQLiteStore) Flush(ctx context.Context, ram Reader, now time.Time) erro
 			}
 		}
 	}
+	for _, result := range s.pendingSpeedtests {
+		resultTime := result.At
+		if resultTime.Year() < 2025 {
+			resultTime = now
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO speedtests(ts, down_bps, up_bps, latency_ms) VALUES(?, ?, ?, ?)`,
+			resultTime.Unix(), result.DownBPS, result.UpBPS, result.LatencyMS); err != nil {
+			return rollback(err)
+		}
+	}
 	for table, limit := range map[string]int{"events": 10_000, "outages": 10_000, "speedtests": 500} {
 		query := fmt.Sprintf("DELETE FROM %s WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT %d)", table, table, limit)
 		if _, err := tx.ExecContext(ctx, query); err != nil {
@@ -284,6 +308,7 @@ func (s *SQLiteStore) Flush(ctx context.Context, ram Reader, now time.Time) erro
 	}
 	s.pending = nil
 	s.pendingOutages = nil
+	s.pendingSpeedtests = nil
 	s.lastFlush = now
 	return nil
 }

@@ -65,7 +65,7 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 
 	store := history.NewStore(cfg.History.RAMHours * 60 * 60)
 	liveEvents := event.NewBus()
-	poller := dish.NewPoller(client, store, dish.PollerOptions{StatusInterval: cfg.PollStatus, Now: deps.now})
+	poller := dish.NewPoller(client, store, dish.PollerOptions{StatusInterval: cfg.PollStatus, MapInterval: cfg.PollMap, Now: deps.now})
 	pollerDone := make(chan struct{})
 	go func() {
 		poller.Run(runCtx)
@@ -123,6 +123,19 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		engineOptions.Events = persistent
 	}
 	alertEngine := alert.NewEngine(engineOptions)
+	controllerOptions := dish.ControlOptions{
+		Now: deps.now, Live: liveEvents, SuppressDishUnreachableUntil: alertEngine.SetDishUnreachableSuppressUntil,
+		ExpectDishUnreachableUntil: timeline.ExpectDishUnreachableUntil,
+	}
+	if persistent != nil {
+		controllerOptions.Events = persistent
+	}
+	controller := dish.NewController(client, poller, controllerOptions)
+	speedOptions := dish.SpeedtestOptions{Context: runCtx, Now: deps.now, Live: liveEvents}
+	if persistent != nil {
+		speedOptions.Store = persistent
+	}
+	speedtests := dish.NewSpeedtestManager(client, speedOptions)
 	evaluationDone := make(chan struct{})
 	go func() {
 		runEvaluationLoop(runCtx, poller, wanMonitor, timeline, alertEngine, deps.now)
@@ -134,6 +147,7 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		<-wanDone
 		<-evaluationDone
 		<-deliveryDone
+		speedtests.Wait()
 		if flushDone != nil {
 			<-flushDone
 		}
@@ -143,6 +157,7 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	apiHandler := api.NewServer(api.Deps{
 		Token: cfg.Token, Snapshot: poller, History: reader, WAN: wanMonitor,
 		Outages: timeline, Events: persistent, Live: liveEvents, Now: deps.now,
+		Controls: controller, Obstruction: poller, Speedtest: speedtests, MapInterval: cfg.PollMap,
 	})
 	defer apiHandler.Close()
 	server := newHTTPServer(bindAddr(cfg), apiHandler)

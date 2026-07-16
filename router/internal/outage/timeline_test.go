@@ -84,6 +84,17 @@ func TestTimelineTransitionsOngoingEntriesToClosedOnce(t *testing.T) {
 	}
 }
 
+func TestExpectedRebootTagsDishUnreachableSpan(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	timeline := NewTimeline(Options{Now: func() time.Time { return now }})
+	timeline.ExpectDishUnreachableUntil(now.Add(5 * time.Minute))
+	timeline.ObserveDish(false, now)
+	active := timeline.Active()
+	if len(active) != 1 || active[0].Cause != "expected_reboot" {
+		t.Fatalf("active expected outage: %#v", active)
+	}
+}
+
 func TestTimelineDeduplicatesSuccessiveDishUpdatesAndClosesOngoing(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	persistence := &memoryPersistence{}

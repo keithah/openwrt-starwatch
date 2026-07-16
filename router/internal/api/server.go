@@ -42,6 +42,20 @@ type EventSubscriber interface {
 	Subscribe(capacity int) (<-chan event.Message, func())
 }
 
+type ControlProvider interface {
+	Execute(context.Context, dish.ControlParams) (dish.ControlResult, error)
+}
+
+type ObstructionProvider interface {
+	Snapshot() dish.Snapshot
+	RefreshObstructionMap(context.Context) (*dish.ObstructionMap, error)
+}
+
+type SpeedtestProvider interface {
+	Start(context.Context) error
+	Snapshot() dish.SpeedtestSnapshot
+}
+
 type Deps struct {
 	Token          string
 	Snapshot       SnapshotProvider
@@ -50,6 +64,10 @@ type Deps struct {
 	Outages        OutageProvider
 	Events         EventProvider
 	Live           EventSubscriber
+	Controls       ControlProvider
+	Obstruction    ObstructionProvider
+	Speedtest      SpeedtestProvider
+	MapInterval    time.Duration
 	Now            func() time.Time
 	WSInterval     time.Duration
 	WSBuffer       int
@@ -74,6 +92,9 @@ func NewServer(deps Deps) *server {
 	if deps.WSInterval <= 0 {
 		deps.WSInterval = time.Second
 	}
+	if deps.MapInterval <= 0 {
+		deps.MapInterval = 15 * time.Minute
+	}
 	if deps.WSBuffer <= 0 {
 		deps.WSBuffer = 16
 	}
@@ -94,6 +115,10 @@ func NewServer(deps Deps) *server {
 	mux.HandleFunc("GET /api/outages", s.auth(s.outages))
 	mux.HandleFunc("GET /api/events", s.auth(s.events))
 	mux.HandleFunc("GET /api/ws", s.auth(s.websocket))
+	mux.HandleFunc("POST /api/control/{action}", s.auth(s.control))
+	mux.HandleFunc("GET /api/obstruction-map", s.auth(s.obstructionMap))
+	mux.HandleFunc("GET /api/speedtest", s.auth(s.speedtestStatus))
+	mux.HandleFunc("POST /api/speedtest", s.auth(s.speedtestStart))
 	s.mux = mux
 	return s
 }

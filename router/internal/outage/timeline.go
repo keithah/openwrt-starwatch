@@ -41,13 +41,22 @@ type Options struct {
 }
 
 type Timeline struct {
-	mu          sync.RWMutex
-	now         func() time.Time
-	persistence Persistence
-	events      event.Publisher
-	entries     map[string]Entry
-	seen        map[string]seenEntry
-	pathPending time.Time
+	mu            sync.RWMutex
+	now           func() time.Time
+	persistence   Persistence
+	events        event.Publisher
+	entries       map[string]Entry
+	seen          map[string]seenEntry
+	pathPending   time.Time
+	expectedUntil time.Time
+}
+
+func (t *Timeline) ExpectDishUnreachableUntil(until time.Time) {
+	t.mu.Lock()
+	if until.After(t.expectedUntil) {
+		t.expectedUntil = until
+	}
+	t.mu.Unlock()
 }
 
 type seenEntry struct {
@@ -125,7 +134,11 @@ func (t *Timeline) ObserveDish(reachable bool, failureSince time.Time) {
 		if failureSince.IsZero() {
 			failureSince = now
 		}
-		entry := Entry{Source: SourceUnreachable, Cause: "grpc_unreachable", Start: failureSince, Ongoing: true}
+		cause := "grpc_unreachable"
+		if now.Before(t.expectedUntil) {
+			cause = "expected_reboot"
+		}
+		entry := Entry{Source: SourceUnreachable, Cause: cause, Start: failureSince, Ongoing: true}
 		t.entries[key] = entry
 		t.mu.Unlock()
 		t.publish("outage_started", entry)

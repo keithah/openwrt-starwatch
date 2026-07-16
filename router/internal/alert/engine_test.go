@@ -133,6 +133,19 @@ func TestOutageAndDishUnreachableHoldDedupAndSuppression(t *testing.T) {
 	}
 }
 
+func TestExpectedRebootOutageDoesNotFireAlerts(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	notifications := &notificationSink{}
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: DefaultRules(), Delivery: notifications})
+	engine.Tick(Inputs{Outages: []outage.Entry{{
+		Source: outage.SourceUnreachable, Cause: "expected_reboot", Start: now.Add(-2 * time.Minute),
+		Duration: 2 * time.Minute, Ongoing: true,
+	}}})
+	if len(notifications.notifications) != 0 {
+		t.Fatalf("expected reboot notifications: %#v", notifications.notifications)
+	}
+}
+
 func TestDishFlagsFirmwareAndObstructionFireAndPersistExactEvents(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	ram := history.NewStore(10)

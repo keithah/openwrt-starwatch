@@ -74,6 +74,23 @@ func TestSQLiteUsesMemoryJournalAndCreatesAllTables(t *testing.T) {
 	}
 }
 
+func TestSQLiteFlushPersistsSpeedtestResult(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	store, _ := openTestSQLite(t, now)
+	store.AddSpeedtest(Speedtest{At: now, DownBPS: 100, UpBPS: 20, LatencyMS: 30})
+	if err := store.Flush(context.Background(), NewStore(1), now); err != nil {
+		t.Fatal(err)
+	}
+	var timestamp int64
+	var down, up, latency float64
+	if err := store.db.QueryRow("SELECT ts, down_bps, up_bps, latency_ms FROM speedtests").Scan(&timestamp, &down, &up, &latency); err != nil {
+		t.Fatal(err)
+	}
+	if timestamp != now.Unix() || down != 100 || up != 20 || latency != 30 {
+		t.Fatalf("speedtest row: ts=%d down=%v up=%v latency=%v", timestamp, down, up, latency)
+	}
+}
+
 func TestSQLiteFlushPrunesRetentionAndCapsEvents(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	store, _ := openTestSQLite(t, now)
