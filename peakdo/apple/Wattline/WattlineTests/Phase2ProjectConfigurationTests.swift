@@ -88,6 +88,8 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
 
     func testWidgetExtensionDeclaresWidgetKitExtensionPoint() throws {
         let plist = try NSDictionary(contentsOf: root.appendingPathComponent("WattlineWidgets/Info.plist"), error: ())
+        XCTAssertEqual(plist["CFBundleName"] as? String, "WattlineWidgets")
+        XCTAssertEqual(plist["CFBundleExecutable"] as? String, "$(EXECUTABLE_NAME)")
         let extensionDictionary = try XCTUnwrap(plist["NSExtension"] as? NSDictionary)
         XCTAssertEqual(extensionDictionary["NSExtensionPointIdentifier"] as? String, "com.apple.widgetkit-extension")
     }
