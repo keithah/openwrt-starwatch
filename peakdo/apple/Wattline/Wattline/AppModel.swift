@@ -195,6 +195,7 @@ final class AppModel {
     // This prevents a connected fast-path (or an unrelated write error) from
     // being mistaken for successful restart recovery.
     private var restartDisconnectObserved: (generation: UInt, peripheralID: UUID)?
+    private var restartDisconnectWaiter: (generation: UInt, peripheralID: UUID, continuation: CheckedContinuation<Bool, Never>)?
     private var connectionOperationKey: ConnectionOperationKey?
     private var activeConnectionScope: DeviceConnectionScope?
     private var retiredConnectionScopeIDs: Set<UUID> = []
@@ -310,14 +311,13 @@ final class AppModel {
         restartTimeoutTask?.cancel()
         restartRecoveryTask?.cancel()
         restartDisconnectObserved = nil
+        cancelRestartDisconnectWaiter()
         maintenanceState = .restarting
         do {
             _ = try await deviceOperationBroker.perform(.restart, generation: generation)
         } catch {
-            // A write error is recoverable only when the current scoped disconnect
-            // has already been observed. Otherwise this is an ordinary failure.
-            guard restartDisconnectObserved?.generation == generation,
-                  restartDisconnectObserved?.peripheralID == peripheralID else {
+            let observed = await awaitRestartDisconnect(generation: generation, peripheralID: peripheralID)
+            guard observed else {
                 maintenanceState = .restartFailed(String(describing: error))
                 return
             }
@@ -325,6 +325,31 @@ final class AppModel {
         restartRecoveryTask = Task { [weak self] in
             await self?.recoverRestart(peripheralID: peripheralID, generation: generation)
         }
+    }
+
+    private func awaitRestartDisconnect(generation: UInt, peripheralID: UUID) async -> Bool {
+        if restartDisconnectObserved?.generation == generation,
+           restartDisconnectObserved?.peripheralID == peripheralID { return true }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            restartDisconnectWaiter = (generation, peripheralID, continuation)
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1))
+                await MainActor.run {
+                    guard let self,
+                          let waiter = self.restartDisconnectWaiter,
+                          waiter.generation == generation,
+                          waiter.peripheralID == peripheralID else { return }
+                    self.restartDisconnectWaiter = nil
+                    waiter.continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    private func cancelRestartDisconnectWaiter() {
+        guard let waiter = restartDisconnectWaiter else { return }
+        restartDisconnectWaiter = nil
+        waiter.continuation.resume(returning: false)
     }
 
     func retryRestart() async {
@@ -481,6 +506,7 @@ final class AppModel {
     func returnToScan() {
         restartRecoveryTask?.cancel()
         restartTimeoutTask?.cancel()
+        cancelRestartDisconnectWaiter()
         invalidateBrokerContext()
         connectionOperationKey = nil
         retireActiveConnectionScope()
@@ -983,6 +1009,12 @@ final class AppModel {
             if maintenanceState == .restarting,
                selectedPeripheralID == scope.peripheralID {
                 restartDisconnectObserved = (generation, scope.peripheralID)
+                if let waiter = restartDisconnectWaiter,
+                   waiter.generation == generation,
+                   waiter.peripheralID == scope.peripheralID {
+                    restartDisconnectWaiter = nil
+                    waiter.continuation.resume(returning: true)
+                }
             }
             connectionStatus = .disconnected(failure?.message)
             if otaRecoveryPeripheralID != nil {

@@ -50,6 +50,25 @@ final class SettingsLifecycleTests: XCTestCase {
         try await eventually { model.connectionStatus == .connected && model.maintenanceState == .idle }
     }
 
+    func testRestartAwaitsAsynchronousDisconnectDeliveredAfterWriteError() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(
+            reconnectAfterRestart: true,
+            restartFailsAfterDisconnect: true,
+            emitDisconnectAfterThrow: true,
+            deferReconnect: true
+        )
+        let model = try await makeConnectedModel(transport, clock: clock)
+
+        await model.restartDevice()
+
+        XCTAssertEqual(model.maintenanceState, .restarting)
+        try await waitUntil { await transport.reconnectIsWaiting }
+        await clock.advance(by: .seconds(15))
+        await transport.releaseReconnect()
+        try await eventually { model.connectionStatus == .connected && model.maintenanceState == .idle }
+    }
+
     func testRestartRecoveryExposesRetryAtThirtySeconds() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(reconnectAfterRestart: true, deferReconnect: true)
@@ -178,6 +197,7 @@ private actor LifecycleTransport: DeviceTransport {
     private let shutdownFails: Bool
     private let restartFails: Bool
     private let restartFailsAfterDisconnect: Bool
+    private let emitDisconnectAfterThrow: Bool
     private let deferReconnect: Bool
     private(set) var connectedIDs: [UUID] = []
     private(set) var scanStarts = 0
@@ -189,7 +209,7 @@ private actor LifecycleTransport: DeviceTransport {
     private var reconnectWaiter: CheckedContinuation<Void, Never>?
     var reconnectIsWaiting: Bool { reconnectWaiter != nil }
 
-    init(reconnectAfterRestart: Bool, shutdownFails: Bool = false, restartFails: Bool = false, restartFailsAfterDisconnect: Bool = false, deferReconnect: Bool = false) {
+    init(reconnectAfterRestart: Bool, shutdownFails: Bool = false, restartFails: Bool = false, restartFailsAfterDisconnect: Bool = false, emitDisconnectAfterThrow: Bool = false, deferReconnect: Bool = false) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
         events = pair.stream
         continuation = pair.continuation
@@ -197,6 +217,7 @@ private actor LifecycleTransport: DeviceTransport {
         self.shutdownFails = shutdownFails
         self.restartFails = restartFails
         self.restartFailsAfterDisconnect = restartFailsAfterDisconnect
+        self.emitDisconnectAfterThrow = emitDisconnectAfterThrow
         self.deferReconnect = deferReconnect
     }
 
@@ -227,8 +248,22 @@ private actor LifecycleTransport: DeviceTransport {
             return .sent
         }
         if command.disconnectPolicy == .successThenReconnect, reconnectAfterRestart {
-            if let activeScope { continuation.yield(.disconnected(activeScope, nil)) }
-            if restartFailsAfterDisconnect { throw TransportFailure(message: "restart write failed after disconnect") }
+            if emitDisconnectAfterThrow {
+                let scope = activeScope
+                if restartFailsAfterDisconnect {
+                    if let scope {
+                        Task { [continuation] in
+                            try? await Task.sleep(for: .milliseconds(20))
+                            continuation.yield(.disconnected(scope, nil))
+                        }
+                    }
+                    throw TransportFailure(message: "restart write failed after disconnect")
+                }
+                if let scope { continuation.yield(.disconnected(scope, nil)) }
+            } else {
+                if let activeScope { continuation.yield(.disconnected(activeScope, nil)) }
+                if restartFailsAfterDisconnect { throw TransportFailure(message: "restart write failed after disconnect") }
+            }
         } else if command.disconnectPolicy == .successThenReconnect, restartFails {
             throw TransportFailure(message: "restart write failed")
         }

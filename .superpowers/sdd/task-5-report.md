@@ -18,6 +18,12 @@ Restart recovery now records only the matching generation/peripheral scoped disc
 
 Verification: WattlineCore `swift test` passes all 142 tests; iOS Simulator `build-for-testing` succeeds. No simulator runtime was started.
 
+## Async expected-disconnect race follow-up
+
+Added a regression transport that throws the restart write error before asynchronously delivering the matching scoped disconnect. AppModel now installs a generation/peripheral-keyed continuation barrier, waits a bounded interval for that terminal event, resumes once on matching delivery, and cancels stale waiters on return to scan. Ordinary failures still expose Retry after the bound; stale scopes cannot resolve newer restart waiters.
+
+Verification: iOS Simulator `build-for-testing` succeeds. Focused runtime execution remained unavailable/reported a simulator launch failure in this environment.
+
 ## Task 5 lifecycle test hardening
 
 Added controllable-clock lifecycle coverage for ordinary restart write failure (Retry without recovery), expected-disconnect write-error recovery, deterministic reconnect after a simulated 15 seconds without scan, timeout/Retry at simulated 30 seconds, and quarantine of a late old-scope disconnect. The test transport now gates broker reconnects and records scopes so tests exercise AppModel/Broker recovery rather than transport self-connect.
