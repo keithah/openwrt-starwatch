@@ -150,7 +150,7 @@ struct SettingsView: View {
                 set: { enabled in Task { _ = await model.setLowBatteryEnabled(enabled) } }
             ))
             if model.systemSurfacePreferences.lowBatteryEnabled {
-                Stepper("Threshold (model.systemSurfacePreferences.lowBatteryThreshold)%", value: Binding(
+                Stepper("Threshold \(model.systemSurfacePreferences.lowBatteryThreshold)%", value: Binding(
                     get: { model.systemSurfacePreferences.lowBatteryThreshold },
                     set: { model.setLowBatteryThreshold($0) }
                 ), in: 1...99)

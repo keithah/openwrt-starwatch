@@ -45,6 +45,10 @@ final class LowBatteryNotificationCoordinator {
     private(set) var isEnabled = false
     private var authorizationRequested = false
 
+    #if DEBUG
+    var authorizationWasRequestedForTesting: Bool { authorizationRequested }
+    #endif
+
     init(
         notifications: any NotificationCenterAdapter = SystemNotificationCenterAdapter(),
         broker: DeviceOperationBroker? = nil,

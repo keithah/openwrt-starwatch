@@ -10,3 +10,8 @@ Verification:
 - No contract/OEM files, macOS targets, networking, timers, or forbidden WattlineCore imports changed.
 
 Simulator notification authorization and background launch behavior remain environment checks.
+
+Review corrections:
+- Added an injected notification adapter to `AppModel`, so the persisted-enabled reinitialization test proves the restored coordinator posts a low-battery alert without requesting authorization.
+- Corrected the Settings threshold label to interpolate the live value (for example, `Threshold 20%`).
+- Added `WattlineSystemSurfaceUITests` covering Demo badge, System Surfaces controls, and structural absence of Timers.

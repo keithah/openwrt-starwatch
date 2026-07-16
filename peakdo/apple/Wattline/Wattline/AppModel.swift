@@ -204,6 +204,7 @@ final class AppModel {
     private let brokerPublicationBarrier: BrokerPublicationBarrier
     private let brokerCompletionBarrier: BrokerCompletionBarrier
     private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
+    private let notificationAdapter: any NotificationCenterAdapter
     private let maintenanceClock: any DeviceClock
     private let snapshotCoordinator: SnapshotCoordinator?
     private let widgetReloadAdapter: WidgetReloadAdapter?
@@ -251,6 +252,7 @@ final class AppModel {
     @ObservationIgnored
     private(set) lazy var lowBatteryNotificationCoordinator: LowBatteryNotificationCoordinator = {
         LowBatteryNotificationCoordinator(
+            notifications: notificationAdapter,
             broker: deviceOperationBroker,
             peripheralID: { [weak self] in self?.selectedPeripheralID },
             snapshot: { [weak self] in self?.sharedSnapshot },
@@ -265,6 +267,7 @@ final class AppModel {
         brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {},
         brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
         connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {},
+        notificationAdapter: any NotificationCenterAdapter = SystemNotificationCenterAdapter(),
         maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
         snapshotCoordinator: SnapshotCoordinator? = SnapshotCoordinator.production(),
         widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter()
@@ -274,6 +277,7 @@ final class AppModel {
         self.brokerPublicationBarrier = brokerPublicationBarrier
         self.brokerCompletionBarrier = brokerCompletionBarrier
         self.connectedLifecycleBarrier = connectedLifecycleBarrier
+        self.notificationAdapter = notificationAdapter
         self.maintenanceClock = maintenanceClock
         self.snapshotCoordinator = snapshotCoordinator
         self.widgetReloadAdapter = widgetReloadAdapter
