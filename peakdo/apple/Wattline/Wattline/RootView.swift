@@ -43,23 +43,13 @@ private struct ConnectedShellView: View {
             .tabItem { Label("Home", systemImage: "house.fill") }
 
             demoSurface {
-                NavigationStack { PlaceholderView(title: "Timers", symbol: "timer") }
-            }
-            .tabItem { Label("Timers", systemImage: "timer") }
-
-            demoSurface {
                 NavigationStack { PlaceholderView(title: "Shortcuts", symbol: "wand.and.stars") }
             }
             .tabItem { Label("Shortcuts", systemImage: "square.grid.2x2") }
 
             demoSurface {
                 NavigationStack {
-                    PlaceholderView(
-                        title: "Settings",
-                        symbol: "gearshape",
-                        actionTitle: model.isDemo ? "Connect a real device" : nil,
-                        action: model.isDemo ? { model.requestBluetoothAfterPriming() } : nil
-                    )
+                    SettingsView()
                 }
             }
             .tabItem { Label("Settings", systemImage: "gearshape") }

@@ -77,10 +77,11 @@ final class WattlineDemoUITests: XCTestCase {
 
         app.navigationBars.buttons.firstMatch.tap()
         waitForValue(of: hero, containing: "30.0 watts")
-        for tab in ["Home", "Timers", "Shortcuts", "Settings"] {
+        XCTAssertFalse(app.tabBars.buttons["Timers"].exists)
+        for tab in ["Home", "Shortcuts", "Settings"] {
             app.tabBars.buttons[tab].tap()
             XCTAssertTrue(app.staticTexts["DEMO"].waitForExistence(timeout: 3))
-            if tab != "Home" {
+            if tab == "Shortcuts" {
                 XCTAssertTrue(app.staticTexts["Coming in Phase 2"].exists)
             }
             try capture("tab-\(tab.lowercased())", app: app)

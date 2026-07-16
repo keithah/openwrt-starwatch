@@ -16,10 +16,11 @@ final class WattlineDashboardUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Runtime limit"].exists)
     }
 
-    func testEveryPlaceholderTabRetainsDemoBadge() {
+    func testConnectedShellHasOnlyPhaseTwoTabsAndRetainsDemoBadge() {
         let app = launchInDemoMode()
 
-        for tab in ["Timers", "Shortcuts", "Settings"] {
+        XCTAssertFalse(app.tabBars.buttons["Timers"].exists)
+        for tab in ["Home", "Shortcuts", "Settings"] {
             app.tabBars.buttons[tab].tap()
             XCTAssertTrue(app.staticTexts["DEMO"].exists)
         }
