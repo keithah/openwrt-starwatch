@@ -42,7 +42,7 @@ final class LiveActivityCoordinatorTests: XCTestCase {
         let observed = Date(timeIntervalSince1970: 42)
         let s = snapshot(level: 73, status: .discharging, observedAt: 42, batteryPower: 999,
                          dc: .init(enabled: true, status: .discharging, voltage: 12, current: 2, power: 30),
-                         typeC: .init(enabled: true, status: .discharging, voltage: 9, current: 2, power: 18))
+                         typeC: .init(enabled: true, status: .discharging, voltage: 9, current: 2, power: 18, mode: .output))
         await coordinator.consume(s, now: observed, preferences: .init())
         let state = await adapter.events[0].1
         XCTAssertEqual(state?.level, 73)
@@ -51,6 +51,17 @@ final class LiveActivityCoordinatorTests: XCTestCase {
         XCTAssertEqual(state?.aggregateOutputWatts, 48)
         XCTAssertEqual(state?.observedAt, observed)
         XCTAssertEqual(state?.isConnected, true)
+    }
+
+    func testAggregateOutputExcludesTypeCInputTelemetry() async throws {
+        let adapter = RecordingActivityAdapter()
+        let coordinator = LiveActivityCoordinator(adapter: adapter)
+        let s = snapshot(status: .charging, observedAt: 42,
+                         dc: .init(enabled: true, status: .discharging, voltage: 12, current: 2, power: 30),
+                         typeC: .init(enabled: true, status: .charging, voltage: 9, current: 4, power: 36, mode: .input))
+        await coordinator.consume(s, now: Date(timeIntervalSince1970: 42), preferences: .init())
+        let state = await adapter.events[0].1
+        XCTAssertEqual(state?.aggregateOutputWatts, 30)
     }
 
     func testDisconnectedObservedAtStaysAtFirstDisconnectThroughHold() async throws {

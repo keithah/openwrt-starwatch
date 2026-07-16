@@ -25,6 +25,7 @@ No macOS app or Tasks 16–18 work was started.
 - Added exact ContentState field assertions, including runtime, status, observedAt, connection, and aggregate output.
 - Added explicit authorization-denied adapter isolation coverage and idle five-minute end coverage.
 - Disconnected activity updates preserve the first disconnected telemetry timestamp through the hold/end window.
+- Aggregate output excludes DC input telemetry and Type-C input-only telemetry; Type-C output is counted only for output-capable modes.
 
 Verification after corrections:
 

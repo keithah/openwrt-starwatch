@@ -36,7 +36,12 @@ final class LiveActivityCoordinator {
 
     private static func state(from snapshot: SharedDeviceSnapshot, observedAt: Date? = nil) -> WattlineActivityAttributes.ContentState {
         let b = snapshot.battery
-        let watts = (snapshot.dc?.power ?? 0) + (snapshot.typeC?.power ?? 0)
+        let dcOutput = snapshot.dc.flatMap { $0.isDCInput == true ? nil : $0.power } ?? 0
+        let typeCOutput = snapshot.typeC.flatMap { port in
+            guard port.isDCInput != true, port.mode == .output || port.mode == .inputAndOutput else { return nil }
+            return port.power
+        } ?? 0
+        let watts = dcOutput + typeCOutput
         return .init(level: Int(b?.level ?? 0), status: b?.status.rawValue ?? 0, runtimeSeconds: b.map { Int($0.remainingMinutes) * 60 }, aggregateOutputWatts: watts, observedAt: observedAt ?? snapshot.observedAt, isConnected: snapshot.connection == .live)
     }
 }
