@@ -57,8 +57,10 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         XCTAssertFalse(widget.contains("A1000000000000000000007E"), "Widget must not embed itself")
         let app = try target("A10000000000000000000020", in: project)
         XCTAssertTrue(app.contains("A1000000000000000000007E"), "Only the iOS app embeds the widget extension")
-        XCTAssertTrue(app.contains("SUPPORTED_PLATFORMS = \"iphoneos iphonesimulator\";"))
-        XCTAssertTrue(app.contains("SUPPORTS_MACCATALYST = NO;"))
+        for configuration in try configurations(for: app, in: project) {
+            XCTAssertTrue(configuration.contains("SUPPORTED_PLATFORMS = \"iphoneos iphonesimulator\";"))
+            XCTAssertTrue(configuration.contains("SUPPORTS_MACCATALYST = NO;"))
+        }
         XCTAssertTrue(project.contains("A1000000000000000000007E = {isa = PBXCopyFilesBuildPhase;"))
         XCTAssertTrue(project.contains("dstSubfolderSpec = 13;"))
     }
