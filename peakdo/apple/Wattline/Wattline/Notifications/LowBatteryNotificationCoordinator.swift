@@ -1,5 +1,6 @@
 import Foundation
 import WattlineCore
+import UserNotifications
 
 protocol NotificationCenterAdapter: Sendable {
     func requestAuthorization() async throws -> Bool
@@ -12,9 +13,24 @@ enum NotificationActionResult: Equatable, Sendable {
 }
 
 struct SystemNotificationCenterAdapter: NotificationCenterAdapter {
-    func requestAuthorization() async throws -> Bool { true }
-    func registerLowBatteryCategory(includeDCAction: Bool) async {}
-    func postLowBattery(level: Int, threshold: Int) async throws {}
+    private let center = UNUserNotificationCenter.current()
+    func requestAuthorization() async throws -> Bool {
+        try await center.requestAuthorization(options: [.alert, .sound])
+    }
+    func registerLowBatteryCategory(includeDCAction: Bool) async {
+        var actions: [UNNotificationAction] = []
+        if includeDCAction { actions.append(UNNotificationAction(identifier: "WATTLINE_TURN_OFF_DC", title: "Turn off DC Port", options: [])) }
+        let category = UNNotificationCategory(identifier: "WATTLINE_LOW_BATTERY", actions: actions, intentIdentifiers: [], options: [])
+        center.setNotificationCategories([category])
+    }
+    func postLowBattery(level: Int, threshold: Int) async throws {
+        let content = UNMutableNotificationContent()
+        content.title = "Low battery"
+        content.body = "Battery is at (level)% (threshold (threshold)%)."
+        content.categoryIdentifier = "WATTLINE_LOW_BATTERY"
+        let request = UNNotificationRequest(identifier: "wattline.low-battery", content: content, trigger: nil)
+        try await center.add(request)
+    }
 }
 
 @MainActor
