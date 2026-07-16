@@ -18,7 +18,7 @@ var ErrInvalidControl = errors.New("invalid control request")
 type ControlParams struct {
 	Action          string `json:"action"`
 	SnowMeltMode    string `json:"snow_melt_mode,omitempty"`
-	Enabled         bool   `json:"enabled,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty"`
 	StartMinutes    uint32 `json:"start_minutes,omitempty"`
 	DurationMinutes uint32 `json:"duration_minutes,omitempty"`
 }
@@ -101,12 +101,16 @@ func (c *Controller) Execute(ctx context.Context, params ControlParams) (result 
 			break
 		}
 		result.Config, err = c.writeConfig(ctx, &device.DishConfig{
-			PowerSaveMode: params.Enabled, ApplyPowerSaveMode: true,
+			PowerSaveMode: params.Enabled != nil && *params.Enabled, ApplyPowerSaveMode: true,
 			PowerSaveStartMinutes: params.StartMinutes, ApplyPowerSaveStartMinutes: true,
 			PowerSaveDurationMinutes: params.DurationMinutes, ApplyPowerSaveDurationMinutes: true,
 		})
 	case "gps":
-		err = c.api.DishInhibitGPS(ctx, !params.Enabled)
+		if params.Enabled == nil {
+			err = fmt.Errorf("%w: gps requires enabled", ErrInvalidControl)
+			break
+		}
+		err = c.api.DishInhibitGPS(ctx, !*params.Enabled)
 	case "gps-enable":
 		err = c.api.DishInhibitGPS(ctx, false)
 	case "gps-disable":

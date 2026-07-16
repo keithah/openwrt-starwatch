@@ -38,6 +38,14 @@ func TestFailedControlIsAuditedWithError(t *testing.T) {
 	}
 }
 
+func TestGPSControlRequiresExplicitEnabled(t *testing.T) {
+	controller := NewController(&controlFake{}, &readbackFake{}, ControlOptions{})
+	result, err := controller.Execute(context.Background(), ControlParams{Action: "gps"})
+	if !errors.Is(err, ErrInvalidControl) || result.Accepted {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
 type readbackFake struct{ calls int }
 
 func (f *readbackFake) RefreshConfig(context.Context) (*ConfigReadback, error) {
@@ -69,7 +77,8 @@ func TestControllerSetsOnlyPairedApplyFlagsAndReadsBack(t *testing.T) {
 		t.Fatalf("readback calls=%d result=%+v", readback.calls, result)
 	}
 
-	_, err = controller.Execute(context.Background(), ControlParams{Action: "sleep-schedule", Enabled: true, StartMinutes: 60, DurationMinutes: 120})
+	enabled := true
+	_, err = controller.Execute(context.Background(), ControlParams{Action: "sleep-schedule", Enabled: &enabled, StartMinutes: 60, DurationMinutes: 120})
 	if err != nil {
 		t.Fatal(err)
 	}
