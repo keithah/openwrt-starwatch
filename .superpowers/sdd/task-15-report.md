@@ -18,3 +18,16 @@ Implemented the ActivityKit adapter boundary and Live Activity surfaces.
 - ActivityKit is confined to app/extension files; WattlineCore remains free of ActivityKit/WidgetKit/UI imports.
 
 No macOS app or Tasks 16–18 work was started.
+
+## Static-review corrections
+
+- ContentState `aggregateOutputWatts` now sums authoritative DC and Type-C port output rather than battery net power.
+- Added exact ContentState field assertions, including runtime, status, observedAt, connection, and aggregate output.
+- Added explicit authorization-denied adapter isolation coverage and idle five-minute end coverage.
+- Disconnected activity updates preserve the first disconnected telemetry timestamp through the hold/end window.
+
+Verification after corrections:
+
+- Generic iOS simulator build-for-testing: **succeeded** (`/tmp/t15fix-green.log`).
+- Focused runtime test launch was unavailable in this environment because the simulator/app-extension placeholder is rejected and the attached device is passcode protected (`/tmp/t15fix-test.log`).
+- `git diff --check`: **passed**.
