@@ -20,7 +20,10 @@ struct SettingsView: View {
                         settingsStatusRow(
                             title: "DC Port",
                             systemImage: "powerplug",
-                            isOn: model.state.dc?.enabled == true
+                            presentation: SettingsStatusPresentation(
+                                value: model.state.dc?.enabled,
+                                freshness: model.state.freshness
+                            )
                         )
                     }
                 case .bypass:
@@ -28,7 +31,10 @@ struct SettingsView: View {
                         settingsStatusRow(
                             title: "DC Bypass",
                             systemImage: "arrow.triangle.branch",
-                            isOn: model.state.dc?.bypassOn == true
+                            presentation: SettingsStatusPresentation(
+                                value: model.state.dc?.bypassOn,
+                                freshness: model.state.freshness
+                            )
                         )
                     }
                 case .restart:
@@ -79,7 +85,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(identityPresentation.rows) { row in
-                    LabeledContent(row.label, value: row.value)
+                    LabeledContent(row.label) {
+                        deviceInfoValue(row.value)
+                    }
                 }
                 .opacity(identityPresentation.isStale ? 0.55 : 1)
             }
@@ -106,13 +114,26 @@ struct SettingsView: View {
     private func settingsStatusRow(
         title: String,
         systemImage: String,
-        isOn: Bool
+        presentation: SettingsStatusPresentation
     ) -> some View {
         HStack {
             Label(title, systemImage: systemImage)
             Spacer()
-            Text(isOn ? "On" : "Off")
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(presentation.text)
+                if presentation.isStale {
+                    Text("Cached")
+                        .font(.caption)
+                }
+            }
                 .foregroundStyle(.secondary)
+                .opacity(presentation.isStale ? 0.55 : 1)
         }
+    }
+
+    private func deviceInfoValue(_ value: String) -> some View {
+        Text(value)
+            .font(.system(.body, design: .monospaced))
+            .foregroundStyle(.secondary)
     }
 }

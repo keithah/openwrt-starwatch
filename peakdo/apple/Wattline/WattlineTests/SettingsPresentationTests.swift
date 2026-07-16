@@ -4,6 +4,44 @@ import WattlineCore
 import XCTest
 
 final class SettingsPresentationTests: XCTestCase {
+    func testMissingTelemetryIsUnavailableRatherThanOff() {
+        let value = SettingsStatusPresentation(value: nil, freshness: .live)
+
+        XCTAssertEqual(value.text, "Unavailable")
+        XCTAssertFalse(value.isStale)
+        XCTAssertNotEqual(value.text, "Off")
+    }
+
+    func testLoadingTelemetryIsPresentedAsLoadingRatherThanOff() {
+        let value = SettingsStatusPresentation(value: nil, freshness: .loading)
+
+        XCTAssertEqual(value.text, "Loading")
+        XCTAssertFalse(value.isStale)
+        XCTAssertNotEqual(value.text, "Off")
+    }
+
+    func testLiveTelemetryPresentsOnAndOffExactly() {
+        XCTAssertEqual(
+            SettingsStatusPresentation(value: true, freshness: .live),
+            .init(text: "On", isStale: false)
+        )
+        XCTAssertEqual(
+            SettingsStatusPresentation(value: false, freshness: .live),
+            .init(text: "Off", isStale: false)
+        )
+    }
+
+    func testRetainedDisconnectedTelemetryIsMarkedStale() {
+        XCTAssertEqual(
+            SettingsStatusPresentation(value: true, freshness: .stale),
+            .init(text: "On", isStale: true)
+        )
+        XCTAssertEqual(
+            SettingsStatusPresentation(value: false, freshness: .stale),
+            .init(text: "Off", isStale: true)
+        )
+    }
+
     func testIdentityRowsComeDirectlyFromHandshakeSnapshot() {
         let identity = DeviceIdentitySnapshot(
             peripheralID: UUID(),

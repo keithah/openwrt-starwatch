@@ -1,5 +1,26 @@
 import WattlineCore
 
+struct SettingsStatusPresentation: Equatable, Sendable {
+    let text: String
+    let isStale: Bool
+
+    init(text: String, isStale: Bool) {
+        self.text = text
+        self.isStale = isStale
+    }
+
+    init(value: Bool?, freshness: TelemetryFreshness) {
+        guard let value else {
+            text = freshness == .loading ? "Loading" : "Unavailable"
+            isStale = false
+            return
+        }
+
+        text = value ? "On" : "Off"
+        isStale = freshness == .stale
+    }
+}
+
 struct SettingsIdentityPresentation: Equatable, Sendable {
     struct Row: Equatable, Identifiable, Sendable {
         let label: String
