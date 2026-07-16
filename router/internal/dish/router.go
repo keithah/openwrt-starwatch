@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -33,6 +34,7 @@ type RouterPollerOptions struct {
 	Dial           func(context.Context, string) (RouterAPI, error)
 	Interval       time.Duration
 	Timeout        time.Duration
+	Now            func() time.Time
 }
 
 type RouterPoller struct {
@@ -53,6 +55,9 @@ func NewRouterPoller(options RouterPollerOptions) *RouterPoller {
 	}
 	if options.Timeout <= 0 {
 		options.Timeout = 2 * time.Second
+	}
+	if options.Now == nil {
+		options.Now = time.Now
 	}
 	return &RouterPoller{options: options}
 }
@@ -106,8 +111,22 @@ func (p *RouterPoller) Poll(parent context.Context) {
 		p.failed()
 		return
 	}
+	latency, dropRate := status.GetPingLatencyMs(), status.GetPingDropRate()
+	now := p.options.Now()
 	p.mu.Lock()
-	p.snapshot = &StarlinkRouter{Reachable: true, HardwareVersion: info.GetHardwareVersion(), SoftwareVersion: info.GetSoftwareVersion(), ClientCount: len(clients.GetClients()), UptimeSeconds: status.GetDeviceState().GetUptimeS()}
+	var lastSuccess *time.Time
+	if p.snapshot != nil && p.snapshot.LastPingSuccess != nil {
+		value := *p.snapshot.LastPingSuccess
+		lastSuccess = &value
+	}
+	if !math.IsNaN(float64(dropRate)) && !math.IsInf(float64(dropRate), 0) && dropRate < 1 {
+		lastSuccess = &now
+	}
+	p.snapshot = &StarlinkRouter{
+		Reachable: true, HardwareVersion: info.GetHardwareVersion(), SoftwareVersion: info.GetSoftwareVersion(),
+		ClientCount: len(clients.GetClients()), UptimeSeconds: status.GetDeviceState().GetUptimeS(),
+		PingLatencyMS: &latency, PingDropRate: &dropRate, LastPingSuccess: lastSuccess,
+	}
 	p.mu.Unlock()
 }
 

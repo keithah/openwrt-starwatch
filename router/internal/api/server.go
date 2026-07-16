@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +130,7 @@ func NewServer(deps Deps) *server {
 	s := &server{deps: deps, ctx: ctx, cancel: cancel}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.auth(s.status))
+	mux.HandleFunc("GET /api/diagnostics", s.auth(s.diagnostics))
 	mux.HandleFunc("GET /api/history", s.auth(s.history))
 	mux.HandleFunc("GET /api/wan", s.auth(s.wan))
 	mux.HandleFunc("GET /api/outages", s.auth(s.outages))
@@ -390,16 +390,16 @@ func (s *server) history(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseSpan(value string) (time.Duration, error) {
-	if strings.HasSuffix(value, "d") {
-		days, err := strconv.Atoi(strings.TrimSuffix(value, "d"))
-		if err != nil || days <= 0 {
-			return 0, fmt.Errorf("invalid span %q", value)
-		}
-		return time.Duration(days) * 24 * time.Hour, nil
+	spans := map[string]time.Duration{
+		"15m": 15 * time.Minute,
+		"3h":  3 * time.Hour,
+		"24h": 24 * time.Hour,
+		"7d":  7 * 24 * time.Hour,
+		"30d": 30 * 24 * time.Hour,
 	}
-	duration, err := time.ParseDuration(value)
-	if err != nil || duration <= 0 {
-		return 0, fmt.Errorf("invalid span %q", value)
+	duration, ok := spans[value]
+	if !ok {
+		return 0, fmt.Errorf("unsupported span %q", value)
 	}
 	return duration, nil
 }

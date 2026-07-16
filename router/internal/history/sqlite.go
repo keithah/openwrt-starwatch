@@ -444,7 +444,7 @@ func (s *SQLiteStore) QueryTier(series string, tier Tier, since time.Time, limit
 	if tier != TierMinute && tier != TierQuarter {
 		return nil, fmt.Errorf("unsupported sqlite tier %q", tier)
 	}
-	rows, err := s.db.Query(fmt.Sprintf("SELECT ts, min, avg, max FROM %s WHERE series=? AND ts>=? ORDER BY ts", tier), series, since.Unix())
+	rows, err := s.db.Query(fmt.Sprintf("SELECT ts, min, avg, max, samples FROM %s WHERE series=? AND ts>=? ORDER BY ts", tier), series, since.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -453,11 +453,12 @@ func (s *SQLiteStore) QueryTier(series string, tier Tier, since time.Time, limit
 	for rows.Next() {
 		var timestamp int64
 		var minimum, average, maximum float64
-		if err := rows.Scan(&timestamp, &minimum, &average, &maximum); err != nil {
+		var samples int64
+		if err := rows.Scan(&timestamp, &minimum, &average, &maximum, &samples); err != nil {
 			return nil, err
 		}
 		minValue, maxValue := float32(minimum), float32(maximum)
-		points = append(points, Point{Time: time.Unix(timestamp, 0).UTC(), Value: float32(average), Min: &minValue, Max: &maxValue})
+		points = append(points, Point{Time: time.Unix(timestamp, 0).UTC(), Value: float32(average), Min: &minValue, Max: &maxValue, Samples: samples})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

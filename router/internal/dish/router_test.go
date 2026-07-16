@@ -27,6 +27,7 @@ eth0 0164A8C0 0101A8C0 0007 0 0 2 FFFFFFFF 0 0 0
 }
 
 func TestRouterPollerUsesOnlyReadOnlyRPCsAndBuildsSnapshot(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
 		switch request.GetRequest().(type) {
 		case *device.Request_GetDeviceInfo:
@@ -34,7 +35,9 @@ func TestRouterPollerUsesOnlyReadOnlyRPCsAndBuildsSnapshot(t *testing.T) {
 		case *device.Request_WifiGetClients:
 			return &device.Response{Response: &device.Response_WifiGetClients{WifiGetClients: &device.WifiGetClientsResponse{Clients: []*device.WifiClient{{}, {}}}}}, nil
 		case *device.Request_GetStatus:
-			return &device.Response{Response: &device.Response_WifiGetStatus{WifiGetStatus: &device.WifiGetStatusResponse{DeviceState: &device.DeviceState{UptimeS: 99}}}}, nil
+			return &device.Response{Response: &device.Response_WifiGetStatus{WifiGetStatus: &device.WifiGetStatusResponse{
+				DeviceState: &device.DeviceState{UptimeS: 99}, PingLatencyMs: 3.5, PingDropRate: 0.25,
+			}}}, nil
 		default:
 			t.Fatalf("unexpected router request %T", request.GetRequest())
 			return &device.Response{}, nil
@@ -44,12 +47,15 @@ func TestRouterPollerUsesOnlyReadOnlyRPCsAndBuildsSnapshot(t *testing.T) {
 	topology := snapshotStubForRouter{snapshot: Snapshot{Topology: TopologyFull}}
 	poller := NewRouterPoller(RouterPollerOptions{
 		Topology: topology, ResolveGateway: func(context.Context) (string, error) { return address, nil },
-		Interval: time.Hour,
+		Interval: time.Hour, Now: func() time.Time { return now },
 	})
 	poller.Poll(context.Background())
 	got := poller.Snapshot()
 	if got == nil || !got.Reachable || got.HardwareVersion != "router-v3" || got.SoftwareVersion != "2026.7" || got.ClientCount != 2 || got.UptimeSeconds != 99 {
 		t.Fatalf("snapshot=%+v", got)
+	}
+	if got.PingLatencyMS == nil || *got.PingLatencyMS != 3.5 || got.PingDropRate == nil || *got.PingDropRate != 0.25 || got.LastPingSuccess == nil || !got.LastPingSuccess.Equal(now) {
+		t.Fatalf("router ping snapshot=%+v", got)
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()

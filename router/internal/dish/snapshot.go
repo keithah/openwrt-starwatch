@@ -13,6 +13,7 @@ const (
 	FieldStatus         = "status"
 	FieldObstruction    = "obstruction_stats"
 	FieldAlignment      = "alignment_stats"
+	FieldGPS            = "gps"
 	FieldPower          = "power_w"
 	FieldDeviceInfo     = "device_info"
 	FieldConfig         = "dish_config"
@@ -48,11 +49,14 @@ type Location struct {
 }
 
 type StarlinkRouter struct {
-	Reachable       bool   `json:"reachable"`
-	HardwareVersion string `json:"hardware_version"`
-	SoftwareVersion string `json:"software_version"`
-	ClientCount     int    `json:"client_count"`
-	UptimeSeconds   uint64 `json:"uptime_seconds"`
+	Reachable       bool       `json:"reachable"`
+	HardwareVersion string     `json:"hardware_version"`
+	SoftwareVersion string     `json:"software_version"`
+	ClientCount     int        `json:"client_count"`
+	UptimeSeconds   uint64     `json:"uptime_seconds"`
+	PingLatencyMS   *float32   `json:"-"`
+	PingDropRate    *float32   `json:"-"`
+	LastPingSuccess *time.Time `json:"-"`
 }
 
 type ObstructionMap struct {
@@ -71,17 +75,19 @@ type HistoryOutage struct {
 }
 
 type WANStatus struct {
-	Available     bool        `json:"available"`
-	Interface     string      `json:"interface"`
-	Up            bool        `json:"up"`
-	RouterDownBPS float32     `json:"router_down_bps"`
-	RouterUpBPS   float32     `json:"router_up_bps"`
-	ProbeRTT30sMS float32     `json:"probe_rtt_30s_ms"`
-	ProbeLoss30s  float32     `json:"probe_loss_30s"`
-	ProbeRTT5mMS  float32     `json:"probe_rtt_5m_ms"`
-	ProbeLoss5m   float32     `json:"probe_loss_5m"`
-	ProbeLossNow  float32     `json:"-"`
-	MWAN3         *MWANStatus `json:"mwan3,omitempty"`
+	Available         bool        `json:"available"`
+	Interface         string      `json:"interface"`
+	Up                bool        `json:"up"`
+	RouterDownBPS     float32     `json:"router_down_bps"`
+	RouterUpBPS       float32     `json:"router_up_bps"`
+	ProbeRTT30sMS     float32     `json:"probe_rtt_30s_ms"`
+	ProbeLoss30s      float32     `json:"probe_loss_30s"`
+	ProbeRTT5mMS      float32     `json:"probe_rtt_5m_ms"`
+	ProbeLoss5m       float32     `json:"probe_loss_5m"`
+	Probe30sAvailable bool        `json:"-"`
+	Probe5mAvailable  bool        `json:"-"`
+	ProbeLossNow      float32     `json:"-"`
+	MWAN3             *MWANStatus `json:"mwan3,omitempty"`
 }
 
 type MWANStatus struct {
@@ -105,21 +111,32 @@ type MWANLastSwitch struct {
 }
 
 type Status struct {
-	UpdatedAt             time.Time       `json:"updated_at"`
-	UptimeSeconds         uint64          `json:"uptime_seconds"`
-	LatencyMS             float32         `json:"latency_ms"`
-	DropRate              float32         `json:"drop_rate"`
-	DownlinkThroughputBPS float32         `json:"downlink_throughput_bps"`
-	UplinkThroughputBPS   float32         `json:"uplink_throughput_bps"`
-	PowerW                *float32        `json:"power_w,omitempty"`
-	PowerSource           string          `json:"power_source,omitempty"`
-	Obstruction           *Obstruction    `json:"obstruction,omitempty"`
-	Alignment             *Alignment      `json:"alignment,omitempty"`
-	Outage                *Outage         `json:"outage,omitempty"`
-	Alerts                map[string]bool `json:"alerts,omitempty"`
-	MobilityClass         string          `json:"mobility_class"`
-	ClassOfService        string          `json:"class_of_service"`
-	SoftwareUpdateState   string          `json:"software_update_state"`
+	UpdatedAt                  time.Time       `json:"updated_at"`
+	UptimeSeconds              uint64          `json:"uptime_seconds"`
+	LatencyMS                  float32         `json:"latency_ms"`
+	DropRate                   float32         `json:"drop_rate"`
+	DownlinkThroughputBPS      float32         `json:"downlink_throughput_bps"`
+	UplinkThroughputBPS        float32         `json:"uplink_throughput_bps"`
+	PowerW                     *float32        `json:"power_w,omitempty"`
+	PowerSource                string          `json:"power_source,omitempty"`
+	GPS                        *GPS            `json:"gps,omitempty"`
+	SecondsToFirstNonemptySlot float32         `json:"seconds_to_first_nonempty_slot"`
+	DisablementCode            string          `json:"disablement_code"`
+	Obstruction                *Obstruction    `json:"obstruction,omitempty"`
+	Alignment                  *Alignment      `json:"alignment,omitempty"`
+	Outage                     *Outage         `json:"outage,omitempty"`
+	Alerts                     map[string]bool `json:"alerts,omitempty"`
+	MobilityClass              string          `json:"mobility_class"`
+	ClassOfService             string          `json:"class_of_service"`
+	SoftwareUpdateState        string          `json:"software_update_state"`
+}
+
+type GPS struct {
+	Valid                 bool   `json:"valid"`
+	Satellites            uint32 `json:"satellites"`
+	Inhibited             bool   `json:"inhibited"`
+	NoSatellitesAfterTTFF bool   `json:"no_satellites_after_ttff"`
+	PNTFilterState        string `json:"pnt_filter_state"`
 }
 
 type Outage struct {

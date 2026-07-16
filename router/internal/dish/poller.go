@@ -247,7 +247,7 @@ func (p *Poller) pollStatus(parent context.Context) {
 	status, err := p.api.GetStatus(ctx)
 	if err != nil || status == nil {
 		p.markDishFailure(p.options.Now())
-		p.failed(FieldStatus, FieldObstruction, FieldAlignment, FieldPower)
+		p.failed(FieldStatus, FieldObstruction, FieldAlignment, FieldGPS, FieldPower)
 		p.mu.Lock()
 		if p.failures[FieldStatus] >= 3 {
 			p.snapshot.Topology = TopologyWANOnly
@@ -266,8 +266,19 @@ func (p *Poller) pollStatus(parent context.Context) {
 		LatencyMS: status.GetPopPingLatencyMs(), DropRate: status.GetPopPingDropRate(),
 		DownlinkThroughputBPS: status.GetDownlinkThroughputBps(), UplinkThroughputBPS: status.GetUplinkThroughputBps(),
 		Outage: outageSnapshot(status.GetOutage()), Alerts: alertSnapshot(status.GetAlerts()), MobilityClass: status.GetMobilityClass().String(),
-		ClassOfService:      status.GetClassOfService().String(),
-		SoftwareUpdateState: status.GetSoftwareUpdateState().String(),
+		ClassOfService:             status.GetClassOfService().String(),
+		SoftwareUpdateState:        status.GetSoftwareUpdateState().String(),
+		SecondsToFirstNonemptySlot: status.GetSecondsToFirstNonemptySlot(),
+		DisablementCode:            status.GetDisablementCode().String(),
+	}
+	if gps := status.GetGpsStats(); gps != nil {
+		p.succeeded(FieldGPS)
+		dishStatus.GPS = &GPS{
+			Valid: gps.GetGpsValid(), Satellites: gps.GetGpsSats(), Inhibited: gps.GetInhibitGps(),
+			NoSatellitesAfterTTFF: gps.GetNoSatsAfterTtff(), PNTFilterState: gps.GetPntFilterConvergenceState().String(),
+		}
+	} else {
+		p.failedWithReason(FieldGPS, "GPS statistics absent from dish status")
 	}
 	if obstruction := status.GetObstructionStats(); obstruction != nil {
 		p.succeeded(FieldObstruction)
@@ -579,6 +590,15 @@ func (p *Poller) failed(fields ...string) {
 		if p.failures[field] >= 3 {
 			p.snapshot.FieldAvailability[field] = Availability{Available: false}
 		}
+	}
+}
+
+func (p *Poller) failedWithReason(field, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failures[field]++
+	if p.failures[field] >= 3 {
+		p.snapshot.FieldAvailability[field] = Availability{Available: false, Reason: reason}
 	}
 }
 

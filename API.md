@@ -300,6 +300,9 @@ Latency percentiles use raw RAM samples for spans within RAM retention and
 persisted aggregate values for longer spans. A long-span percentile is therefore
 an approximation and is labeled `approximate: true`.
 
+Latency distribution buckets are inclusive at 20, 40, 60, 80, 100, 150, 200,
+and 500 milliseconds. The final open bucket has `upper_bound_ms: null`.
+
 Outage totals merge only intervals inside the requested span and do not double
 count overlapping representations of the same outage.
 

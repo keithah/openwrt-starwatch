@@ -1,12 +1,15 @@
 package dish
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	device "github.com/clarkzjw/starlink-grpc-golang/pkg/spacex.com/api/device"
+	disablement "github.com/clarkzjw/starlink-grpc-golang/pkg/spacex.com/api/satellites/network/ut_disablement_codes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -19,9 +22,15 @@ func cannedResponse(request *device.Request) (*device.Response, error) {
 		return &device.Response{Response: &device.Response_DishGetStatus{DishGetStatus: &device.DishGetStatusResponse{
 			DeviceState: &device.DeviceState{UptimeS: 99}, PopPingLatencyMs: 42,
 			DownlinkThroughputBps: 1000, UplinkThroughputBps: 200,
-			ObstructionStats: &device.DishObstructionStats{FractionObstructed: 0.25},
-			AlignmentStats:   &device.AlignmentStats{TiltAngleDeg: 12},
-			UpsuStats:        &device.DishUpsuStats{DishPower: 55},
+			GpsStats: &device.DishGpsStats{
+				GpsValid: true, GpsSats: 14, NoSatsAfterTtff: true, InhibitGps: false,
+				PntFilterConvergenceState: device.AttitudeEstimationState_FILTER_CONVERGED,
+			},
+			SecondsToFirstNonemptySlot: 0.8,
+			DisablementCode:            disablement.UtDisablementCode_OKAY,
+			ObstructionStats:           &device.DishObstructionStats{FractionObstructed: 0.25},
+			AlignmentStats:             &device.AlignmentStats{TiltAngleDeg: 12},
+			UpsuStats:                  &device.DishUpsuStats{DishPower: 55},
 		}}}, nil
 	case *device.Request_GetDeviceInfo:
 		return &device.Response{Response: &device.Response_GetDeviceInfo{GetDeviceInfo: &device.GetDeviceInfoResponse{DeviceInfo: &device.DeviceInfo{
@@ -45,6 +54,68 @@ func cannedResponse(request *device.Request) (*device.Response, error) {
 		}}}, nil
 	default:
 		return &device.Response{}, nil
+	}
+}
+
+func TestStatusIncludesTypedGPSAndDiagnosticEnums(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		return cannedResponse(request)
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.backfillDone = true
+	poller.pollStatus(context.Background())
+
+	snapshot := poller.Snapshot()
+	got := snapshot.Dish
+	if got == nil || got.GPS == nil {
+		t.Fatalf("dish status GPS missing: %+v", got)
+	}
+	if !got.GPS.Valid || got.GPS.Satellites != 14 || !got.GPS.NoSatellitesAfterTTFF || got.GPS.Inhibited {
+		t.Fatalf("GPS=%+v", got.GPS)
+	}
+	if got.GPS.PNTFilterState != "FILTER_CONVERGED" || got.DisablementCode != "OKAY" || got.SecondsToFirstNonemptySlot != 0.8 {
+		t.Fatalf("diagnostic fields=%+v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"pnt_filter_state":"FILTER_CONVERGED"`)) || bytes.Contains(encoded, []byte(`"convergence_state"`)) {
+		t.Fatalf("status JSON=%s", encoded)
+	}
+	if available := snapshot.FieldAvailability[FieldGPS]; !available.Available {
+		t.Fatalf("GPS availability=%+v", available)
+	}
+}
+
+func TestStatusOmitsAbsentGPSAndMarksItUnavailableAfterThreePolls(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		response, err := cannedResponse(request)
+		if status := response.GetDishGetStatus(); status != nil {
+			status.GpsStats = nil
+		}
+		return response, err
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.backfillDone = true
+	for range 3 {
+		poller.pollStatus(context.Background())
+	}
+
+	snapshot := poller.Snapshot()
+	if snapshot.Dish == nil || snapshot.Dish.GPS != nil {
+		t.Fatalf("absent GPS rendered: %+v", snapshot.Dish)
+	}
+	availability, ok := snapshot.FieldAvailability[FieldGPS]
+	if !ok || availability.Available || availability.Reason == "" {
+		t.Fatalf("GPS availability=%+v tracked=%v", availability, ok)
+	}
+	encoded, err := json.Marshal(snapshot.Dish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"gps"`)) {
+		t.Fatalf("absent GPS JSON=%s", encoded)
 	}
 }
 

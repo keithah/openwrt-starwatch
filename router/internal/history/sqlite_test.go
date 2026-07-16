@@ -3,6 +3,7 @@ package history
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -47,15 +48,22 @@ func TestSQLiteFlushAggregatesMinuteAndQuarter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(minute) != 2 || minute[0].Value != 3 || valueOf(minute[0].Min) != 1 || valueOf(minute[0].Max) != 5 {
+	if len(minute) != 2 || minute[0].Value != 3 || valueOf(minute[0].Min) != 1 || valueOf(minute[0].Max) != 5 || minute[0].Samples != 3 {
 		t.Fatalf("minute: %#v", minute)
 	}
 	quarter, err := store.QueryTier(LatencyMS, TierQuarter, now.Add(-time.Hour), 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(quarter) != 1 || quarter[0].Value != 4.5 || valueOf(quarter[0].Min) != 1 || valueOf(quarter[0].Max) != 9 {
+	if len(quarter) != 1 || quarter[0].Value != 4.5 || valueOf(quarter[0].Min) != 1 || valueOf(quarter[0].Max) != 9 || quarter[0].Samples != 4 {
 		t.Fatalf("quarter: %#v", quarter)
+	}
+	encoded, err := json.Marshal(minute[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("samples")) {
+		t.Fatalf("internal sample count leaked into history JSON: %s", encoded)
 	}
 }
 

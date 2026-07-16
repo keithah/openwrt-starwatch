@@ -81,7 +81,7 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	if resolveGateway == nil && deps.configPath == "" {
 		resolveGateway = func(context.Context) (string, error) { return "", fmt.Errorf("router discovery disabled") }
 	}
-	routerPoller := dish.NewRouterPoller(dish.RouterPollerOptions{Topology: poller, ResolveGateway: resolveGateway})
+	routerPoller := dish.NewRouterPoller(dish.RouterPollerOptions{Topology: poller, ResolveGateway: resolveGateway, Now: deps.now})
 	routerDone := make(chan struct{})
 	go func() { routerPoller.Run(runCtx); close(routerDone) }()
 	reader := history.SpanReader(store)

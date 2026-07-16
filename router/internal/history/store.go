@@ -24,10 +24,11 @@ const (
 var ErrUnknownSeries = errors.New("unknown history series")
 
 type Point struct {
-	Time  time.Time `json:"time"`
-	Value float32   `json:"value"`
-	Min   *float32  `json:"min,omitempty"`
-	Max   *float32  `json:"max,omitempty"`
+	Time    time.Time `json:"time"`
+	Value   float32   `json:"value"`
+	Min     *float32  `json:"min,omitempty"`
+	Max     *float32  `json:"max,omitempty"`
+	Samples int64     `json:"-"`
 }
 
 type Writer interface {

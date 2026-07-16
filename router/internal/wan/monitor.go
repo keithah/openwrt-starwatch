@@ -231,11 +231,11 @@ func (m *Monitor) probeOnce(ctx context.Context) {
 }
 
 func (m *Monitor) updateProbeWindows(now time.Time) {
-	m.snapshot.ProbeRTT30sMS, m.snapshot.ProbeLoss30s = probeWindow(m.probes, now.Add(-30*time.Second))
-	m.snapshot.ProbeRTT5mMS, m.snapshot.ProbeLoss5m = probeWindow(m.probes, now.Add(-5*time.Minute))
+	m.snapshot.ProbeRTT30sMS, m.snapshot.ProbeLoss30s, m.snapshot.Probe30sAvailable = probeWindow(m.probes, now.Add(-30*time.Second))
+	m.snapshot.ProbeRTT5mMS, m.snapshot.ProbeLoss5m, m.snapshot.Probe5mAvailable = probeWindow(m.probes, now.Add(-5*time.Minute))
 }
 
-func probeWindow(samples []probeSample, since time.Time) (float32, float32) {
+func probeWindow(samples []probeSample, since time.Time) (float32, float32, bool) {
 	count, successes := 0, 0
 	var total time.Duration
 	for _, sample := range samples {
@@ -249,13 +249,13 @@ func probeWindow(samples []probeSample, since time.Time) (float32, float32) {
 		}
 	}
 	if count == 0 {
-		return 0, 0
+		return 0, 0, false
 	}
 	loss := float32(count-successes) / float32(count)
 	if successes == 0 {
-		return 0, loss
+		return 0, loss, true
 	}
-	return float32(total.Seconds()*1000) / float32(successes), loss
+	return float32(total.Seconds()*1000) / float32(successes), loss, true
 }
 
 func (m *Monitor) sampleCounters() {

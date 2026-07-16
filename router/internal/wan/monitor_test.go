@@ -119,6 +119,9 @@ func TestMonitorTracksProbeWindowsAndRouterRates(t *testing.T) {
 	if snapshot.ProbeRTT5mMS != 150 || snapshot.ProbeLoss5m < 0.333 || snapshot.ProbeLoss5m > 0.334 {
 		t.Fatalf("5m probe window: %+v", snapshot)
 	}
+	if !snapshot.Probe30sAvailable || !snapshot.Probe5mAvailable {
+		t.Fatalf("probe availability: %+v", snapshot)
+	}
 	for _, series := range []string{history.WANProbeRTTMS, history.WANProbeLoss, history.RouterDownBPS, history.RouterUpBPS} {
 		points, err := ram.Query(series, time.Time{}, 1000)
 		if err != nil || len(points) == 0 {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	device "github.com/clarkzjw/starlink-grpc-golang/pkg/spacex.com/api/device"
+	disablement "github.com/clarkzjw/starlink-grpc-golang/pkg/spacex.com/api/satellites/network/ut_disablement_codes"
 	"google.golang.org/grpc"
 )
 
@@ -158,7 +159,10 @@ func TestClientTypedReadWrappers(t *testing.T) {
 	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
 		switch request.GetRequest().(type) {
 		case *device.Request_GetStatus:
-			return &device.Response{Response: &device.Response_DishGetStatus{DishGetStatus: &device.DishGetStatusResponse{PopPingLatencyMs: 42}}}, nil
+			return &device.Response{Response: &device.Response_DishGetStatus{DishGetStatus: &device.DishGetStatusResponse{
+				PopPingLatencyMs: 42, SecondsToFirstNonemptySlot: 0.8, DisablementCode: disablement.UtDisablementCode_OKAY,
+				GpsStats: &device.DishGpsStats{GpsValid: true, GpsSats: 14, PntFilterConvergenceState: device.AttitudeEstimationState_FILTER_CONVERGED},
+			}}}, nil
 		case *device.Request_GetDeviceInfo:
 			return &device.Response{Response: &device.Response_GetDeviceInfo{GetDeviceInfo: &device.GetDeviceInfoResponse{DeviceInfo: &device.DeviceInfo{Id: "ut-test"}}}}, nil
 		case *device.Request_GetHistory:
@@ -178,7 +182,9 @@ func TestClientTypedReadWrappers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	status, err := client.GetStatus(ctx)
-	if err != nil || status.GetPopPingLatencyMs() != 42 {
+	if err != nil || status.GetPopPingLatencyMs() != 42 || status.GetGpsStats().GetGpsSats() != 14 ||
+		status.GetGpsStats().GetPntFilterConvergenceState().String() != "FILTER_CONVERGED" ||
+		status.GetSecondsToFirstNonemptySlot() != 0.8 || status.GetDisablementCode().String() != "OKAY" {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	info, err := client.GetDeviceInfo(ctx)
