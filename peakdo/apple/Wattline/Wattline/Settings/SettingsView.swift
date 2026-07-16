@@ -13,7 +13,14 @@ struct SettingsView: View {
                     deviceInfoSection
                 case .clock:
                     actionSection(title: "Device Clock") {
-                        Label("Sync now", systemImage: "clock.arrow.circlepath")
+                        Button {
+                            Task { await model.syncClock() }
+                        } label: {
+                            Label("Sync now", systemImage: "clock.arrow.circlepath")
+                        }
+                        Text(model.clockStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 case .dcPort:
                     actionSection(title: "Power") {
@@ -23,7 +30,9 @@ struct SettingsView: View {
                             presentation: SettingsStatusPresentation(
                                 value: model.state.dc?.enabled,
                                 freshness: model.state.freshness
-                            )
+                            ),
+                            isPending: isDCPending,
+                            action: { model.setDC(!(model.state.dc?.enabled ?? false)) }
                         )
                     }
                 case .bypass:
@@ -34,7 +43,9 @@ struct SettingsView: View {
                             presentation: SettingsStatusPresentation(
                                 value: model.state.dc?.bypassOn,
                                 freshness: model.state.freshness
-                            )
+                            ),
+                            isPending: isBypassPending,
+                            action: { model.setBypass(!(model.state.dc?.bypassOn ?? false)) }
                         )
                     }
                 case .restart:
@@ -62,6 +73,18 @@ struct SettingsView: View {
 
     private var isConnected: Bool {
         model.connectionStatus == .connected
+    }
+
+    private var isDCPending: Bool {
+        model.state.pendingMutations.contains { mutation in
+            mutation.reconciler == .dcEnabled(true) || mutation.reconciler == .dcEnabled(false)
+        }
+    }
+
+    private var isBypassPending: Bool {
+        model.state.pendingMutations.contains { mutation in
+            mutation.reconciler == .bypass(true) || mutation.reconciler == .bypass(false)
+        }
     }
 
     private var composition: SettingsComposition {
@@ -114,9 +137,12 @@ struct SettingsView: View {
     private func settingsStatusRow(
         title: String,
         systemImage: String,
-        presentation: SettingsStatusPresentation
+        presentation: SettingsStatusPresentation,
+        isPending: Bool = false,
+        action: (() -> Void)? = nil
     ) -> some View {
-        HStack {
+        Button(action: { action?() }) {
+          HStack {
             Label(title, systemImage: systemImage)
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
@@ -125,10 +151,14 @@ struct SettingsView: View {
                     Text("Cached")
                         .font(.caption)
                 }
-            }
+                }
                 .foregroundStyle(.secondary)
                 .opacity(presentation.isStale ? 0.55 : 1)
+            if isPending { ProgressView().controlSize(.small) }
+          }
         }
+        .buttonStyle(.plain)
+        .disabled(!isConnected || isPending || action == nil)
     }
 
     private func deviceInfoValue(_ value: String) -> some View {

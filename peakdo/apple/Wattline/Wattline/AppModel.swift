@@ -142,6 +142,13 @@ final class AppModel {
     var pendingLimits: [PowerLimitType] = []
     var toastMessage: String?
     var demoChargerConnected = false
+    private(set) var lastClockSync: Date?
+    private(set) var deviceClockDrift: TimeInterval?
+
+    var clockStatusText: String {
+        guard let drift = deviceClockDrift else { return "Drift unavailable" }
+        return String(format: "Drift %.1fs", drift)
+    }
 
     private(set) var knownDevices: [UUID: CachedIdentity]
     private let persistence: AppPersistence
@@ -397,6 +404,32 @@ final class AppModel {
 
     func setDC(_ enabled: Bool) {
         performPortMutation(.setDC(enabled))
+    }
+
+    func setBypass(_ enabled: Bool) {
+        performPortMutation(.setBypass(enabled))
+    }
+
+    func syncClock() async {
+        do {
+            try await deviceOperationBroker.syncClock(generation: transportGeneration)
+            lastClockSync = persistence.currentDate
+            await refreshClockDrift()
+        } catch {
+            showToast(String(describing: error))
+        }
+    }
+
+    func refreshClockDrift() async {
+        do {
+            guard let date = try await deviceOperationBroker.readClock(generation: transportGeneration) else {
+                deviceClockDrift = nil
+                return
+            }
+            deviceClockDrift = abs(date.timeIntervalSince(persistence.currentDate))
+        } catch {
+            deviceClockDrift = nil
+        }
     }
 
     func setTypeCOutput(_ enabled: Bool) {
@@ -1026,10 +1059,10 @@ final class AppModel {
     }
 
     private func performPortMutation(_ command: DeviceCommand) {
-        guard let session else { return }
         Task { [weak self] in
             do {
-                _ = try await session.perform(command)
+                guard let self else { return }
+                _ = try await deviceOperationBroker.perform(command, generation: transportGeneration)
             } catch {
                 guard let self else { return }
                 showToast(String(describing: error))
