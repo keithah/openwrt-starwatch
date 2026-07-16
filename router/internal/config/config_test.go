@@ -6,7 +6,24 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"starwatch/internal/alert"
 )
+
+func TestAlertDefaultsMatchEngineCatalog(t *testing.T) {
+	cfg := defaults()
+	want := alert.DefaultRules()
+	if len(cfg.Alerts.Rules) != len(want) {
+		t.Fatalf("config rules=%d engine rules=%d", len(cfg.Alerts.Rules), len(want))
+	}
+	for name, rule := range want {
+		got, ok := cfg.Alerts.Rules[name]
+		if !ok || got.Enabled != rule.Enabled || got.Threshold != rule.Threshold ||
+			got.Threshold2 != rule.Threshold2 || got.Hold != rule.Hold || got.ClearHold != rule.ClearHold {
+			t.Fatalf("rule %q: config=%+v present=%v engine=%+v", name, got, ok, rule)
+		}
+	}
+}
 
 func configFile(t *testing.T, body string) string {
 	t.Helper()

@@ -86,6 +86,13 @@ type Engine struct {
 	states        map[string]*alertState
 	mu            sync.RWMutex
 	suppressUntil time.Time
+	obstruction   obstructionCache
+}
+
+type obstructionCache struct {
+	at      time.Time
+	average float64
+	valid   bool
 }
 
 var catalogOrder = []string{
@@ -224,23 +231,11 @@ func (e *Engine) evaluate(name string, rule Rule, inputs Inputs, now time.Time) 
 		result.active = inputs.WAN.ProbeLoss5m > float32(rule.Threshold) || inputs.WAN.ProbeRTT5mMS > float32(rule.Threshold2)
 		result.detail = map[string]any{"loss_5m": inputs.WAN.ProbeLoss5m, "rtt_5m_ms": inputs.WAN.ProbeRTT5mMS}
 	case "obstruction_high":
-		if e.history == nil {
-			return result
-		}
-		query, err := e.history.QuerySpan(history.ObstructionFraction, now.Add(-24*time.Hour), 24*time.Hour, 0)
-		if err != nil {
+		average, ok := e.obstructionAverage(now)
+		if !ok {
 			result.known = false
 			return result
 		}
-		if len(query.Points) == 0 {
-			result.known = false
-			return result
-		}
-		var total float64
-		for _, point := range query.Points {
-			total += float64(point.Value)
-		}
-		average := total / float64(len(query.Points))
 		result.active = average > rule.Threshold
 		result.detail = map[string]any{"fraction_24h": average}
 	case "thermal_throttle":
@@ -263,6 +258,31 @@ func (e *Engine) evaluate(name string, rule Rule, inputs Inputs, now time.Time) 
 		result.active = inputs.Dish.Dish.SoftwareUpdateState == "REBOOT_REQUIRED" || inputs.Dish.Dish.Alerts["install_pending"]
 	}
 	return result
+}
+
+func (e *Engine) obstructionAverage(now time.Time) (float64, bool) {
+	if e.history == nil {
+		return 0, false
+	}
+	e.mu.RLock()
+	cached := e.obstruction
+	e.mu.RUnlock()
+	if cached.valid && now.Sub(cached.at) >= 0 && now.Sub(cached.at) < time.Minute {
+		return cached.average, true
+	}
+	query, err := e.history.QuerySpan(history.ObstructionFraction, now.Add(-24*time.Hour), 24*time.Hour, 0)
+	if err != nil || len(query.Points) == 0 {
+		return 0, false
+	}
+	var total float64
+	for _, point := range query.Points {
+		total += float64(point.Value)
+	}
+	average := total / float64(len(query.Points))
+	e.mu.Lock()
+	e.obstruction = obstructionCache{at: now, average: average, valid: true}
+	e.mu.Unlock()
+	return average, true
 }
 
 func (e *Engine) dishUnreachableSuppressUntil() time.Time {

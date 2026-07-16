@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"starwatch/internal/alert"
 )
 
 type Config struct {
@@ -56,26 +58,14 @@ func defaults() *Config {
 }
 
 func defaultAlerts() AlertsConfig {
-	rules := make(map[string]AlertRuleConfig)
-	for _, name := range []string{
-		"outage_started", "dish_unreachable", "path_degraded", "obstruction_high",
-		"thermal_throttle", "thermal_shutdown", "motors_stuck", "water_detected",
-		"mast_not_vertical", "slow_ethernet", "firmware_pending",
-	} {
-		rules[name] = AlertRuleConfig{Enabled: true}
+	defaults := alert.DefaultRules()
+	rules := make(map[string]AlertRuleConfig, len(defaults))
+	for name, rule := range defaults {
+		rules[name] = AlertRuleConfig{
+			Enabled: rule.Enabled, Threshold: rule.Threshold, Threshold2: rule.Threshold2,
+			Hold: rule.Hold, ClearHold: rule.ClearHold,
+		}
 	}
-	outage := rules["outage_started"]
-	outage.Hold = 30 * time.Second
-	rules["outage_started"] = outage
-	unreachable := rules["dish_unreachable"]
-	unreachable.Hold = time.Minute
-	rules["dish_unreachable"] = unreachable
-	path := rules["path_degraded"]
-	path.Threshold, path.Threshold2, path.ClearHold = .2, 300, 5*time.Minute
-	rules["path_degraded"] = path
-	obstruction := rules["obstruction_high"]
-	obstruction.Threshold = .02
-	rules["obstruction_high"] = obstruction
 	return AlertsConfig{Rules: rules}
 }
 

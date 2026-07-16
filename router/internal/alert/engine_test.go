@@ -20,6 +20,16 @@ type eventSink struct{ events []history.Event }
 
 func (s *eventSink) AddEvent(item history.Event) { s.events = append(s.events, item) }
 
+type countingSpanReader struct {
+	calls int
+	now   time.Time
+}
+
+func (r *countingSpanReader) QuerySpan(string, time.Time, time.Duration, int) (history.QueryResult, error) {
+	r.calls++
+	return history.QueryResult{Tier: history.TierRAM, Points: []history.Point{{Time: r.now, Value: .03}}}, nil
+}
+
 func testRules() map[string]Rule {
 	rules := DefaultRules()
 	rules["path_degraded"] = Rule{Enabled: true, Severity: SeverityWarning, Threshold: .2, Threshold2: 300, ClearHold: 5 * time.Minute}
@@ -154,5 +164,24 @@ func TestDishFlagsFirmwareAndObstructionFireAndPersistExactEvents(t *testing.T) 
 		if err := json.Unmarshal([]byte(events.events[i].Detail), &decoded); err != nil || decoded.Alert != notification.Alert {
 			t.Fatalf("event detail=%q decoded=%+v err=%v", events.events[i].Detail, decoded, err)
 		}
+	}
+}
+
+func TestObstructionAverageIsCachedForSixtySeconds(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	reader := &countingSpanReader{now: now}
+	rules := map[string]Rule{"obstruction_high": DefaultRules()["obstruction_high"]}
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, History: reader})
+
+	engine.Tick(Inputs{})
+	now = now.Add(time.Second)
+	engine.Tick(Inputs{})
+	if reader.calls != 1 {
+		t.Fatalf("24-hour history query calls = %d, want 1", reader.calls)
+	}
+	now = now.Add(59 * time.Second)
+	engine.Tick(Inputs{})
+	if reader.calls != 2 {
+		t.Fatalf("24-hour history query calls after cache expiry = %d, want 2", reader.calls)
 	}
 }

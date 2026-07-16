@@ -105,6 +105,22 @@ func TestTimelineDeduplicatesSuccessiveDishUpdatesAndClosesOngoing(t *testing.T)
 	}
 }
 
+func TestIngestDishPrunesClosedDedupKeysOlderThanOneHour(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	timeline := NewTimeline(Options{Now: func() time.Time { return now }})
+	old := DishReport{Cause: "NO_DOWNLINK", Start: now.Add(-2 * time.Hour), Duration: time.Minute}
+	timeline.IngestDish([]DishReport{old})
+	if len(timeline.seen) != 1 {
+		t.Fatalf("seen entries after first ingest = %d, want 1", len(timeline.seen))
+	}
+
+	now = now.Add(2 * time.Hour)
+	timeline.IngestDish(nil)
+	if len(timeline.seen) != 0 {
+		t.Fatalf("seen entries after pruning = %d, want 0", len(timeline.seen))
+	}
+}
+
 func TestPathOutageRequiresThirtySecondsOfTotalLossWhileDishConnected(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	timeline := NewTimeline(Options{Now: func() time.Time { return now }})

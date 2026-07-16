@@ -46,8 +46,13 @@ type Timeline struct {
 	persistence Persistence
 	events      event.Publisher
 	entries     map[string]Entry
-	seen        map[string]time.Duration
+	seen        map[string]seenEntry
 	pathPending time.Time
+}
+
+type seenEntry struct {
+	duration time.Duration
+	end      time.Time
 }
 
 func NewTimeline(options Options) *Timeline {
@@ -56,11 +61,12 @@ func NewTimeline(options Options) *Timeline {
 	}
 	return &Timeline{
 		now: options.Now, persistence: options.Persistence, events: options.Events,
-		entries: make(map[string]Entry), seen: make(map[string]time.Duration),
+		entries: make(map[string]Entry), seen: make(map[string]seenEntry),
 	}
 }
 
 func (t *Timeline) IngestDish(reports []DishReport) {
+	t.pruneSeenDish()
 	for _, report := range reports {
 		if report.Start.IsZero() {
 			continue
@@ -68,9 +74,9 @@ func (t *Timeline) IngestDish(reports []DishReport) {
 		key := entryKey(SourceDish, report.Cause, report.Start)
 		t.mu.Lock()
 		current, exists := t.entries[key]
-		closedDuration, alreadyClosed := t.seen[key]
+		closed, alreadyClosed := t.seen[key]
 		incoming := Entry{Source: SourceDish, Cause: report.Cause, Start: report.Start, Duration: report.Duration, Ongoing: report.Duration <= 0}
-		if (alreadyClosed && (incoming.Ongoing || incoming.Duration <= closedDuration)) || (exists && incoming.Ongoing) {
+		if (alreadyClosed && (incoming.Ongoing || incoming.Duration <= closed.duration)) || (exists && incoming.Ongoing) {
 			t.mu.Unlock()
 			continue
 		}
@@ -78,7 +84,7 @@ func (t *Timeline) IngestDish(reports []DishReport) {
 			t.entries[key] = incoming
 		} else {
 			delete(t.entries, key)
-			t.seen[key] = incoming.Duration
+			t.seen[key] = seenEntry{duration: incoming.Duration, end: incoming.Start.Add(incoming.Duration)}
 			if t.persistence == nil {
 				t.entries[key] = incoming
 			}
@@ -91,6 +97,17 @@ func (t *Timeline) IngestDish(reports []DishReport) {
 			if exists && current.Ongoing {
 				t.publish("outage_ended", incoming)
 			}
+		}
+	}
+}
+
+func (t *Timeline) pruneSeenDish() {
+	cutoff := t.now().Add(-time.Hour)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key, closed := range t.seen {
+		if !closed.end.IsZero() && closed.end.Before(cutoff) {
+			delete(t.seen, key)
 		}
 	}
 }
@@ -122,7 +139,7 @@ func (t *Timeline) ObserveDish(reachable bool, failureSince time.Time) {
 	current.Duration = nonnegativeDuration(now.Sub(current.Start))
 	current.Ongoing = false
 	closedKey := entryKey(current.Source, current.Cause, current.Start)
-	t.seen[closedKey] = current.Duration
+	t.seen[closedKey] = seenEntry{duration: current.Duration, end: current.Start.Add(current.Duration)}
 	if t.persistence == nil {
 		t.entries[closedKey] = current
 	}
@@ -166,7 +183,7 @@ func (t *Timeline) ObservePath(dishConnected, allProbesLost bool) {
 	current.Duration = nonnegativeDuration(now.Sub(current.Start))
 	current.Ongoing = false
 	closedKey := entryKey(current.Source, current.Cause, current.Start)
-	t.seen[closedKey] = current.Duration
+	t.seen[closedKey] = seenEntry{duration: current.Duration, end: current.Start.Add(current.Duration)}
 	if t.persistence == nil {
 		t.entries[closedKey] = current
 	}
