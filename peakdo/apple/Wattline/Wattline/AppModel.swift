@@ -2,6 +2,7 @@ import CoreBluetooth
 import Foundation
 import Observation
 import WattlineCore
+import WattlineUI
 
 @MainActor
 @Observable
@@ -163,6 +164,26 @@ final class AppModel {
 
     var lowBatteryEnabled: Bool { persistence.lowBatteryEnabled }
     var lowBatteryThreshold: Int { persistence.lowBatteryThreshold }
+    var systemSurfacePreferences: SystemSurfacePreferences { persistence.systemSurfacePreferences }
+
+    func setLiveActivityCharging(_ enabled: Bool) {
+        var preferences = persistence.systemSurfacePreferences
+        preferences.liveActivityCharging = enabled
+        persistence.systemSurfacePreferences = preferences
+    }
+
+    func setLiveActivityDischarging(_ enabled: Bool) {
+        var preferences = persistence.systemSurfacePreferences
+        preferences.liveActivityDischarging = enabled
+        persistence.systemSurfacePreferences = preferences
+    }
+
+    func setLowBatteryThreshold(_ threshold: Int) {
+        var preferences = persistence.systemSurfacePreferences
+        preferences.lowBatteryThreshold = threshold
+        persistence.systemSurfacePreferences = preferences
+        lowBatteryNotificationCoordinator.setThreshold(preferences.lowBatteryThreshold)
+    }
 
     func setLowBatteryEnabled(_ enabled: Bool) async -> NotificationActionResult {
         let result = await lowBatteryNotificationCoordinator.setEnabled(enabled)
@@ -170,6 +191,9 @@ final class AppModel {
         // must leave the user preference off so a later retry remains possible.
         if result == .success {
             persistence.lowBatteryEnabled = enabled
+            var preferences = persistence.systemSurfacePreferences
+            preferences.lowBatteryEnabled = enabled
+            persistence.systemSurfacePreferences = preferences
         }
         return result
     }
@@ -256,6 +280,12 @@ final class AppModel {
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
+
+        if persistence.systemSurfacePreferences.lowBatteryEnabled {
+            Task { @MainActor [weak self] in
+                await self?.lowBatteryNotificationCoordinator.restoreEnabled()
+            }
+        }
 
         if onboardingComplete {
             startReturningSession()

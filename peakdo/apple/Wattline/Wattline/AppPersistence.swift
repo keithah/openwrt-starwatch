@@ -1,5 +1,6 @@
 import Foundation
 import WattlineCore
+import WattlineUI
 
 struct PersistedObservation<Value: Codable & Equatable & Sendable>: Codable, Equatable, Sendable {
     let value: Value
@@ -33,6 +34,7 @@ final class AppPersistence {
     static let lastSuccessfulPeripheralIDKey = "lastSuccessfulPeripheralID"
     static let lowBatteryEnabledKey = "lowBatteryEnabled"
     static let lowBatteryThresholdKey = "lowBatteryThreshold"
+    static let systemSurfacePreferencesKey = "systemSurfacePreferences"
 
     private let defaults: UserDefaults
     private let wallClock: @MainActor () -> Date
@@ -73,6 +75,22 @@ final class AppPersistence {
             return min(max(defaults.integer(forKey: Self.lowBatteryThresholdKey), 1), 99)
         }
         set { defaults.set(min(max(newValue, 1), 99), forKey: Self.lowBatteryThresholdKey) }
+    }
+
+    var systemSurfacePreferences: SystemSurfacePreferences {
+        get {
+            guard let data = defaults.data(forKey: Self.systemSurfacePreferencesKey),
+                  let value = try? JSONDecoder().decode(SystemSurfacePreferences.self, from: data) else {
+                return SystemSurfacePreferences(lowBatteryEnabled: lowBatteryEnabled, lowBatteryThreshold: lowBatteryThreshold)
+            }
+            return value
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            defaults.set(data, forKey: Self.systemSurfacePreferencesKey)
+            lowBatteryEnabled = newValue.lowBatteryEnabled
+            lowBatteryThreshold = newValue.lowBatteryThreshold
+        }
     }
 
     func loadKnownDevices() -> [UUID: AppModel.CachedIdentity] {

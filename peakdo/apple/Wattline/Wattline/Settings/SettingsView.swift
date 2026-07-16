@@ -65,6 +65,8 @@ struct SettingsView: View {
                         }
                         .disabled(!isConnected || model.maintenanceState != .idle)
                     }
+                case .systemSurfaces:
+                    systemSurfacesSection
                 }
             }
 
@@ -130,6 +132,31 @@ struct SettingsView: View {
             capabilities: model.capabilities,
             isApplicationMode: model.state.identity?.mode == .application
         )
+    }
+
+    @ViewBuilder
+    private var systemSurfacesSection: some View {
+        Section("System Surfaces") {
+            Toggle("Live Activity while charging", isOn: Binding(
+                get: { model.systemSurfacePreferences.liveActivityCharging },
+                set: { model.setLiveActivityCharging($0) }
+            ))
+            Toggle("Live Activity while discharging", isOn: Binding(
+                get: { model.systemSurfacePreferences.liveActivityDischarging },
+                set: { model.setLiveActivityDischarging($0) }
+            ))
+            Toggle("Low-battery notifications", isOn: Binding(
+                get: { model.systemSurfacePreferences.lowBatteryEnabled },
+                set: { enabled in Task { _ = await model.setLowBatteryEnabled(enabled) } }
+            ))
+            if model.systemSurfacePreferences.lowBatteryEnabled {
+                Stepper("Threshold (model.systemSurfacePreferences.lowBatteryThreshold)%", value: Binding(
+                    get: { model.systemSurfacePreferences.lowBatteryThreshold },
+                    set: { model.setLowBatteryThreshold($0) }
+                ), in: 1...99)
+                .font(.system(.body, design: .monospaced))
+            }
+        }
     }
 
     private var identityPresentation: SettingsIdentityPresentation {

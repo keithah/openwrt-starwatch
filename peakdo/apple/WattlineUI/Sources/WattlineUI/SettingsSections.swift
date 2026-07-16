@@ -7,6 +7,7 @@ public enum SettingsRow: Equatable, Hashable, Sendable {
     case bypass
     case restart
     case shutdown
+    case systemSurfaces
 }
 
 public struct SettingsComposition: Equatable, Sendable {
@@ -29,6 +30,7 @@ public struct SettingsComposition: Equatable, Sendable {
         if capabilities.hasBypass && capabilities.hasBypassControl {
             rows.append(.bypass)
         }
+        if capabilities.hasBattery { rows.append(.systemSurfaces) }
         rows.append(.restart)
         if capabilities.canShutdown {
             rows.append(.shutdown)

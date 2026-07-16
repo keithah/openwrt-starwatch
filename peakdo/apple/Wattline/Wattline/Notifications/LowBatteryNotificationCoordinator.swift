@@ -78,11 +78,23 @@ final class LowBatteryNotificationCoordinator {
         } else { isEnabled = false; policy = LowBatteryPolicy(threshold: policy.threshold); return .success }
     }
 
+    /// Restores a previously authorized preference without prompting during launch.
+    func restoreEnabled() async {
+        guard !isEnabled else { return }
+        isEnabled = true
+        authorizationRequested = true
+        await notifications.registerLowBatteryCategory(includeDCAction: capabilities().hasDCControl)
+    }
+
     func receive(_ snapshot: SharedDeviceSnapshot) async {
         guard isEnabled, let battery = snapshot.battery else { return }
         if policy.evaluate(level: Int(battery.level), status: battery.status, enabled: true, hasBattery: true) == .alert {
             try? await notifications.postLowBattery(level: Int(battery.level), threshold: policy.threshold)
         }
+    }
+
+    func setThreshold(_ threshold: Int) {
+        policy = LowBatteryPolicy(threshold: threshold)
     }
 
     func handleAction(identifier: String) async -> NotificationActionResult {
