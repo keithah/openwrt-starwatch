@@ -12,8 +12,7 @@ The admin-panel packages pass the generated token to the dashboard through a
 small authenticated RPC bridge, so the router login remains the access
 boundary.
 
-> Screenshot placeholder: add the GL.iNet dashboard capture after the §13.4
-> on-device verification pass.
+> Screenshot placeholder: add the GL.iNet dashboard capture.
 
 ## Build the packages
 
@@ -27,11 +26,11 @@ ls -la package/out/*.ipk
 
 The build produces:
 
-- `starwatchd_1.0.0_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
+- `starwatchd_1.0.1_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
   UCI configuration, guarded dish route, token generator, and procd service.
-- `luci-app-starwatch_1.0.0_all.ipk` — LuCI menu, one-method rpcd bridge, and
+- `luci-app-starwatch_1.0.1_all.ipk` — LuCI menu, one-method rpcd bridge, and
   iframe launcher.
-- `gl-app-starwatch_1.0.0_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
+- `gl-app-starwatch_1.0.1_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
   evaluated Vue 2 iframe view.
 
 The outer `.ipk` is a **gzipped ustar tar**, not an `ar` archive. Its three
@@ -67,9 +66,9 @@ for f in package/out/*.ipk; do
 done
 
 ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/starwatchd_1.0.0_aarch64_cortex-a53.ipk \
-  /tmp/luci-app-starwatch_1.0.0_all.ipk \
-  /tmp/gl-app-starwatch_1.0.0_all.ipk'
+  /tmp/starwatchd_1.0.1_aarch64_cortex-a53.ipk \
+  /tmp/luci-app-starwatch_1.0.1_all.ipk \
+  /tmp/gl-app-starwatch_1.0.1_all.ipk'
 ```
 
 Install either admin-panel package or both. `starwatchd`'s post-install script
@@ -77,7 +76,13 @@ runs `/etc/uci-defaults/99-starwatch`, enables the service, and **restarts** it
 so upgrades immediately use the new binary. The defaults script generates a
 token when empty. It adds `network.starwatch_dish`, a `/32` route through the
 logical `wan` interface, only when neither UCI nor the live kernel table already
-contains a dish host route.
+contains a dish host route. Behind a Starlink router it includes the WAN
+gateway; bypass/direct-DHCP setups without a gateway use a link-scope route.
+
+GL.iNet 4.x ships the LuCI libraries without a theme. Install Bootstrap before
+the LuCI launcher with `opkg install luci-theme-bootstrap`. The GL admin-panel
+menu is loaded at login, so log out and back in once after installing
+`gl-app-starwatch` for **Applications → Starwatch** to appear.
 
 ## Install and upgrade from an opkg feed
 

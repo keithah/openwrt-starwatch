@@ -133,6 +133,30 @@ func TestRefreshOmitsMwanWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestGLManagedDetectsDeviceVerifiedMwanSignals(t *testing.T) {
+	tests := []struct {
+		name    string
+		paths   map[string]bool
+		outputs map[string]string
+		want    bool
+	}{
+		{name: "legacy config", paths: map[string]bool{"/etc/config/mwan": true}, want: true},
+		{name: "kmwan config", paths: map[string]bool{"/etc/config/kmwan": true}, want: true},
+		{name: "legacy ubus", outputs: map[string]string{"ubus list mwan": "mwan\n"}, want: true},
+		{name: "kmwan ubus", outputs: map[string]string{"ubus list hotplug.kmwan": "hotplug.kmwan\n"}, want: true},
+		{name: "absent", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{outputs: test.outputs, errors: map[string]error{}}
+			exists := func(path string) bool { return test.paths[path] }
+			if got := detectGLManaged(context.Background(), runner, exists); got != test.want {
+				t.Fatalf("detectGLManaged()=%v commands=%v", got, runner.commands)
+			}
+		})
+	}
+}
+
 func TestAssistAvailabilityMatrix(t *testing.T) {
 	base := func() *fakeRunner {
 		return &fakeRunner{outputs: map[string]string{"ubus call mwan3 status": `{"interfaces":{"wan":{"status":"online"},"wwan":{"status":"online"}}}`, "uci show mwan3": ""}, errors: map[string]error{}}

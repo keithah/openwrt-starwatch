@@ -63,17 +63,31 @@ func NewManager(options Options) *Manager {
 		options.Now = time.Now
 	}
 	if options.GLManaged == nil {
-		// This deliberately conservative heuristic must be verified on current
-		// GL.iNet firmware on-device before §13.4 can be closed.
+		// GL-X3000 firmware 4.8.3 was verified to use kmwan. Keep the legacy
+		// mwan signals as well for older GL.iNet firmware.
 		options.GLManaged = func(ctx context.Context) bool {
-			if _, err := os.Stat("/etc/config/mwan"); err == nil {
-				return true
-			}
-			output, err := options.Runner.Run(ctx, "ubus", []string{"list", "mwan"}, "")
-			return err == nil && strings.TrimSpace(string(output)) != ""
+			return detectGLManaged(ctx, options.Runner, func(path string) bool {
+				_, err := os.Stat(path)
+				return err == nil
+			})
 		}
 	}
 	return &Manager{options: options}
+}
+
+func detectGLManaged(ctx context.Context, runner Runner, pathExists func(string) bool) bool {
+	for _, path := range []string{"/etc/config/mwan", "/etc/config/kmwan"} {
+		if pathExists(path) {
+			return true
+		}
+	}
+	for _, object := range []string{"mwan", "hotplug.kmwan"} {
+		output, err := runner.Run(ctx, "ubus", []string{"list", object}, "")
+		if err == nil && strings.TrimSpace(string(output)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) Run(ctx context.Context) {
@@ -203,8 +217,8 @@ func proposedChanges(primary, backup string, replaceExampleRule bool) []Change {
 		{Package: "mwan3", Section: "starwatch_default", Option: "dest_ip", Value: "0.0.0.0/0"},
 		{Package: "mwan3", Section: "starwatch_default", Option: "use_policy", Value: "starwatch_failover"},
 	}
-	// The generated shape still needs the §13.4 on-device verification pass on
-	// current generic OpenWrt and GL.iNet firmware before that question closes.
+	// The GL coexistence guard and this generated shape were verified on a
+	// GL-X3000 running firmware 4.8.3; generic OpenWrt remains supported.
 	if replaceExampleRule {
 		changes = append(changes, Change{Package: "mwan3", Section: "default_rule_v4", Option: "enabled", Value: "0"})
 	}

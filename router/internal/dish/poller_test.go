@@ -337,6 +337,43 @@ func TestStatusPowerIsLabeledAsStatusSource(t *testing.T) {
 	}
 }
 
+func TestZeroStatusPowerUsesNonzeroHistoryFallback(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		response, err := cannedResponse(request)
+		if statusResponse := response.GetDishGetStatus(); statusResponse != nil {
+			statusResponse.UpsuStats.DishPower = 0
+		}
+		return response, err
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.backfill(context.Background())
+	poller.pollStatus(context.Background())
+	got := poller.Snapshot().Dish
+	if got == nil || got.PowerW == nil || *got.PowerW != 42 || got.PowerSource != "history" {
+		t.Fatalf("zero status power fallback: %+v", got)
+	}
+	if poller.usesStatusPower() {
+		t.Fatal("zero status power was treated as usable")
+	}
+}
+
+func TestZeroStatusPowerWithoutFallbackIsUnavailable(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		response, err := cannedResponse(request)
+		if statusResponse := response.GetDishGetStatus(); statusResponse != nil {
+			statusResponse.UpsuStats.DishPower = 0
+		}
+		return response, err
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.backfillDone = true
+	poller.pollStatus(context.Background())
+	got := poller.Snapshot().Dish
+	if got == nil || got.PowerW != nil || got.PowerSource != "" {
+		t.Fatalf("fake zero power rendered: %+v", got)
+	}
+}
+
 func TestSaneClockTriggersDeferredBackfill(t *testing.T) {
 	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {

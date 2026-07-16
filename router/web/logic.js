@@ -38,6 +38,7 @@ export function minutesLabel(minutes) {
 }
 
 const MODEL_PREFIXES = [
+  ['mini1_panda', 'Starlink Mini'],
   ['rev_mini', 'Starlink Mini'],
   ['rev_hp', 'Flat High Performance'],
   ['rev4', 'Standard (Gen 3)'],
@@ -113,5 +114,5 @@ export function outageBarLayout(outage, nowMilliseconds = Date.now(), spanSecond
 
 export function hasMotors(hardwareVersion = '') {
   const value = hardwareVersion.toLowerCase();
-  return !(value.startsWith('rev_mini') || value.startsWith('rev_hp') || value.startsWith('rev4'));
+  return !(value.includes('mini') || value.startsWith('rev_hp') || value.startsWith('rev4'));
 }

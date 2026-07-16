@@ -7,7 +7,7 @@
 <script type="module">
 import {
   deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
-  friendlyModel, assembleSeries, outageBarLayout,
+  friendlyModel, hasMotors, assembleSeries, outageBarLayout,
 } from './logic.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 
@@ -28,6 +28,8 @@ try {
   assert('local to UTC wraps', localMinutesToUTC(30, -120) === 1350);
   assert('UTC to local wraps', utcMinutesToLocal(1350, -120) === 30);
   assert('known model gets friendly name', friendlyModel('rev_mini_prod1').includes('Mini'));
+  assert('Mini panda model gets friendly name', friendlyModel('mini1_panda_prod1') === 'Starlink Mini');
+  assert('Mini panda model is motorless', hasMotors('mini1_panda_prod1') === false);
   assert('unknown model remains raw', friendlyModel('future_dish') === 'future_dish');
   const aligned = assembleSeries([
     {series: 'a', tier: 'ram', points: [{time: '2026-01-01T00:00:00Z', value: 1}, {time: '2026-01-01T00:00:02Z', value: 3}]},

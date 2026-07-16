@@ -287,7 +287,7 @@ func (p *Poller) pollStatus(parent context.Context) {
 	} else {
 		p.failed(FieldAlignment)
 	}
-	if power := status.GetUpsuStats(); power != nil {
+	if power := status.GetUpsuStats(); power != nil && power.GetDishPower() > 0 {
 		p.succeeded(FieldPower)
 		value := power.GetDishPower()
 		dishStatus.PowerW = &value
@@ -502,6 +502,9 @@ func (p *Poller) powerFallback() *float32 {
 }
 
 func (p *Poller) setPowerFallback(value float32) {
+	if value <= 0 {
+		return
+	}
 	p.historyMu.Lock()
 	p.historyPower = &value
 	p.historyMu.Unlock()

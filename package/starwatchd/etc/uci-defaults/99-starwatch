@@ -7,9 +7,42 @@ if [ -z "$tok" ]; then
 	uci commit starwatch
 fi
 
-# Add the dish host route only when neither UCI nor the live kernel table
-# already contains one. Keep this conservative until §13.4 is verified on
-# additional router/WAN combinations.
+# Topology B must route through the Starlink router gateway. Without the
+# gateway, a link-scope route can escape through the wrong interface on a
+# multi-WAN router. Topology A (bypass/direct DHCP) has no gateway and keeps
+# the link-scope form.
+wan_gateway=""
+if [ -r /lib/functions/network.sh ]; then
+	. /lib/functions/network.sh
+	if command -v network_get_gateway >/dev/null 2>&1; then
+		network_get_gateway wan_gateway wan 2>/dev/null || true
+	fi
+fi
+if [ -z "$wan_gateway" ] && command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+	wan_gateway="$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.route[@.target="0.0.0.0"].nexthop' | head -n 1)"
+fi
+
+# Reconcile the route created by an older Starwatch package so an opkg upgrade
+# gains (or removes) the gateway without creating a second section.
+if [ "$(uci -q get network.starwatch_dish)" = "route" ]; then
+	current_gateway="$(uci -q get network.starwatch_dish.gateway)"
+	route_changed=0
+	if [ -n "$wan_gateway" ] && [ "$current_gateway" != "$wan_gateway" ]; then
+		uci set network.starwatch_dish.gateway="$wan_gateway"
+		route_changed=1
+	elif [ -z "$wan_gateway" ] && [ -n "$current_gateway" ]; then
+		uci -q delete network.starwatch_dish.gateway
+		route_changed=1
+	fi
+	if [ "$route_changed" -eq 1 ]; then
+		uci commit network
+		/etc/init.d/network reload >/dev/null 2>&1 || true
+	fi
+	exit 0
+fi
+
+# Add the dish host route only when neither another UCI section nor the live
+# kernel table already contains one.
 uci_route=0
 if uci -q show network | grep -Eq "\.target='192\.168\.100\.1(/32)?'$"; then
 	uci_route=1
@@ -38,6 +71,9 @@ set network.starwatch_dish='route'
 set network.starwatch_dish.interface='wan'
 set network.starwatch_dish.target='192.168.100.1/32'
 EOF
+	if [ -n "$wan_gateway" ]; then
+		uci set network.starwatch_dish.gateway="$wan_gateway"
+	fi
 	uci commit network
 	/etc/init.d/network reload >/dev/null 2>&1 || true
 fi

@@ -131,7 +131,7 @@ config alerts
 | | Topology | Dish reachability | Behavior |
 |---|---|---|---|
 | **A (primary)** | Dish in **bypass mode** → OpenWrt WAN gets CGNAT/public IP | Needs a host route: `192.168.100.1/32` out the WAN interface | Full functionality. Package `postinst` offers the route via a UCI static-route entry if missing (well-known community requirement; documented in starlink-grpc-tools setup guidance) |
-| **B** | OpenWrt **behind the Starlink router** (double NAT) | Same host route works (Starlink router forwards to the dish) | Full dish telemetry; additionally the Starlink router's own gRPC (port 9000: `wifi_get_clients`, `wifi_get_status`) is probed and, if present, a "Starlink router" card appears (read-only) |
+| **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC (port 9000: `wifi_get_clients`, `wifi_get_status`) is probed and, if present, a "Starlink router" card appears (read-only). The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
 | **C** | No dish reachable (probe fails) | — | **WAN-only mode:** dashboard shows WAN health cards + outage log from probes; dish cards show a setup hint. Daemon retries discovery every 60 s |
 
 Detection is automatic at startup and on failure: try `get_device_info` at `dish_addr`; classify topology; expose it in `/api/status` and the UI header.
@@ -146,7 +146,7 @@ All calls are request-oneof members of `SpaceX.API.Device.Device/Handle`.
 
 | UI element | gRPC request | Fields used | Cadence |
 |---|---|---|---|
-| Status header, latency, ping success, throughput, instant power, outage flag | `get_status` | `pop_ping_latency_ms`, `pop_ping_drop_rate`, `downlink_throughput_bps`, `uplink_throughput_bps`, `outage`, `alerts` — instant power prefers `upsu_stats.dish_power`; when absent, falls back to the newest `get_history.power_in` sample (refreshed at 60 s cadence) and reports `power_source: history` | 1 s |
+| Status header, latency, ping success, throughput, instant power, outage flag | `get_status` | `pop_ping_latency_ms`, `pop_ping_drop_rate`, `downlink_throughput_bps`, `uplink_throughput_bps`, `outage`, `alerts` — instant power prefers a positive `upsu_stats.dish_power`; when absent or zero, falls back to the newest nonzero `get_history.power_in` sample (refreshed at 60 s cadence) and reports `power_source: history` | 1 s |
 | Obstruction card (numbers) | `get_status` | `obstruction_stats` (fraction obstructed, valid-s, time obstructed) | 1 s (same call) |
 | Alignment card | `get_status` | `boresight_azimuth_deg`, `boresight_elevation_deg`, `alignment_stats`, `tilt_angle` | 1 s (same call) |
 | Hardware card | `get_device_info` | id, `hardware_version`, `software_version`, country code, + `mobility_class`, `class_of_service` from status | 60 s |
@@ -367,7 +367,6 @@ All wattline-verified mechanics carry over unchanged:
 1. **§10.2 iframe vs. served-through-LuCI:** iframing `:9633` fails if the browser can't reach that port (strict firewall zones, remote access via VPN with port restrictions). Fallback option: uhttpd reverse-proxy stanza. Ship iframe-first, revisit if reports come in.
 2. **§5.1 dish speed test reliability:** `start_speedtest`/`get_speedtest_status` availability varies by firmware; if too flaky in practice, add a daemon-run HTTP throughput test (against user-configured endpoint) as fallback in v1.x.
 3. **§2.1 history DB location:** `/etc/starwatch/` survives sysupgrade but sits on the config partition; if 30-day DBs prove larger than expected on small-flash devices, move default to `/overlay` data dir with a settings toggle.
-4. **GL.iNet mwan coexistence detection:** exact signal for "GL multi-WAN is managing failover" needs on-device verification on current GL firmware.
 
 ## 14. v1.x candidates
 
