@@ -13,7 +13,7 @@ enum NotificationActionResult: Equatable, Sendable {
 }
 
 struct SystemNotificationCenterAdapter: NotificationCenterAdapter {
-    private let center = UNUserNotificationCenter.current()
+    private var center: UNUserNotificationCenter { .current() }
     func requestAuthorization() async throws -> Bool {
         try await center.requestAuthorization(options: [.alert, .sound])
     }
