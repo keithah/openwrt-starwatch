@@ -1,6 +1,6 @@
 import {Component, h} from './vendor/preact.module.js';
 import htm from './vendor/htm.module.js';
-import {assembleSeries, availabilityValue, deriveState, formatDuration, formatRate, friendlyModel, hasMotors, minutesLabel, utcMinutesToLocal, localMinutesToUTC} from './logic.js';
+import {assembleSeries, availabilityValue, deriveState, formatDuration, formatRate, friendlyModel, hasMotors, minutesLabel, outageBarLayout, utcMinutesToLocal, localMinutesToUTC} from './logic.js';
 import {mountChart} from './charts.js';
 
 const html = htm.bind(h);
@@ -23,7 +23,12 @@ export function Card({title, eyebrow, className = '', action, children}) {
 
 class Plot extends Component {
   componentDidMount() { this.draw(); }
-  componentDidUpdate() { this.chart?.destroy(); this.draw(); }
+  componentDidUpdate() {
+    if (this.props.aligned?.timestamps?.length && this.chart?.update(this.props.aligned, this.props)) return;
+    this.chart?.destroy();
+    this.chart = null;
+    this.draw();
+  }
   componentWillUnmount() { this.chart?.destroy(); }
   draw() { if (this.base && this.props.aligned?.timestamps?.length) this.chart = mountChart(this.base, this.props.aligned, this.props); }
   render() { return html`<div class="plot" ref=${node => { this.base = node; }}>${!this.props.aligned?.timestamps?.length && html`<div class="empty">History is collecting…</div>`}</div>`; }
@@ -58,7 +63,7 @@ export function GraphCard({tab, span, responses, onTab, onSpan, loading}) {
   return html`<${Card} title="Live telemetry" eyebrow="1 Hz · local dish API" className="graph-card full-width">
     <div class="toolbar"><div class="tabs" role="tablist">${['Throughput','Latency','Loss','Power'].map(name => html`<button class=${tab === name.toLowerCase() ? 'active' : ''} onClick=${() => onTab(name.toLowerCase())}>${name}</button>`)}</div>
       <div class="span-picker">${['15m','3h','24h','7d','30d'].map(value => html`<button class=${span === value ? 'active' : ''} onClick=${() => onSpan(value)}>${value}</button>`)}</div></div>
-    ${loading ? html`<div class="loading-line"></div>` : html`<${Plot} aligned=${aligned} />`}
+    ${loading ? html`<div class="loading-line"></div>` : html`<${Plot} aligned=${aligned} kind=${tab} />`}
     ${tab === 'throughput' && html`<p class="card-note">Dish-side rates come from the terminal. Router-side rates come from interface byte counters.</p>`}
   </${Card}>`;
 }
@@ -93,12 +98,20 @@ export function ObstructionCard({snapshot, grid, onClear}) {
   </${Card}>`;
 }
 
-export function OutageCard({outages = [], span = 30 * 86400}) {
-  const now = Date.now(); const start = now - span*1000;
-  return html`<${Card} title="Outage timeline" eyebrow="Dish · reachability · path">
-    <div class="timeline">${outages.map(item => { const at=new Date(item.start).getTime(); const duration=item.ongoing ? now-at : Number(item.duration)/1e6; const left=Math.max(0,(at-start)/(now-start)*100); const width=Math.max(.5,duration/(now-start)*100); return html`<span class=${`outage-bar source-${item.source}`} style=${`left:${left}%;width:${Math.min(100-left,width)}%`} title=${`${item.source}: ${item.cause} · ${formatDuration(duration/1000)}`}></span>`; })}</div>
-    <div class="table-wrap"><table><thead><tr><th>When</th><th>Source</th><th>Cause</th><th>Duration</th></tr></thead><tbody>${outages.slice(-8).reverse().map(item => html`<tr><td>${new Date(item.start).toLocaleString()}</td><td><span class=${`source-tag source-${item.source}`}>${item.source}</span></td><td>${item.cause}</td><td>${item.ongoing ? 'ongoing' : formatDuration(Number(item.duration)/1e9)}</td></tr>`)}</tbody></table></div>
-  </${Card}>`;
+export class OutageCard extends Component {
+  state = {span: '24h'};
+
+  render({outages = []}, {span}) {
+    const spans = {24: 86400, 7: 7 * 86400, 30: 30 * 86400};
+    const spanSeconds = spans[span === '24h' ? 24 : Number.parseInt(span, 10)] || spans[24];
+    const now = Date.now();
+    const bars = outages.map(item => ({item, layout: outageBarLayout(item, now, spanSeconds)})).filter(entry => entry.layout);
+    const picker = html`<div class="span-picker" aria-label="Outage timeline span">${['24h', '7d', '30d'].map(value => html`<button class=${span === value ? 'active' : ''} onClick=${() => this.setState({span: value})}>${value}</button>`)}</div>`;
+    return html`<${Card} title="Outage timeline" eyebrow="Dish · reachability · path" action=${picker}>
+      <div class="timeline">${bars.map(({item, layout}) => { const at=new Date(item.start).getTime(); const duration=item.ongoing ? now-at : Number(item.duration)/1e6; return html`<span class=${`outage-bar source-${item.source}`} style=${`left:${layout.leftPercent}%;width:${layout.widthPercent}%`} title=${`${item.source}: ${item.cause} · ${formatDuration(duration/1000)}`}></span>`; })}</div>
+      <div class="table-wrap"><table><thead><tr><th>When</th><th>Source</th><th>Cause</th><th>Duration</th></tr></thead><tbody>${outages.slice(-8).reverse().map(item => html`<tr><td>${new Date(item.start).toLocaleString()}</td><td><span class=${`source-tag source-${item.source}`}>${item.source}</span></td><td>${item.cause}</td><td>${item.ongoing ? 'ongoing' : formatDuration(Number(item.duration)/1e9)}</td></tr>`)}</tbody></table></div>
+    </${Card}>`;
+  }
 }
 
 export function AlignmentCard({snapshot}) {
@@ -110,7 +123,9 @@ export function PowerCard({snapshot, responses}) {
   const power=snapshot.dish?.power_w; if (power == null && !responses?.length) return null;
   const points=responses?.[0]?.points||[]; const avg=points.length?points.reduce((sum,p)=>sum+Number(p.value),0)/points.length:null;
   const availability=snapshot.field_availability?.power_w;
-  return html`<${Card} title="Power" eyebrow="Terminal draw"><div class="power-hero"><${Metric} label="Instant" value=${number(power)} unit="W" availability=${availability}/>${snapshot.dish?.power_source==='history'&&html`<span class="badge amber">via history</span>`}</div><${Plot} aligned=${assembleSeries(responses||[])} height=${170}/><p class="derived">${avg==null?'—':(avg*24/1000).toFixed(2)} kWh/day <span>derived from the 24 h average</span></p></${Card}>`;
+  const aligned = assembleSeries(responses || []);
+  aligned.series.forEach(item => { item.name = graphLabels[item.name] || item.name; });
+  return html`<${Card} title="Power" eyebrow="Terminal draw"><div class="power-hero"><${Metric} label="Instant" value=${number(power)} unit="W" availability=${availability}/>${snapshot.dish?.power_source==='history'&&html`<span class="badge amber">via history</span>`}</div><${Plot} aligned=${aligned} height=${170} kind="power"/><p class="derived">${avg==null?'—':(avg*24/1000).toFixed(2)} kWh/day <span>derived from the 24 h average</span></p></${Card}>`;
 }
 
 export function WANCard({wan={}, assist, onRefreshAssist, onApplyAssist}) {

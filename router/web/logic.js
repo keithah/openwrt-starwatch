@@ -96,6 +96,21 @@ export function formatRate(bitsPerSecond) {
   return `${Math.round(value)} b/s`;
 }
 
+export function outageBarLayout(outage, nowMilliseconds = Date.now(), spanSeconds = 86400) {
+  const startMilliseconds = nowMilliseconds - spanSeconds * 1000;
+  const outageStart = new Date(outage.start).getTime();
+  const durationMilliseconds = outage.ongoing
+    ? Math.max(0, nowMilliseconds - outageStart)
+    : Math.max(0, Number(outage.duration) / 1e6);
+  const visibleStart = Math.max(startMilliseconds, outageStart);
+  const visibleEnd = Math.min(nowMilliseconds, outageStart + durationMilliseconds);
+  if (!Number.isFinite(outageStart) || visibleEnd < startMilliseconds || visibleStart > nowMilliseconds) return null;
+  const naturalLeft = (visibleStart - startMilliseconds) / (spanSeconds * 1000) * 100;
+  const naturalWidth = (visibleEnd - visibleStart) / (spanSeconds * 1000) * 100;
+  const widthPercent = Math.min(100, Math.max(.4, naturalWidth));
+  return {leftPercent: Math.min(naturalLeft, 100 - widthPercent), widthPercent};
+}
+
 export function hasMotors(hardwareVersion = '') {
   const value = hardwareVersion.toLowerCase();
   return !(value.startsWith('rev_mini') || value.startsWith('rev_hp') || value.startsWith('rev4'));

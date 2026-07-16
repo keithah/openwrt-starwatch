@@ -7,8 +7,9 @@
 <script type="module">
 import {
   deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
-  friendlyModel, assembleSeries,
+  friendlyModel, assembleSeries, outageBarLayout,
 } from './logic.js';
+import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 
 const results = [];
 const assert = (name, condition) => {
@@ -34,6 +35,25 @@ try {
   ]);
   assert('series timestamps align', aligned.timestamps.length === 3 && aligned.series[0].values[1] === null);
   assert('aggregate envelope survives', aligned.series[1].min[1] === 1 && aligned.series[1].max[1] === 4);
+  assert('throughput ticks use rate units', axisTickLabels('throughput', [250000000])[0] === '250.0 Mb/s');
+  assert('latency ticks use milliseconds', axisTickLabels('latency', [42.5])[0] === '42.5 ms');
+  assert('loss ticks use percentages', axisTickLabels('loss', [.125])[0] === '12.5%');
+  assert('power ticks use watts', axisTickLabels('power', [57.25])[0] === '57.3 W');
+  const sameShape = {...aligned, timestamps: [...aligned.timestamps, aligned.timestamps.at(-1) + 1]};
+  sameShape.series = aligned.series.map(item => ({...item, values: [...item.values, 4], min: [...item.min, null], max: [...item.max, null]}));
+  assert('data-only updates retain chart structure', chartStructureKey(aligned, 'throughput') === chartStructureKey(sameShape, 'throughput'));
+  assert('tab changes alter chart structure', chartStructureKey(aligned, 'throughput') !== chartStructureKey(aligned, 'latency'));
+  const chartHost = document.createElement('div');
+  chartHost.style.width = '800px';
+  document.body.append(chartHost);
+  const chart = mountChart(chartHost, aligned, {kind: 'throughput'});
+  const plotElement = chartHost.querySelector('.uplot');
+  assert('data-only chart update uses setData', chart.update(sameShape, {kind: 'throughput'}) && chartHost.querySelector('.uplot') === plotElement);
+  assert('tab change requests chart rebuild', chart.update(sameShape, {kind: 'latency'}) === false);
+  chart.destroy();
+  chartHost.remove();
+  const shortOutage = outageBarLayout({start: '2026-01-30T23:59:15Z', duration: 45e9}, Date.parse('2026-01-31T00:00:00Z'), 30 * 86400);
+  assert('short outage bars retain minimum visibility', shortOutage.widthPercent >= .4);
   document.querySelector('#results').textContent = `${results.join('\n')}\n\n${results.length} assertions passed.`;
   document.body.dataset.result = 'pass';
 } catch (error) {
