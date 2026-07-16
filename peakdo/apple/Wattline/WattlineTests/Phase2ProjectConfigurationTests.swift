@@ -9,7 +9,7 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
     }
 
     private func projectText() throws -> String {
-        try String(contentsOf: root.appendingPathComponent("Wattline/Wattline.xcodeproj/project.pbxproj"), encoding: .utf8)
+        try String(contentsOf: root.appendingPathComponent("Wattline.xcodeproj/project.pbxproj"), encoding: .utf8)
     }
 
     /// Return one Xcode object, rather than searching the entire project. This keeps
@@ -80,9 +80,9 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
     }
 
     func testAppGroupAndLiveActivitiesPlistConfiguration() throws {
-        let entitlements = try String(contentsOf: root.appendingPathComponent("Wattline/WattlineWidgets/WattlineWidgets.entitlements"), encoding: .utf8)
+        let entitlements = try String(contentsOf: root.appendingPathComponent("WattlineWidgets/WattlineWidgets.entitlements"), encoding: .utf8)
         XCTAssertTrue(entitlements.contains("<string>group.com.keithah.wattline</string>"))
-        let plist = try NSDictionary(contentsOf: root.appendingPathComponent("Wattline/Wattline/Info.plist"), error: ())
+        let plist = try NSDictionary(contentsOf: root.appendingPathComponent("Wattline/Info.plist"), error: ())
         XCTAssertEqual(plist["NSSupportsLiveActivities"] as? Bool, true)
     }
 }
