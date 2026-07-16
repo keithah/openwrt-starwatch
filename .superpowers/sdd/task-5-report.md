@@ -17,3 +17,7 @@ Verification: `swift test` in WattlineCore passes 142 tests; iOS Simulator app b
 Restart recovery now records only the matching generation/peripheral scoped disconnect and refuses the broker connected fast path until that disconnect has occurred. An ordinary restart write error therefore transitions to `restartFailed` with Retry, while a write error accompanying the expected disconnect continues through fresh reconnect recovery. Demo restart no longer self-reconnects outside the broker scope. Stale generation and scope guards remain intact.
 
 Verification: WattlineCore `swift test` passes all 142 tests; iOS Simulator `build-for-testing` succeeds. No simulator runtime was started.
+
+## Task 5 lifecycle test hardening
+
+Added controllable-clock lifecycle coverage for ordinary restart write failure (Retry without recovery), expected-disconnect write-error recovery, deterministic reconnect after a simulated 15 seconds without scan, timeout/Retry at simulated 30 seconds, and quarantine of a late old-scope disconnect. The test transport now gates broker reconnects and records scopes so tests exercise AppModel/Broker recovery rather than transport self-connect.
