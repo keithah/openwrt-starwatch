@@ -68,6 +68,8 @@ public actor DeviceSession {
     private var eventTask: Task<Void, Never>?
     private var freshnessGeneration: UInt64 = 0
     private var telemetryTimestamps: [TelemetryChannel: DeviceTimestamp] = [:]
+    private var activeConnectionScope: DeviceConnectionScope?
+    private var retiredConnectionScopeIDs: Set<UUID> = []
     private var timedOutReconcilers: [MutationReconciler] = []
     private(set) var logicalOperationDepth = 0
 
@@ -112,16 +114,25 @@ public actor DeviceSession {
         switch event {
         case .discovered:
             break
-        case let .handshakeCompleted(snapshot):
+        case let .handshakeCompleted(snapshot, scope):
+            guard acceptInitialOrCurrent(scope) else { return }
             state.identity = snapshot
-        case .connected:
+        case let .connected(scope):
+            guard acceptInitialOrCurrent(scope) else { return }
             if state.connection != .live {
                 state.connection = .loading
             }
             state.lastError = nil
-        case .reconnecting:
+        case let .reconnecting(scope):
+            guard !retiredConnectionScopeIDs.contains(scope.sessionID),
+                  activeConnectionScope == nil || activeConnectionScope == scope
+            else { return }
+            activeConnectionScope = scope
             state.connection = .reconnecting
-        case let .disconnected(failure):
+        case let .disconnected(scope, failure):
+            guard activeConnectionScope == scope else { return }
+            retiredConnectionScopeIDs.insert(scope.sessionID)
+            activeConnectionScope = nil
             state.connection = .disconnected
             state.freshness = .stale
             state.lastError = failure?.message
@@ -147,6 +158,12 @@ public actor DeviceSession {
             state.transactionDepth = depth
         }
         publishState()
+    }
+
+    private func acceptInitialOrCurrent(_ scope: DeviceConnectionScope) -> Bool {
+        guard activeConnectionScope == nil || activeConnectionScope == scope else { return false }
+        activeConnectionScope = scope
+        return true
     }
 
     @discardableResult

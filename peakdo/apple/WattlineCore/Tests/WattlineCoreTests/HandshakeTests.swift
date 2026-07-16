@@ -170,7 +170,10 @@ final class HandshakeTests: XCTestCase {
             capabilities: DeviceCapabilities(features: [])
         )
 
-        await session.receive(.handshakeCompleted(snapshot))
+        await session.receive(.handshakeCompleted(
+            snapshot,
+            scope: DeviceConnectionScope(peripheralID: snapshot.peripheralID, sessionID: UUID())
+        ))
 
         let state = await session.state
         XCTAssertEqual(state.identity, snapshot)

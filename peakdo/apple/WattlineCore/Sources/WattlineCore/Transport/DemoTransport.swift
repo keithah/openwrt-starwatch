@@ -51,7 +51,7 @@ public actor DemoTransport: DeviceTransport {
         firmware: "1.4.9"
     )
 
-    private static let deviceID = UUID(uuidString: "57415454-4C49-4E45-8000-000000000305")!
+    public static let deviceID = UUID(uuidString: "57415454-4C49-4E45-8000-000000000305")!
     private static let initialLimits: [PowerLimitType: PowerLimitLevel] = [
         .global: .watts140,
         .input: .watts140,
@@ -77,11 +77,14 @@ public actor DemoTransport: DeviceTransport {
 
     private let continuation: AsyncStream<DeviceEvent>.Continuation
     private let clock: any DeviceClock
+    private let scopeSeed: UInt64
     private let typeCOutputCurrent: Double
     private let transactions = SerializedTransactions()
     private var random: SeededGenerator
     private var telemetryTask: Task<Void, Never>?
     private var connected = false
+    private var connectionCount: UInt64 = 0
+    private var activeScope: DeviceConnectionScope?
     private var dcEnabled = true
     private var typeCOutputPreferred = true
     private var bypassEnabled = false
@@ -102,6 +105,7 @@ public actor DemoTransport: DeviceTransport {
         events = pair.stream
         continuation = pair.continuation
         self.clock = clock
+        scopeSeed = seed
         self.typeCOutputCurrent = typeCOutputCurrent
         random = SeededGenerator(seed: seed)
         snapshot = Self.makeSnapshot(
@@ -130,11 +134,21 @@ public actor DemoTransport: DeviceTransport {
 
     public func stopScan() async {}
 
-    public func connect(to id: UUID) async throws {
+    public func makeConnectionScope(for id: UUID) async -> DeviceConnectionScope {
+        connectionCount &+= 1
+        return DeviceConnectionScope(
+            peripheralID: id,
+            sessionID: Self.deterministicSessionID(seed: scopeSeed, connection: connectionCount)
+        )
+    }
+
+    public func connect(to id: UUID, scope: DeviceConnectionScope) async throws {
         guard !connected else { return }
+        precondition(scope.peripheralID == id)
         connected = true
-        continuation.yield(.handshakeCompleted(Self.identitySnapshot))
-        continuation.yield(.connected(id))
+        activeScope = scope
+        continuation.yield(.handshakeCompleted(Self.identitySnapshot, scope: scope))
+        continuation.yield(.connected(scope))
         let timestamp = await clock.now
         guard connected else { return }
         snapshot = makeSnapshot(jittered: false)
@@ -144,16 +158,27 @@ public actor DemoTransport: DeviceTransport {
 
     @discardableResult
     public func connectDemo() async throws -> DemoIdentity {
-        try await connect(to: Self.deviceID)
+        let scope = await makeConnectionScope(for: Self.deviceID)
+        try await connect(to: Self.deviceID, scope: scope)
         return Self.identity
     }
 
     public func disconnect() async {
-        guard connected else { return }
+        guard connected, let scope = activeScope else { return }
         connected = false
+        activeScope = nil
         telemetryTask?.cancel()
         telemetryTask = nil
-        continuation.yield(.disconnected(nil))
+        continuation.yield(.disconnected(scope, nil))
+    }
+
+    private static func deterministicSessionID(seed: UInt64, connection: UInt64) -> UUID {
+        let bytes = withUnsafeBytes(of: seed.bigEndian, Array.init)
+            + withUnsafeBytes(of: connection.bigEndian, Array.init)
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     public func perform(_ command: DeviceCommand) async throws -> CommandOutcome {

@@ -179,6 +179,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     private var discoveredModes: [UUID: DeviceMode] = [:]
     private var discoveredLocalNames: [UUID: String] = [:]
     private var callbackState = BLEBridgeCallbackStateMachine()
+    private var connectionScopeAliases: [BLEConnectionScope: DeviceConnectionScope] = [:]
     private var lifecycle = BLESessionLifecycleStateMachine()
     private var session: Session?
     private var teardown: Teardown?
@@ -227,7 +228,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
         }
     }
 
-    func connect(to identifier: UUID) async throws {
+    func connect(to identifier: UUID, connectionScope: DeviceConnectionScope) async throws {
         try await waitUntilPoweredOn()
         let operationID = UUID()
         try await withTaskCancellationHandler {
@@ -251,7 +252,7 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
                         continuation.resume(throwing: BLETransportError.peripheralNotFound(identifier))
                         return
                     }
-                    guard let scope = beginSession(for: target) else {
+                    guard let scope = beginSession(for: target, connectionScope: connectionScope) else {
                         continuation.resume(throwing: BLETransportError.operationInProgress)
                         return
                     }
@@ -533,10 +534,17 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    private func beginSession(for peripheral: CBPeripheral) -> BLEConnectionScope? {
+    private func beginSession(
+        for peripheral: CBPeripheral,
+        connectionScope: DeviceConnectionScope? = nil
+    ) -> BLEConnectionScope? {
         guard lifecycle.canBeginConnection, teardown == nil else { return nil }
         let scope = callbackState.beginConnection(peripheralID: peripheral.identifier)
         guard lifecycle.beginConnection(scope: scope) else { return nil }
+        connectionScopeAliases[scope] = connectionScope ?? DeviceConnectionScope(
+            peripheralID: peripheral.identifier,
+            sessionID: UUID()
+        )
         let proxy = PeripheralDelegateProxy(bridge: self, scope: scope)
         peripheral.delegate = proxy
         let advertisedName = HandshakeAdvertisementPolicy.advertisedName(
@@ -658,7 +666,8 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
             callbackState.expectNotification(scope: scope, characteristic: uuid)
             session.peripheral.setNotifyValue(true, for: characteristic)
         case let .publish(snapshot):
-            eventSink(.handshakeCompleted(snapshot))
+            guard let connectionScope = connectionScopeAliases[scope] else { return }
+            eventSink(.handshakeCompleted(snapshot, scope: connectionScope))
             let next = session.driver.eventEmitted(scope: scope)
             self.session = session
             enactHandshakeAction(next, scope: scope)
@@ -676,7 +685,8 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
             self.pendingConnect = nil
             pendingConnect.continuation.resume()
         }
-        eventSink(.connected(session.peripheral.identifier))
+        guard let connectionScope = connectionScopeAliases[scope] else { return }
+        eventSink(.connected(connectionScope))
     }
 
     private func terminateSession(scope: BLEConnectionScope) {
@@ -753,7 +763,8 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
             self.pendingConnect = nil
             continuation = pendingConnect.continuation
         }
-        eventSink(.disconnected(TransportFailure(message: String(describing: error))))
+        guard let connectionScope = connectionScopeAliases[scope] else { return }
+        eventSink(.disconnected(connectionScope, TransportFailure(message: String(describing: error))))
         beginTeardown(scope: scope, eventAlreadyEmitted: true)
         continuation?.resume(throwing: error)
     }
@@ -799,8 +810,9 @@ final class BluetoothDelegateBridge: NSObject, @unchecked Sendable {
     private func enact(_ reconnectPolicy: ReconnectPolicy, peripheral: CBPeripheral) {
         switch reconnectPolicy {
         case .armed:
-            eventSink(.reconnecting(peripheral.identifier))
-            if beginSession(for: peripheral) != nil {
+            if let scope = beginSession(for: peripheral),
+               let connectionScope = connectionScopeAliases[scope] {
+                eventSink(.reconnecting(connectionScope))
                 central.connect(peripheral)
             }
         case .awaitingOTAMode:
@@ -858,7 +870,9 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             waiters.forEach { $0.resume(throwing: error) }
             if let scope = session?.scope {
                 failActive(scope: scope, error: error)
-                eventSink(.disconnected(TransportFailure(message: String(describing: error))))
+                if let connectionScope = connectionScopeAliases[scope] {
+                    eventSink(.disconnected(connectionScope, TransportFailure(message: String(describing: error))))
+                }
             }
             if let teardown {
                 self.teardown = nil
@@ -908,7 +922,9 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             self.teardown = nil
             _ = lifecycle.didDisconnect(scope: teardown.scope)
             if !teardown.eventAlreadyEmitted {
-                eventSink(.disconnected(error.map { TransportFailure(message: String(describing: $0)) }))
+                if let connectionScope = connectionScopeAliases[teardown.scope] {
+                    eventSink(.disconnected(connectionScope, error.map { TransportFailure(message: String(describing: $0)) }))
+                }
             }
             return
         }
@@ -918,8 +934,11 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
               peripheral.state == .disconnected
         else { return }
         let failure = connectionFailure(for: peripheral, error: error)
+        let scope = session.scope
         failActive(scope: session.scope, error: failure)
-        eventSink(.disconnected(TransportFailure(message: String(describing: failure))))
+        if let connectionScope = connectionScopeAliases[scope] {
+            eventSink(.disconnected(connectionScope, TransportFailure(message: String(describing: failure))))
+        }
     }
 
     func centralManager(
@@ -934,7 +953,9 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
             self.teardown = nil
             _ = lifecycle.didDisconnect(scope: teardown.scope)
             if !teardown.eventAlreadyEmitted {
-                eventSink(.disconnected(error.map { TransportFailure(message: String(describing: $0)) }))
+                if let connectionScope = connectionScopeAliases[teardown.scope] {
+                    eventSink(.disconnected(connectionScope, error.map { TransportFailure(message: String(describing: $0)) }))
+                }
             }
             return
         }
@@ -965,7 +986,8 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
         )
 
         let transportFailure = error.map { TransportFailure(message: String(describing: $0)) }
-        eventSink(.disconnected(transportFailure))
+        guard let connectionScope = connectionScopeAliases[scope] else { return }
+        eventSink(.disconnected(connectionScope, transportFailure))
 
         if let pendingConnect, pendingConnect.scope == scope {
             pendingConnect.continuation.resume(
@@ -999,7 +1021,8 @@ extension BluetoothDelegateBridge: CBCentralManagerDelegate {
               let restored = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first
         else { return }
         guard let scope = beginSession(for: restored) else { return }
-        eventSink(.reconnecting(restored.identifier))
+        guard let connectionScope = connectionScopeAliases[scope] else { return }
+        eventSink(.reconnecting(connectionScope))
         switch RestorationPolicy.action(for: restoredState(restored.state)) {
         case .connect:
             central.connect(restored)

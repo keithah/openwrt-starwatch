@@ -29,6 +29,8 @@ public actor ReplayTransport: DeviceTransport {
     private let transactions = SerializedTransactions()
     private let clock: any DeviceClock
     private var steps: [ReplayStep]
+    private var connectionScopes: [DeviceConnectionScope]
+    private var activeScope: DeviceConnectionScope?
     private var currentInFlightCount = 0
 
     public private(set) var maximumInFlightCount = 0
@@ -40,13 +42,15 @@ public actor ReplayTransport: DeviceTransport {
 
     public init(
         steps: [ReplayStep] = [],
-        clock: any DeviceClock = ContinuousDeviceClock()
+        clock: any DeviceClock = ContinuousDeviceClock(),
+        connectionScopes: [DeviceConnectionScope] = []
     ) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
         events = pair.stream
         continuation = pair.continuation
         self.steps = steps
         self.clock = clock
+        self.connectionScopes = connectionScopes
     }
 
     deinit {
@@ -57,12 +61,24 @@ public actor ReplayTransport: DeviceTransport {
 
     public func stopScan() async {}
 
-    public func connect(to id: UUID) async throws {
-        continuation.yield(.connected(id))
+    public func makeConnectionScope(for id: UUID) async -> DeviceConnectionScope {
+        let scope = connectionScopes.isEmpty
+            ? DeviceConnectionScope(peripheralID: id, sessionID: UUID())
+            : connectionScopes.removeFirst()
+        precondition(scope.peripheralID == id)
+        return scope
+    }
+
+    public func connect(to id: UUID, scope: DeviceConnectionScope) async throws {
+        precondition(scope.peripheralID == id)
+        activeScope = scope
+        continuation.yield(.connected(scope))
     }
 
     public func disconnect() async {
-        continuation.yield(.disconnected(nil))
+        guard let activeScope else { return }
+        self.activeScope = nil
+        continuation.yield(.disconnected(activeScope, nil))
     }
 
     public func perform(_ command: DeviceCommand) async throws -> CommandOutcome {
@@ -150,9 +166,11 @@ public actor ReplayTransport: DeviceTransport {
             case let .writeFailure(error):
                 throw ReplayTransportError.writeFailed(String(describing: error))
             case let .disconnect(error):
-                continuation.yield(
-                    .disconnected(TransportFailure(message: String(describing: error)))
-                )
+                if let activeScope {
+                    continuation.yield(
+                        .disconnected(activeScope, TransportFailure(message: String(describing: error)))
+                    )
+                }
                 switch command.disconnectPolicy {
                 case .none:
                     throw ReplayTransportError.disconnected(String(describing: error))

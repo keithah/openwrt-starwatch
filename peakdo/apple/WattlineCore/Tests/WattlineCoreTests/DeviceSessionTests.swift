@@ -4,6 +4,30 @@ import XCTest
 
 @MainActor
 final class DeviceSessionTests: XCTestCase {
+    func testStaleLifecycleScopesCannotMutateCurrentConnection() async {
+        let peripheralID = UUID()
+        let old = DeviceConnectionScope(peripheralID: peripheralID, sessionID: UUID())
+        let current = DeviceConnectionScope(peripheralID: peripheralID, sessionID: UUID())
+        let session = DeviceSession(transport: ReplayTransport())
+
+        await session.receive(.connected(old))
+        await session.receive(.disconnected(old, nil))
+        await session.receive(.reconnecting(current))
+        await session.receive(.connected(current))
+        await session.receive(.disconnected(old, TransportFailure(message: "stale terminal")))
+        await session.receive(.connected(old))
+        await session.receive(.reconnecting(old))
+
+        var state = await session.state
+        XCTAssertNotEqual(state.connection, .disconnected)
+        XCTAssertNil(state.lastError)
+
+        await session.receive(.disconnected(current, TransportFailure(message: "current terminal")))
+        state = await session.state
+        XCTAssertEqual(state.connection, .disconnected)
+        XCTAssertEqual(state.lastError, "current terminal")
+    }
+
     func testStateStreamPublishesPendingConfirmationAndClearsStaleError() async throws {
         let clock = TestDeviceClock()
         let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
@@ -117,7 +141,9 @@ final class DeviceSessionTests: XCTestCase {
         let status = try DCPortStatus(frame: Data([1, 0, 0, 0, 0, 0, 0, 0]))
         await session.receive(.dc(status, timestamp: .zero))
 
-        await session.receive(.disconnected(TransportFailure(message: "link lost")))
+        let scope = DeviceConnectionScope(peripheralID: UUID(), sessionID: UUID())
+        await session.receive(.connected(scope))
+        await session.receive(.disconnected(scope, TransportFailure(message: "link lost")))
 
         let state = await session.state
         XCTAssertEqual(state.connection, .disconnected)
@@ -132,7 +158,7 @@ final class DeviceSessionTests: XCTestCase {
         let battery = try BatteryStatus(frame: Data(repeating: 0, count: 16))
         await session.receive(.battery(battery, timestamp: .zero))
 
-        await session.receive(.connected(UUID()))
+        await session.receive(.connected(DeviceConnectionScope(peripheralID: UUID(), sessionID: UUID())))
 
         let state = await session.state
         XCTAssertEqual(state.connection, .live)

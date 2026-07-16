@@ -165,9 +165,11 @@ final class AppModel {
     private var brokerContextLifecycle: DeviceOperationBroker.ContextLifecycle?
     private var brokerPublicationTask: Task<Void, Never>?
     private var brokerReconnectAttempt: DeviceOperationBroker.ConnectionAttempt?
+    private var brokerReconnectScope: DeviceConnectionScope?
     private var brokerReconnectTask: Task<Void, Never>?
-    private var ignoredDisconnectEventCount = 0
     private var connectionOperationKey: ConnectionOperationKey?
+    private var activeConnectionScope: DeviceConnectionScope?
+    private var retiredConnectionScopeIDs: Set<UUID> = []
 
     @ObservationIgnored
     private(set) lazy var deviceOperationBroker = DeviceOperationBroker { [weak self] attempt in
@@ -206,16 +208,34 @@ final class AppModel {
         demoTransport = demo
         isDemo = true
         let generation = attach(transport: demo)
+        selectedPeripheralID = DemoTransport.deviceID
         connectionStatus = .reconnecting
         route = .connected
 
         let operation = beginOperation(for: generation, transport: demo)
+        let brokerContext = prepareBrokerContext(
+            peripheralID: DemoTransport.deviceID,
+            generation: generation
+        )
         operationTask = Task { [weak self] in
             do {
-                _ = try await demo.connectDemo()
+                await self?.publishBrokerContext(brokerContext)
                 guard let self, self.isCurrent(operation) else { return }
+                let scope = await demo.makeConnectionScope(for: DemoTransport.deviceID)
+                guard self.isCurrent(operation) else { return }
+                let connectionKey = ConnectionOperationKey(
+                    transportGeneration: operation.transportGeneration,
+                    operationGeneration: operation.operationGeneration,
+                    peripheralID: DemoTransport.deviceID,
+                    scope: scope
+                )
+                connectionOperationKey = connectionKey
+                try await demo.connect(to: DemoTransport.deviceID, scope: scope)
+                guard self.isCurrent(operation) else { return }
+                await self.completeConnectionOperation(connectionKey)
             } catch {
                 guard let self, self.isCurrent(operation) else { return }
+                connectionOperationKey = nil
                 connectionStatus = .disconnected(String(describing: error))
             }
         }
@@ -268,8 +288,10 @@ final class AppModel {
     func choose(_ device: DiscoveredDevice) {
         if device.mode == .ota {
             otaRecoveryDevice = device
+            otaRecoveryPeripheralID = device.id
             return
         }
+        retireActiveConnectionScope()
         selectedPeripheralID = device.id
         connectedName = knownDevices[device.id]?.name ?? device.localName
         guard let context = beginOperationForCurrentTransport() else { return }
@@ -277,19 +299,22 @@ final class AppModel {
             peripheralID: device.id,
             generation: context.transportGeneration
         )
-        let connectionKey = ConnectionOperationKey(
-            transportGeneration: context.transportGeneration,
-            operationGeneration: context.operationGeneration,
-            peripheralID: device.id
-        )
-        connectionOperationKey = connectionKey
         operationTask = Task { [weak self] in
             do {
                 await self?.publishBrokerContext(brokerContext)
                 guard let self, self.isCurrent(context) else { return }
                 await context.transport.stopScan()
                 guard self.isCurrent(context) else { return }
-                try await context.transport.connect(to: device.id)
+                let scope = await context.transport.makeConnectionScope(for: device.id)
+                guard self.isCurrent(context) else { return }
+                let connectionKey = ConnectionOperationKey(
+                    transportGeneration: context.transportGeneration,
+                    operationGeneration: context.operationGeneration,
+                    peripheralID: device.id,
+                    scope: scope
+                )
+                connectionOperationKey = connectionKey
+                try await context.transport.connect(to: device.id, scope: scope)
                 guard self.isCurrent(context) else { return }
                 await self.completeConnectionOperation(connectionKey)
             } catch {
@@ -310,17 +335,20 @@ final class AppModel {
             peripheralID: selectedPeripheralID,
             generation: context.transportGeneration
         )
-        let connectionKey = ConnectionOperationKey(
-            transportGeneration: context.transportGeneration,
-            operationGeneration: context.operationGeneration,
-            peripheralID: selectedPeripheralID
-        )
-        connectionOperationKey = connectionKey
         operationTask = Task { [weak self] in
             do {
                 await self?.publishBrokerContext(brokerContext)
                 guard let self, self.isCurrent(context) else { return }
-                try await context.transport.connect(to: selectedPeripheralID)
+                let scope = await context.transport.makeConnectionScope(for: selectedPeripheralID)
+                guard self.isCurrent(context) else { return }
+                let connectionKey = ConnectionOperationKey(
+                    transportGeneration: context.transportGeneration,
+                    operationGeneration: context.operationGeneration,
+                    peripheralID: selectedPeripheralID,
+                    scope: scope
+                )
+                connectionOperationKey = connectionKey
+                try await context.transport.connect(to: selectedPeripheralID, scope: scope)
                 guard self.isCurrent(context) else { return }
                 await self.completeConnectionOperation(connectionKey)
             } catch {
@@ -333,7 +361,10 @@ final class AppModel {
 
     func returnToScan() {
         invalidateBrokerContext()
+        connectionOperationKey = nil
+        retireActiveConnectionScope()
         selectedPeripheralID = nil
+        otaRecoveryPeripheralID = nil
         route = .scan
         connectionStatus = .disconnected(nil)
         let broker = deviceOperationBroker
@@ -467,16 +498,19 @@ final class AppModel {
         connectionStatus = .reconnecting
         route = .connected
         let operation = beginOperation(for: generation, transport: restoredTransport)
-        let connectionKey = ConnectionOperationKey(
-            transportGeneration: operation.transportGeneration,
-            operationGeneration: operation.operationGeneration,
-            peripheralID: storedID
-        )
-        connectionOperationKey = connectionKey
         operationTask = Task { [weak self] in
             do {
-                try await restoredTransport.connect(to: storedID)
+                let scope = await restoredTransport.makeConnectionScope(for: storedID)
                 guard let self, self.isCurrent(operation) else { return }
+                let connectionKey = ConnectionOperationKey(
+                    transportGeneration: operation.transportGeneration,
+                    operationGeneration: operation.operationGeneration,
+                    peripheralID: storedID,
+                    scope: scope
+                )
+                connectionOperationKey = connectionKey
+                try await restoredTransport.connect(to: storedID, scope: scope)
+                guard self.isCurrent(operation) else { return }
                 await self.completeConnectionOperation(connectionKey)
             } catch {
                 guard let self, self.isCurrent(operation) else { return }
@@ -513,8 +547,9 @@ final class AppModel {
         otaRecoveryTask = nil
         brokerReconnectTask?.cancel()
         brokerReconnectTask = nil
-        ignoredDisconnectEventCount = 0
         connectionOperationKey = nil
+        activeConnectionScope = nil
+        retiredConnectionScopeIDs.removeAll()
         if let previousTransport {
             Task { await previousTransport.disconnect() }
         }
@@ -612,6 +647,7 @@ final class AppModel {
         brokerContextPeripheralID = nil
         brokerContextLifecycle = nil
         brokerReconnectAttempt = nil
+        brokerReconnectScope = nil
         brokerReconnectTask?.cancel()
         brokerReconnectTask = nil
     }
@@ -629,7 +665,8 @@ final class AppModel {
     private func completeConnectionOperation(_ key: ConnectionOperationKey) async {
         guard connectionOperationKey == key,
               transportGeneration == key.transportGeneration,
-              operationGeneration == key.operationGeneration
+              operationGeneration == key.operationGeneration,
+              activeConnectionScope == key.scope
         else { return }
         await deviceOperationBroker.markConnected(
             peripheralID: key.peripheralID,
@@ -648,6 +685,9 @@ final class AppModel {
         }
 
         brokerReconnectAttempt = attempt
+        let scope = await transport.makeConnectionScope(for: attempt.peripheralID)
+        guard brokerReconnectAttempt == attempt else { return }
+        brokerReconnectScope = scope
         let brokerContext = prepareBrokerContext(
             peripheralID: attempt.peripheralID,
             generation: attempt.generation
@@ -657,7 +697,7 @@ final class AppModel {
         connectionStatus = .reconnecting
         route = .connected
         do {
-            try await transport.connect(to: attempt.peripheralID)
+            try await transport.connect(to: attempt.peripheralID, scope: scope)
             guard transportGeneration == attempt.generation,
                   selectedPeripheralID == attempt.peripheralID,
                   brokerReconnectAttempt == attempt,
@@ -665,36 +705,61 @@ final class AppModel {
             else { return }
             await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
             brokerReconnectAttempt = nil
+            brokerReconnectScope = nil
         } catch {
             guard transportGeneration == attempt.generation,
                   brokerReconnectAttempt == attempt
             else { return }
             connectionStatus = .disconnected(String(describing: error))
             await deviceOperationBroker.handleConnectionEvent(.terminal, attempt: attempt)
+            brokerReconnectScope = nil
         }
     }
 
     private func acceptsTransportEvent(_ event: DeviceEvent, generation: UInt) -> Bool {
         guard transportGeneration == generation else { return false }
         switch event {
-        case let .connected(id), let .reconnecting(id):
-            guard selectedPeripheralID == nil || selectedPeripheralID == id || otaRecoveryPeripheralID == id else {
-                ignoredDisconnectEventCount += 1
-                return false
-            }
-        case let .handshakeCompleted(snapshot):
-            guard selectedPeripheralID == nil
-                    || selectedPeripheralID == snapshot.peripheralID
-                    || otaRecoveryPeripheralID == snapshot.peripheralID
+        case let .reconnecting(scope):
+            guard !retiredConnectionScopeIDs.contains(scope.sessionID),
+                  activeConnectionScope == nil,
+                  selectedPeripheralID == scope.peripheralID
+                    || otaRecoveryPeripheralID == scope.peripheralID
+            else { return activeConnectionScope == scope }
+            activeConnectionScope = scope
+        case let .connected(scope):
+            guard authorizeInitialScope(scope) else { return false }
+        case let .handshakeCompleted(snapshot, scope):
+            guard snapshot.peripheralID == scope.peripheralID,
+                  authorizeInitialScope(scope)
             else { return false }
-        case .disconnected:
-            if ignoredDisconnectEventCount > 0 {
-                ignoredDisconnectEventCount -= 1
-                return false
-            }
+        case let .disconnected(scope, _):
+            guard activeConnectionScope == scope else { return false }
+            retiredConnectionScopeIDs.insert(scope.sessionID)
+            activeConnectionScope = nil
+            if connectionOperationKey?.scope == scope { connectionOperationKey = nil }
+            if brokerReconnectScope == scope { brokerReconnectScope = nil }
         case .discovered, .battery, .dc, .typeC, .transactionDepth:
             break
         }
+        return true
+    }
+
+    private func retireActiveConnectionScope() {
+        if let activeConnectionScope {
+            retiredConnectionScopeIDs.insert(activeConnectionScope.sessionID)
+        }
+        activeConnectionScope = nil
+    }
+
+    private func authorizeInitialScope(_ scope: DeviceConnectionScope) -> Bool {
+        if let activeConnectionScope { return activeConnectionScope == scope }
+        guard !retiredConnectionScopeIDs.contains(scope.sessionID) else { return false }
+        let hasDirectConnect = connectionOperationKey?.scope == scope
+        let hasBrokerAttempt = brokerReconnectAttempt?.peripheralID == scope.peripheralID
+            && brokerReconnectScope == scope
+        let hasOTARecovery = otaRecoveryPeripheralID == scope.peripheralID
+        guard hasDirectConnect || hasBrokerAttempt || hasOTARecovery else { return false }
+        activeConnectionScope = scope
         return true
     }
 
@@ -707,7 +772,8 @@ final class AppModel {
             } else {
                 discoveredDevices.append(device)
             }
-        case let .connected(id):
+        case let .connected(scope):
+            let id = scope.peripheralID
             if otaRecoveryPeripheralID == id {
                 connectionStatus = .disconnected(nil)
                 route = .scan
@@ -744,14 +810,12 @@ final class AppModel {
             scanMessage = nil
             connectionStatus = .connected
             route = .connected
-        case let .reconnecting(id):
+        case let .reconnecting(scope):
+            let id = scope.peripheralID
             selectedPeripheralID = id
             connectionStatus = .reconnecting
             route = .connected
-        case let .disconnected(failure):
-            // DeviceEvent.disconnected carries no peripheral or attempt identity. It may be a
-            // delayed callback from a superseded connect, so only the matching connect catch
-            // completes a broker waiter; this event merely clears connected fast-path state.
+        case let .disconnected(_, failure):
             await deviceOperationBroker.markDisconnected(generation: generation)
             flushPendingTelemetryPersistence()
             connectionStatus = .disconnected(failure?.message)
@@ -760,7 +824,7 @@ final class AppModel {
             } else if selectedPeripheralID != nil || isDemo {
                 route = .connected
             }
-        case let .handshakeCompleted(snapshot):
+        case let .handshakeCompleted(snapshot, _):
             let isOTAMode = snapshot.mode == .ota
             capabilities = isOTAMode ? DeviceCapabilities(features: []) : snapshot.capabilities
             selectedPeripheralID = snapshot.peripheralID
@@ -1028,6 +1092,7 @@ final class AppModel {
         let transportGeneration: UInt
         let operationGeneration: UInt
         let peripheralID: UUID
+        let scope: DeviceConnectionScope
     }
 
     private func beginOperationForCurrentTransport() -> OperationContext? {

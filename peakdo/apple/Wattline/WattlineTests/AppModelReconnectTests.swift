@@ -4,6 +4,10 @@ import CoreBluetooth
 import WattlineCore
 import XCTest
 
+private func testScope(_ peripheralID: UUID, sessionID: UUID? = nil) -> DeviceConnectionScope {
+    DeviceConnectionScope(peripheralID: peripheralID, sessionID: sessionID ?? peripheralID)
+}
+
 @MainActor
 final class AppModelReconnectTests: XCTestCase {
     func testPermissionDeniedAndRestrictedFailuresUseSettingsRecoveryPath() {
@@ -48,7 +52,11 @@ final class AppModelReconnectTests: XCTestCase {
         let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
         model.requestBluetoothAfterPriming()
         let id = UUID()
-        await fixture.transport.emit(.handshakeCompleted(makeIdentity(id: id, features: 0x7FFF)))
+        model.choose(.init(id: id, localName: "Link-Power 2", rssi: -40, mode: .application))
+        try await eventually { await fixture.transport.currentScope() != nil }
+        let currentApplicationScope = await fixture.transport.currentScope()
+        let applicationScope = try XCTUnwrap(currentApplicationScope)
+        await fixture.transport.emit(.handshakeCompleted(makeIdentity(id: id, features: 0x7FFF), scope: applicationScope))
         try await eventually {
             fixture.persistence.loadPersistedDeviceState(for: id)?.resolvedFeaturesRawValue == 0x7FFF
         }
@@ -59,7 +67,8 @@ final class AppModelReconnectTests: XCTestCase {
             mode: .ota,
             capabilities: DeviceCapabilities(features: [])
         )
-        await fixture.transport.emit(.handshakeCompleted(ota))
+        model.choose(.init(id: id, localName: "PeakDo-OTA", rssi: -40, mode: .ota))
+        await fixture.transport.emit(.handshakeCompleted(ota, scope: applicationScope))
         try await eventually { model.otaRecoveryDevice?.id == id }
 
         XCTAssertEqual(
@@ -185,9 +194,11 @@ final class AppModelReconnectTests: XCTestCase {
             macAddress: "DC:04:5A:EB:72:2B",
             capabilities: DeviceCapabilities(features: [])
         )
-
-        await fixture.transport.emit(.handshakeCompleted(snapshot))
-        await fixture.transport.emit(.connected(id))
+        model.choose(.init(id: id, localName: "Link-Power 2", rssi: -40, mode: .application))
+        try await eventually { await fixture.transport.currentScope() != nil }
+        let currentScope = await fixture.transport.currentScope()
+        let scope = try XCTUnwrap(currentScope)
+        await fixture.transport.emit(.handshakeCompleted(snapshot, scope: scope))
 
         try await eventually { model.state.identity == snapshot }
         XCTAssertEqual(model.capabilities.features.rawValue, 0, "empty FEATURES stays authoritative")
@@ -218,8 +229,10 @@ final class AppModelReconnectTests: XCTestCase {
             capabilities: CapabilityResolver.resolve(features: nil, cid: 0x0305, model: nil)
         )
 
-        await fixture.transport.emit(.handshakeCompleted(snapshot))
-        await fixture.transport.emit(.connected(id))
+        model.choose(.init(id: id, localName: "PeakDo-OTA", rssi: -40, mode: .ota))
+        let scope = testScope(id)
+        await fixture.transport.emit(.handshakeCompleted(snapshot, scope: scope))
+        await fixture.transport.emit(.connected(scope))
 
         try await eventually {
             let scanCount = await fixture.transport.scanCount
@@ -301,6 +314,30 @@ final class AppModelReconnectTests: XCTestCase {
 
         try await eventually { await fixture.transport.disconnectCount == 1 }
         XCTAssertEqual(model.route, .scan)
+    }
+
+    func testReturnToScanRejectsLateScopedConnectedAndHandshake() async throws {
+        let transport = ControlledConnectionTransport()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(persistence: AppPersistence(defaults: defaults), transportFactory: { transport })
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        let scope = await transport.scope(at: 0)
+
+        model.returnToScan()
+        await transport.emit(.connected(scope))
+        await transport.emit(.handshakeCompleted(makeIdentity(id: id, features: 0x7FFF), scope: scope))
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(model.route, .scan)
+        XCTAssertEqual(model.connectionStatus, .disconnected(nil))
+        XCTAssertNil(model.state.identity)
     }
 
     func testReturnToScanRejectsOldBrokerContextWhileDetachPublicationIsHeld() async throws {
@@ -411,7 +448,9 @@ final class AppModelReconnectTests: XCTestCase {
         try await eventually {
             await transport.connectedIDs.count == 1 && model.connectionStatus == .connected
         }
-        await transport.emit(.disconnected(TransportFailure(message: "link lost")))
+        let currentScope = await transport.currentScope()
+        let initialScope = try XCTUnwrap(currentScope)
+        await transport.emit(.disconnected(initialScope, TransportFailure(message: "link lost")))
         try await eventually { model.connectionStatus == .disconnected("link lost") }
 
         let result = Task {
@@ -447,14 +486,19 @@ final class AppModelReconnectTests: XCTestCase {
             model.connectionStatus == .connected && persistence.lastSuccessfulPeripheralID == b
         }
 
-        await transport.emit(.connected(a))
-        await transport.emit(.disconnected(TransportFailure(message: "stale A")))
+        let staleScope = await transport.scope(at: 0)
+        await transport.emit(.connected(staleScope))
+        await transport.emit(.disconnected(staleScope, TransportFailure(message: "stale A")))
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(persistence.lastSuccessfulPeripheralID, b)
         XCTAssertEqual(model.connectionStatus, .connected)
         let reused = try await model.deviceOperationBroker.withConnection(to: b) { $0.peripheralID }
         XCTAssertEqual(reused, b)
+
+        let currentScope = await transport.scope(at: 1)
+        await transport.emit(.disconnected(currentScope, TransportFailure(message: "current B")))
+        try await eventually { model.connectionStatus == .disconnected("current B") }
     }
 
     func testOldSamePeripheralConnectSuccessCannotResolveCurrentBrokerAttempt() async throws {
@@ -472,7 +516,8 @@ final class AppModelReconnectTests: XCTestCase {
         try await eventually { await transport.connectCount == 1 }
         await transport.succeedConnect(at: 0)
         try await eventually { model.connectionStatus == .connected }
-        await transport.emit(.disconnected(TransportFailure(message: "link lost")))
+        let initialScope = await transport.scope(at: 0)
+        await transport.emit(.disconnected(initialScope, TransportFailure(message: "link lost")))
         try await eventually { model.connectionStatus == .disconnected("link lost") }
 
         let first = Task {
@@ -619,8 +664,11 @@ final class AppModelReconnectTests: XCTestCase {
             modelNumber: "BP4SL3", cid: 0x0201,
             capabilities: CapabilityResolver.resolve(features: nil, cid: 0x0201, model: "BP4SL3")
         )
-
-        await fixture.transport.emit(.handshakeCompleted(lpp))
+        model.choose(.init(id: lpp.peripheralID, localName: "Link-Power Plus", rssi: -40, mode: .application))
+        try await eventually { await fixture.transport.currentScope()?.peripheralID == lpp.peripheralID }
+        let maybeLPPScope = await fixture.transport.currentScope()
+        let lppScope = try XCTUnwrap(maybeLPPScope)
+        await fixture.transport.emit(.handshakeCompleted(lpp, scope: lppScope))
         try await eventually { model.capabilities == lpp.capabilities }
         XCTAssertTrue(model.capabilities.hasDCPort)
         XCTAssertFalse(model.capabilities.hasBattery)
@@ -630,7 +678,11 @@ final class AppModelReconnectTests: XCTestCase {
             modelNumber: "BP4SL3V2",
             capabilities: CapabilityResolver.resolve(features: nil, cid: nil, model: "BP4SL3V2")
         )
-        await fixture.transport.emit(.handshakeCompleted(lp2))
+        model.choose(.init(id: lp2.peripheralID, localName: "Link-Power 2", rssi: -40, mode: .application))
+        try await eventually { await fixture.transport.currentScope()?.peripheralID == lp2.peripheralID }
+        let maybeLP2Scope = await fixture.transport.currentScope()
+        let lp2Scope = try XCTUnwrap(maybeLP2Scope)
+        await fixture.transport.emit(.handshakeCompleted(lp2, scope: lp2Scope))
         try await eventually { model.capabilities == lp2.capabilities }
         XCTAssertTrue(model.capabilities.hasBattery)
         XCTAssertTrue(model.capabilities.hasUSBPort)
@@ -662,7 +714,7 @@ final class AppModelReconnectTests: XCTestCase {
         let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
 
         await fixture.transport.emit(.discovered(device))
-        await fixture.transport.emit(.connected(id))
+        model.choose(device)
 
         try await eventually { fixture.persistence.lastSuccessfulPeripheralID == id }
         let identity = try XCTUnwrap(model.knownDevices[id])
@@ -793,8 +845,11 @@ final class AppModelReconnectTests: XCTestCase {
         let dc = try DCPortStatus(frame: Data([1, 0xFF, 0, 0, 0, 0, 0, 0]))
         let typeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 13))
 
-        await fixture.transport.emit(.handshakeCompleted(identity))
-        await fixture.transport.emit(.connected(id))
+        model.choose(.init(id: id, localName: "Link-Power 2", rssi: -40, mode: .application))
+        try await eventually { await fixture.transport.currentScope()?.peripheralID == id }
+        let maybeScope = await fixture.transport.currentScope()
+        let scope = try XCTUnwrap(maybeScope)
+        await fixture.transport.emit(.handshakeCompleted(identity, scope: scope))
         await fixture.transport.emit(.battery(firstBattery, timestamp: .seconds(1)))
         try await eventually { model.state.battery == firstBattery }
         observedAt = Date(timeIntervalSince1970: 1_001)
@@ -839,13 +894,16 @@ final class AppModelReconnectTests: XCTestCase {
         let dc = try DCPortStatus(frame: Data([1, 0xFF, 0, 0, 0, 0, 0, 0]))
         let typeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 13))
 
-        await fixture.transport.emit(.connected(id))
+        model.choose(.init(id: id, localName: "Link-Power 2", rssi: -40, mode: .application))
+        try await eventually { await fixture.transport.currentScope()?.peripheralID == id }
+        let maybeScope = await fixture.transport.currentScope()
+        let scope = try XCTUnwrap(maybeScope)
         await fixture.transport.emit(.battery(battery, timestamp: .seconds(1)))
         await fixture.transport.emit(.dc(dc, timestamp: .seconds(2)))
         await fixture.transport.emit(.typeC(typeC, timestamp: .seconds(3)))
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertNil(fixture.persistence.loadPersistedDeviceState(for: id))
-        await fixture.transport.emit(.handshakeCompleted(identity))
+        await fixture.transport.emit(.handshakeCompleted(identity, scope: scope))
 
         try await eventually {
             fixture.persistence.loadPersistedDeviceState(for: id)?.typeC?.value == typeC
@@ -867,8 +925,11 @@ final class AppModelReconnectTests: XCTestCase {
         let freshBattery = try battery(level: 64)
         let cachedDC = try DCPortStatus(frame: Data([1, 0xFF, 0, 0, 0, 0, 0, 0]))
         let cachedTypeC = try TypeCPortStatus(frame: Data(repeating: 0, count: 13))
-        await fixture.transport.emit(.handshakeCompleted(identity))
-        await fixture.transport.emit(.connected(id))
+        initial.choose(.init(id: id, localName: "Link-Power 2", rssi: -40, mode: .application))
+        try await eventually { await fixture.transport.currentScope()?.peripheralID == id }
+        let maybeScope = await fixture.transport.currentScope()
+        let scope = try XCTUnwrap(maybeScope)
+        await fixture.transport.emit(.handshakeCompleted(identity, scope: scope))
         await fixture.transport.emit(.battery(cachedBattery, timestamp: .seconds(1)))
         await fixture.transport.emit(.dc(cachedDC, timestamp: .seconds(2)))
         await fixture.transport.emit(.typeC(cachedTypeC, timestamp: .seconds(3)))
@@ -978,7 +1039,9 @@ private actor MutationTransport: DeviceTransport {
 
     func startScan() async throws {}
     func stopScan() async {}
-    func connect(to id: UUID) async throws { continuation.yield(.connected(id)) }
+    func connect(to id: UUID, scope: DeviceConnectionScope) async throws {
+        continuation.yield(.connected(scope))
+    }
     func disconnect() async {}
     func refreshTelemetry() async throws {}
     func synchronizeDeviceTime() async throws {}
@@ -1044,6 +1107,8 @@ private actor RecordingTransport: DeviceTransport {
     private let connectResult: ConnectResult
     private var suspendedConnect: CheckedContinuation<Void, Error>?
     private var postThrowDisconnectPending = false
+    private var activeScope: DeviceConnectionScope?
+    private var scopes: [DeviceConnectionScope] = []
     private(set) var connectedIDs: [UUID] = []
     private(set) var scanCount = 0
     private(set) var disconnectCount = 0
@@ -1059,13 +1124,15 @@ private actor RecordingTransport: DeviceTransport {
     func startScan() async throws { scanCount += 1 }
     func stopScan() async {}
 
-    func connect(to id: UUID) async throws {
+    func connect(to id: UUID, scope: DeviceConnectionScope) async throws {
         connectedIDs.append(id)
+        activeScope = scope
+        scopes.append(scope)
         switch connectResult {
         case .success:
-            continuation.yield(.connected(id))
+            continuation.yield(.connected(scope))
         case .failure(.beforeThrow):
-            continuation.yield(.disconnected(TransportFailure(message: "reconnect failed")))
+            continuation.yield(.disconnected(scope, TransportFailure(message: "reconnect failed")))
             throw Failure.reconnectFailed
         case .failure(.afterThrow):
             postThrowDisconnectPending = true
@@ -1076,23 +1143,33 @@ private actor RecordingTransport: DeviceTransport {
     }
 
     func releasePostThrowDisconnectIfNeeded() {
-        guard postThrowDisconnectPending else { return }
+        guard postThrowDisconnectPending, let activeScope else { return }
         postThrowDisconnectPending = false
-        continuation.yield(.disconnected(TransportFailure(message: "reconnect failed")))
+        continuation.yield(.disconnected(activeScope, TransportFailure(message: "reconnect failed")))
     }
 
     func failSuspendedConnect(ordering: FailureOrdering) {
         guard let suspendedConnect else { return }
         self.suspendedConnect = nil
         if ordering == .beforeThrow {
-            continuation.yield(.disconnected(TransportFailure(message: "stale reconnect failed")))
+            if let activeScope {
+                continuation.yield(.disconnected(activeScope, TransportFailure(message: "stale reconnect failed")))
+            }
         } else {
             postThrowDisconnectPending = true
         }
         suspendedConnect.resume(throwing: Failure.reconnectFailed)
     }
 
-    func disconnect() async { disconnectCount += 1 }
+    func scope(at index: Int) -> DeviceConnectionScope { scopes[index] }
+    func currentScope() -> DeviceConnectionScope? { activeScope }
+    func disconnect() async {
+        disconnectCount += 1
+        if let activeScope {
+            self.activeScope = nil
+            continuation.yield(.disconnected(activeScope, nil))
+        }
+    }
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
     func refreshTelemetry() async throws {}
     func synchronizeDeviceTime() async throws {}
@@ -1104,6 +1181,7 @@ private actor ControlledConnectionTransport: DeviceTransport {
     private let continuation: AsyncStream<DeviceEvent>.Continuation
     private var connectContinuations: [CheckedContinuation<Void, Error>] = []
     private(set) var connectedIDs: [UUID] = []
+    private var scopes: [DeviceConnectionScope] = []
     var connectCount: Int { connectedIDs.count }
 
     init() {
@@ -1115,15 +1193,16 @@ private actor ControlledConnectionTransport: DeviceTransport {
     func emit(_ event: DeviceEvent) { continuation.yield(event) }
     func startScan() async throws {}
     func stopScan() async {}
-    func connect(to id: UUID) async throws {
+    func connect(to id: UUID, scope: DeviceConnectionScope) async throws {
         connectedIDs.append(id)
+        scopes.append(scope)
         try await withCheckedThrowingContinuation { connectContinuations.append($0) }
     }
     func succeedConnect(at index: Int) {
-        let id = connectedIDs[index]
         connectContinuations[index].resume()
-        continuation.yield(.connected(id))
+        continuation.yield(.connected(scopes[index]))
     }
+    func scope(at index: Int) -> DeviceConnectionScope { scopes[index] }
     func disconnect() async {}
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
     func refreshTelemetry() async throws {}

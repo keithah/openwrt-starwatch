@@ -4,6 +4,21 @@ import XCTest
 
 @MainActor
 final class ReplayTransportTests: XCTestCase {
+    func testExplicitConnectionScopeIsPreservedAcrossLifecycleEvents() async throws {
+        let peripheralID = UUID()
+        let scope = DeviceConnectionScope(peripheralID: peripheralID, sessionID: UUID())
+        let replay = ReplayTransport(connectionScopes: [scope])
+        var iterator = replay.events.makeAsyncIterator()
+
+        try await replay.connect(to: peripheralID)
+        let connected = await iterator.next()
+        XCTAssertEqual(connected, .connected(scope))
+
+        await replay.disconnect()
+        let disconnected = await iterator.next()
+        XCTAssertEqual(disconnected, .disconnected(scope, nil))
+    }
+
     func testTransactionsNeverOverlap() async throws {
         let clock = TestDeviceClock()
         let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])

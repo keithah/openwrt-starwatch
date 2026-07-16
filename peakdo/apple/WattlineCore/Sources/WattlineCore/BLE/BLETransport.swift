@@ -29,8 +29,8 @@ public actor BLETransport: DeviceTransport {
         await bridge.stopScan()
     }
 
-    public func connect(to id: UUID) async throws {
-        try await bridge.connect(to: id)
+    public func connect(to id: UUID, scope: DeviceConnectionScope) async throws {
+        try await bridge.connect(to: id, connectionScope: scope)
     }
 
     public func disconnect() async {

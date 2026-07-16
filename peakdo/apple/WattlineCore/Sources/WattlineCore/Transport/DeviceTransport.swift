@@ -28,12 +28,24 @@ public struct TransportFailure: Error, Equatable, Sendable {
     }
 }
 
+/// Identifies one transport connection session end to end. Peripheral identity alone is
+/// insufficient because callbacks from an older session can arrive after a reconnect.
+public struct DeviceConnectionScope: Equatable, Hashable, Sendable {
+    public let peripheralID: UUID
+    public let sessionID: UUID
+
+    public init(peripheralID: UUID, sessionID: UUID) {
+        self.peripheralID = peripheralID
+        self.sessionID = sessionID
+    }
+}
+
 public enum DeviceEvent: Equatable, Sendable {
     case discovered(DiscoveredDevice)
-    case handshakeCompleted(DeviceIdentitySnapshot)
-    case connected(UUID)
-    case reconnecting(UUID)
-    case disconnected(TransportFailure?)
+    case handshakeCompleted(DeviceIdentitySnapshot, scope: DeviceConnectionScope)
+    case connected(DeviceConnectionScope)
+    case reconnecting(DeviceConnectionScope)
+    case disconnected(DeviceConnectionScope, TransportFailure?)
     case battery(BatteryStatus, timestamp: DeviceTimestamp)
     case dc(DCPortStatus, timestamp: DeviceTimestamp)
     case typeC(TypeCPortStatus, timestamp: DeviceTimestamp)
@@ -49,12 +61,24 @@ public protocol DeviceTransport: Sendable {
     var events: AsyncStream<DeviceEvent> { get }
     func startScan() async throws
     func stopScan() async
-    func connect(to id: UUID) async throws
+    func makeConnectionScope(for id: UUID) async -> DeviceConnectionScope
+    func connect(to id: UUID, scope: DeviceConnectionScope) async throws
     func disconnect() async
     func perform(_ command: DeviceCommand) async throws -> CommandOutcome
     func refreshTelemetry() async throws
     func synchronizeDeviceTime() async throws
     func readDeviceTimeIfSupported() async throws -> Date?
+}
+
+public extension DeviceTransport {
+    func makeConnectionScope(for id: UUID) async -> DeviceConnectionScope {
+        DeviceConnectionScope(peripheralID: id, sessionID: UUID())
+    }
+
+    func connect(to id: UUID) async throws {
+        let scope = await makeConnectionScope(for: id)
+        try await connect(to: id, scope: scope)
+    }
 }
 
 public protocol DeviceClock: Sendable {

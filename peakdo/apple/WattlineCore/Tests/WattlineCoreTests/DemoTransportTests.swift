@@ -4,6 +4,27 @@ import XCTest
 
 @MainActor
 final class DemoTransportTests: XCTestCase {
+    func testConnectionScopesAreDeterministicAndDistinctAcrossSessions() async throws {
+        let first = DemoTransport(seed: 42)
+        let second = DemoTransport(seed: 42)
+        var firstEvents = first.events.makeAsyncIterator()
+        var secondEvents = second.events.makeAsyncIterator()
+
+        _ = try await first.connectDemo()
+        _ = try await second.connectDemo()
+
+        let firstScope = try await nextConnectedScope(from: &firstEvents)
+        let secondScope = try await nextConnectedScope(from: &secondEvents)
+        XCTAssertEqual(firstScope, secondScope)
+
+        await first.disconnect()
+        _ = await firstEvents.next()
+        _ = try await first.connectDemo()
+        let reconnectedScope = try await nextConnectedScope(from: &firstEvents)
+        XCTAssertNotEqual(reconnectedScope, firstScope)
+        XCTAssertEqual(reconnectedScope.peripheralID, firstScope.peripheralID)
+    }
+
     func testDemoIdentityMatchesContract() async throws {
         let demo = DemoTransport(seed: 0x57415454)
 
@@ -21,7 +42,7 @@ final class DemoTransportTests: XCTestCase {
 
         _ = try await demo.connectDemo()
 
-        guard case let .handshakeCompleted(identity) = await iterator.next() else {
+        guard case let .handshakeCompleted(identity, _) = await iterator.next() else {
             return XCTFail("Expected Demo handshake before connected")
         }
         XCTAssertEqual(identity.peripheralID, UUID(uuidString: "57415454-4C49-4E45-8000-000000000305"))
@@ -220,7 +241,9 @@ final class DemoTransportTests: XCTestCase {
 
         let events = await recorder.events
         XCTAssertEqual(events.count, 6)
-        XCTAssertEqual(events.last, .disconnected(nil))
+        guard case .disconnected(_, nil) = events.last else {
+            return XCTFail("Expected scoped clean disconnect")
+        }
     }
 
     func testCadenceTimestampReadDoesNotRetainTransport() async throws {
@@ -355,6 +378,15 @@ private extension DeviceEvent {
         default: nil
         }
     }
+}
+
+private func nextConnectedScope(
+    from iterator: inout AsyncStream<DeviceEvent>.AsyncIterator
+) async throws -> DeviceConnectionScope {
+    while let event = await iterator.next() {
+        if case let .connected(scope) = event { return scope }
+    }
+    throw XCTSkip("Event stream ended before a connected event")
 }
 
 private actor DemoTestClock: DeviceClock {
