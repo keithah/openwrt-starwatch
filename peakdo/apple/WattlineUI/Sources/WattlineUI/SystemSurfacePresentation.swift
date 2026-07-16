@@ -19,4 +19,14 @@ public struct SystemSurfacePreferences: Codable, Equatable, Sendable {
         self.lowBatteryEnabled = lowBatteryEnabled
         self.lowBatteryThreshold = min(max(lowBatteryThreshold, 1), 99)
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            liveActivityCharging: try container.decode(Bool.self, forKey: .liveActivityCharging),
+            liveActivityDischarging: try container.decode(Bool.self, forKey: .liveActivityDischarging),
+            lowBatteryEnabled: try container.decode(Bool.self, forKey: .lowBatteryEnabled),
+            lowBatteryThreshold: try container.decode(Int.self, forKey: .lowBatteryThreshold)
+        )
+    }
 }

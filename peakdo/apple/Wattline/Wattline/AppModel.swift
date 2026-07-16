@@ -208,6 +208,7 @@ final class AppModel {
     private let maintenanceClock: any DeviceClock
     private let snapshotCoordinator: SnapshotCoordinator?
     private let widgetReloadAdapter: WidgetReloadAdapter?
+    private let liveActivityCoordinator: LiveActivityCoordinator
     private var snapshotFlushTask: Task<Void, Never>?
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
@@ -270,7 +271,8 @@ final class AppModel {
         notificationAdapter: any NotificationCenterAdapter = SystemNotificationCenterAdapter(),
         maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
         snapshotCoordinator: SnapshotCoordinator? = SnapshotCoordinator.production(),
-        widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter()
+        widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter(),
+        liveActivityAdapter: any LiveActivityAdapter = SystemLiveActivityAdapter()
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
@@ -281,6 +283,7 @@ final class AppModel {
         self.maintenanceClock = maintenanceClock
         self.snapshotCoordinator = snapshotCoordinator
         self.widgetReloadAdapter = widgetReloadAdapter
+        self.liveActivityCoordinator = LiveActivityCoordinator(adapter: liveActivityAdapter)
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
@@ -1303,6 +1306,15 @@ final class AppModel {
                 self.sharedSnapshot = fanOut.snapshot
                 self.widgetReloadAdapter?.apply(fanOut.decision)
                 await self.lowBatteryNotificationCoordinator.receive(fanOut.snapshot)
+                let preferences = self.persistence.systemSurfacePreferences
+                await self.liveActivityCoordinator.consume(
+                    fanOut.snapshot,
+                    now: Date(),
+                    preferences: LiveActivityPreferences(
+                        chargingEnabled: preferences.liveActivityCharging,
+                        dischargingEnabled: preferences.liveActivityDischarging
+                    )
+                )
             }
             // Yield once so same-turn battery/DC/Type-C callbacks coalesce in the coordinator.
             await Task.yield()

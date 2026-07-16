@@ -100,6 +100,26 @@ final class SnapshotCoordinatorTests: XCTestCase {
         XCTAssertEqual(reloads, 1)
     }
 
+    func testAppModelFansOutAcceptedSnapshotToLiveActivityCoordinator() async throws {
+        let backend = RecordingSnapshotBackend()
+        let coordinator = Wattline.SnapshotCoordinator(store: SharedSnapshotStore(backend: backend), now: { Date(timeIntervalSince1970: 200) })
+        let activity = SnapshotActivityAdapter()
+        let model = AppModel(
+            persistence: AppPersistence(defaults: UserDefaults(suiteName: "ActivityFanout-\(UUID().uuidString)")!),
+            snapshotCoordinator: coordinator,
+            liveActivityAdapter: activity
+        )
+        let id = UUID()
+        let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: "Demo", mode: .application, capabilities: DeviceCapabilities(features: []))
+        let battery = try BatteryStatus(frame: batteryFrame(level: 80, status: .charging))
+        model.applySessionState(DeviceState(identity: identity, connection: .live, freshness: .live, battery: battery))
+        try await Task.sleep(for: .milliseconds(80))
+        model.applySessionState(DeviceState(identity: identity, connection: .live, freshness: .live, battery: try BatteryStatus(frame: batteryFrame(level: 79, status: .charging))))
+        try await Task.sleep(for: .milliseconds(80))
+        let events = await activity.events
+        XCTAssertEqual(events.map(\.0), [.request, .update])
+    }
+
     func testDashboardDeepLinkSelectsConnectedRouteAndInfoPlistRegistersScheme() throws {
         let defaults = UserDefaults(suiteName: "DeepLink-\(UUID().uuidString)")!
         let persistence = AppPersistence(defaults: defaults)
@@ -111,6 +131,22 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let plist = try String(contentsOfFile: "Wattline/Info.plist")
         XCTAssertTrue(plist.contains("<string>wattline</string>"))
     }
+}
+
+private func batteryFrame(level: UInt8, status: PowerFlow) -> Data {
+    var frame = Data(repeating: 0, count: 16)
+    frame[0] = 1
+    frame[1] = UInt8(bitPattern: status.rawValue)
+    frame[7] = level
+    return frame
+}
+
+private actor SnapshotActivityAdapter: LiveActivityAdapter {
+    enum Event: Equatable { case request, update, end }
+    private(set) var events: [(Event, WattlineActivityAttributes.ContentState?)] = []
+    func request(state: WattlineActivityAttributes.ContentState) async throws { events.append((.request, state)) }
+    func update(state: WattlineActivityAttributes.ContentState) async throws { events.append((.update, state)) }
+    func end() async { events.append((.end, nil)) }
 }
 
 private final class RecordingSnapshotBackend: @unchecked Sendable, SnapshotKeyValueStore {

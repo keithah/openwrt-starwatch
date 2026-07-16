@@ -25,9 +25,15 @@ final class LiveActivityCoordinator {
         do {
             switch command {
             case .none:
-                // Preserve the first disconnected observation timestamp in the activity state.
-                if snapshot.connection == .disconnected { try await adapter.update(state: Self.state(from: snapshot, observedAt: firstDisconnectedObservedAt)) }
-            case .start(let s), .renew(let s): try await adapter.request(state: Self.state(from: s))
+                // Any non-live transition must be represented as stale; preserve the
+                // first disconnect timestamp for the disconnected hold window.
+                if snapshot.connection != .live {
+                    try await adapter.update(state: Self.state(from: snapshot, observedAt: snapshot.connection == .disconnected ? firstDisconnectedObservedAt : nil))
+                }
+            case .start(let s): try await adapter.request(state: Self.state(from: s))
+            case .renew(let s):
+                await adapter.end()
+                try await adapter.request(state: Self.state(from: s))
             case .update(let s): try await adapter.update(state: Self.state(from: s, observedAt: firstDisconnectedObservedAt))
             case .end: await adapter.end()
             }

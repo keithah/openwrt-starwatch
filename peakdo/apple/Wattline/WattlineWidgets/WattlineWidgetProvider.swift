@@ -61,7 +61,9 @@ struct WattlineWidgetView: View {
                 if let minutes = snapshot.battery?.remainingMinutes { Text(runtime(minutes, status: snapshot.battery?.status)).font(.caption).fontDesign(.monospaced) }
                 HStack { Text("DC \(watts(snapshot.dc)) W"); Text("USB-C \(watts(snapshot.typeC)) W") }.font(.caption2).fontDesign(.monospaced)
             }
-            Text(staleness(snapshot)).font(.caption2).foregroundStyle(.secondary)
+            if snapshot.connection != .live {
+                Text(staleness(snapshot)).font(.caption2).foregroundStyle(.secondary)
+            }
         }.padding()
     }
     private func state(_ snapshot: SharedDeviceSnapshot) -> String { snapshot.battery?.status == .charging ? "Charging" : snapshot.battery?.status == .discharging ? "Discharging" : "Idle" }

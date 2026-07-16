@@ -85,4 +85,17 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         let plist = try NSDictionary(contentsOf: root.appendingPathComponent("Wattline/Info.plist"), error: ())
         XCTAssertEqual(plist["NSSupportsLiveActivities"] as? Bool, true)
     }
+
+    func testWidgetExtensionDeclaresWidgetKitExtensionPoint() throws {
+        let plist = try NSDictionary(contentsOf: root.appendingPathComponent("WattlineWidgets/Info.plist"), error: ())
+        let extensionDictionary = try XCTUnwrap(plist["NSExtension"] as? NSDictionary)
+        XCTAssertEqual(extensionDictionary["NSExtensionPointIdentifier"] as? String, "com.apple.widgetkit-extension")
+    }
+
+    func testAppHasExplicitWidgetTargetDependency() throws {
+        let project = try projectText()
+        let app = try target("A10000000000000000000020", in: project)
+        XCTAssertTrue(app.contains("A10000000000000000000095"), "Wattline must explicitly depend on WattlineWidgets")
+        XCTAssertTrue(project.contains("A10000000000000000000095 = {isa = PBXTargetDependency; target = A10000000000000000000078"))
+    }
 }

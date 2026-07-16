@@ -21,7 +21,8 @@ final class LiveActivityCoordinatorTests: XCTestCase {
         let adapter = RecordingActivityAdapter(failRequests: true)
         let coordinator = LiveActivityCoordinator(adapter: adapter)
         await coordinator.consume(snapshot(status: .discharging, observedAt: 1), now: Date(timeIntervalSince1970: 1), preferences: .init())
-        await coordinator.consume(snapshot(status: .discharging, connection: .disconnected, observedAt: 2), now: Date(timeIntervalSince1970: 2 + 15 * 60), preferences: .init())
+        await coordinator.consume(snapshot(status: .discharging, connection: .disconnected, observedAt: 2), now: Date(timeIntervalSince1970: 2), preferences: .init())
+        await coordinator.consume(snapshot(status: .discharging, connection: .disconnected, observedAt: 903), now: Date(timeIntervalSince1970: 903), preferences: .init())
         let events = await adapter.events
         XCTAssertEqual(events.map { $0.0 }, [.request, .update, .end])
     }
@@ -93,6 +94,25 @@ final class LiveActivityCoordinatorTests: XCTestCase {
         await coordinator.consume(snapshot(status: .idle, observedAt: 302), now: Date(timeIntervalSince1970: 302), preferences: .init())
         let events = await adapter.events
         XCTAssertEqual(events.map(\.0), [.request, .end])
+    }
+
+    func testRenewEndsExistingActivityBeforeRequestingReplacement() async throws {
+        let adapter = RecordingActivityAdapter()
+        let coordinator = LiveActivityCoordinator(adapter: adapter)
+        await coordinator.consume(snapshot(status: .charging, observedAt: 1), now: Date(timeIntervalSince1970: 1), preferences: .init())
+        await coordinator.consume(snapshot(level: 89, status: .charging, observedAt: 2), now: Date(timeIntervalSince1970: 7 * 3600 + 55 * 60 + 1), preferences: .init())
+        let events = await adapter.events
+        XCTAssertEqual(events.map(\.0), [.request, .end, .request])
+    }
+
+    func testReconnectingSnapshotPublishesDisconnectedActivityState() async throws {
+        let adapter = RecordingActivityAdapter()
+        let coordinator = LiveActivityCoordinator(adapter: adapter)
+        await coordinator.consume(snapshot(status: .charging, observedAt: 1), now: Date(timeIntervalSince1970: 1), preferences: .init())
+        await coordinator.consume(snapshot(status: .charging, connection: .reconnecting, observedAt: 2), now: Date(timeIntervalSince1970: 2), preferences: .init())
+        let events = await adapter.events
+        XCTAssertEqual(events.map(\.0), [.request, .update])
+        XCTAssertEqual(events.last?.1?.isConnected, false)
     }
 
     private func snapshot(level: Int = 90, status: PowerFlow, connection: SharedConnectionState = .live, observedAt: TimeInterval,
