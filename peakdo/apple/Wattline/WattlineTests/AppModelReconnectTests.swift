@@ -628,6 +628,79 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(model.connectionStatus, .disconnected("terminal during delivery"))
     }
 
+    func testBrokerReconnectTerminalDuringBrokerCompletionLeavesBrokerDisconnected() async throws {
+        let transport = ControlledConnectionTransport()
+        let completionHop = BrokerPublicationBarrier()
+        let invocationCount = OperationInvocationCounter()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport },
+            brokerCompletionBarrier: { await completionHop.waitIfHeld() }
+        )
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        let initialScope = await transport.scope(at: 0)
+        await transport.emit(.disconnected(initialScope, TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+
+        await completionHop.holdNext()
+        let reconnect = Task { () -> Result<UUID, Error> in
+            do {
+                return .success(try await model.deviceOperationBroker.withConnection(
+                    to: id,
+                    timeout: .milliseconds(150)
+                ) { context in
+                    await invocationCount.increment()
+                    return context.peripheralID
+                })
+            } catch {
+                return .failure(error)
+            }
+        }
+        try await eventually { await transport.connectCount == 2 }
+        await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
+        await completionHop.waitUntilBlocked()
+
+        let reconnectScope = await transport.scope(at: 1)
+        await transport.emit(.disconnected(
+            reconnectScope,
+            TransportFailure(message: "terminal during broker completion")
+        ))
+        try await eventually {
+            model.connectionStatus == .disconnected("terminal during broker completion")
+        }
+        await completionHop.release()
+
+        switch await reconnect.value {
+        case let .success(reconnectedID):
+            XCTAssertEqual(reconnectedID, id)
+        case let .failure(error):
+            XCTFail("Reconnect waiter did not complete successfully: \(error)")
+        }
+        let countAfterCompletion = await invocationCount.value
+        let pendingAfterCompletion = await model.deviceOperationBroker.pendingConnectionCount
+        XCTAssertEqual(countAfterCompletion, 1)
+        XCTAssertEqual(pendingAfterCompletion, 0)
+        try await eventually { await !model.deviceOperationBroker.hasConnectedContext }
+        let brokerHasConnectedContext = await model.deviceOperationBroker.hasConnectedContext
+        XCTAssertFalse(brokerHasConnectedContext)
+        XCTAssertNil(model.brokerReconnectAttempt)
+        XCTAssertEqual(model.connectionStatus, .disconnected("terminal during broker completion"))
+        try await Task.sleep(for: .milliseconds(50))
+        let finalInvocationCount = await invocationCount.value
+        let finalPendingConnectionCount = await model.deviceOperationBroker.pendingConnectionCount
+        XCTAssertEqual(finalInvocationCount, 1)
+        XCTAssertEqual(finalPendingConnectionCount, 0)
+        XCTAssertEqual(model.connectionStatus, .disconnected("terminal during broker completion"))
+    }
+
     func testOldSamePeripheralConnectSuccessCannotResolveCurrentBrokerAttempt() async throws {
         let transport = ControlledConnectionTransport()
         let suiteName = "WattlineTests.\(UUID().uuidString)"

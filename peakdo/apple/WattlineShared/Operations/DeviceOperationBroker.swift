@@ -85,6 +85,12 @@ actor DeviceOperationBroker {
 
     var pendingConnectionCount: Int { connectionWaiters.count }
 
+    var hasConnectedContext: Bool {
+        guard let context, context.lifecycle.isActive else { return false }
+        return connectedGeneration == context.generation
+            && connectedPeripheralID == context.peripheralID
+    }
+
     func attach(_ context: Context) {
         guard context.lifecycle.isActive else { return }
         if let current = self.context, context.generation < current.generation {

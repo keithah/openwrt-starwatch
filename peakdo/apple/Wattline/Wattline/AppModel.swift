@@ -8,6 +8,7 @@ import WattlineCore
 final class AppModel {
     typealias TransportFactory = @MainActor () -> any DeviceTransport
     typealias BrokerPublicationBarrier = @Sendable () async -> Void
+    typealias BrokerCompletionBarrier = @Sendable () async -> Void
     typealias ConnectedLifecycleBarrier = @Sendable () async -> Void
 
     enum Route: Equatable {
@@ -146,6 +147,7 @@ final class AppModel {
     private let persistence: AppPersistence
     private let transportFactory: TransportFactory
     private let brokerPublicationBarrier: BrokerPublicationBarrier
+    private let brokerCompletionBarrier: BrokerCompletionBarrier
     private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
@@ -182,11 +184,13 @@ final class AppModel {
         persistence: AppPersistence = AppPersistence(),
         transportFactory: @escaping TransportFactory = { BLETransport() },
         brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {},
+        brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
         connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {}
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
         self.brokerPublicationBarrier = brokerPublicationBarrier
+        self.brokerCompletionBarrier = brokerCompletionBarrier
         self.connectedLifecycleBarrier = connectedLifecycleBarrier
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
@@ -733,8 +737,18 @@ final class AppModel {
             activeConnectionScope = scope
             brokerReconnectAttempt = nil
             brokerReconnectScope = nil
-            establishConnectedPresentation(scope: scope)
+            await brokerCompletionBarrier()
             await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
+            guard transportGeneration == attempt.generation,
+                  selectedPeripheralID == attempt.peripheralID,
+                  activeConnectionScope == scope,
+                  !retiredConnectionScopeIDs.contains(scope.sessionID),
+                  !Task.isCancelled
+            else {
+                await deviceOperationBroker.markDisconnected(generation: attempt.generation)
+                return
+            }
+            establishConnectedPresentation(scope: scope)
             if let session {
                 await connectedLifecycleBarrier()
                 await session.receive(.connected(scope))
