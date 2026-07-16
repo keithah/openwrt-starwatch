@@ -50,6 +50,23 @@ final class LowBatteryNotificationTests: XCTestCase {
         XCTAssertEqual(result, .timedOut)
     }
 
+    func testActionSucceedsOnlyAfterAuthoritativeTelemetry() async {
+        let recorder = NotificationRecorder()
+        let id = UUID()
+        let transport = ReplayTransport(steps: [.reply(bytes: Data([Command.dcControl.rawValue, 0x81, 0]))])
+        let broker = Wattline.DeviceOperationBroker()
+        let session = DeviceSession(transport: transport)
+        await broker.attach(.init(generation: 1, peripheralID: id, transport: transport, session: session))
+        await broker.markConnected(peripheralID: id, generation: 1)
+        let box = await MainActor.run { SnapshotBox(snapshot: makeSnapshot(id: id, enabled: true)) }
+        let coordinator = await MainActor.run {
+            LowBatteryNotificationCoordinator(notifications: recorder, broker: broker, peripheralID: { id }, snapshot: { box.snapshot }, capabilities: { DeviceCapabilities(features: [.dcControl]) }, telemetryTimeout: .milliseconds(100))
+        }
+        Task { try? await Task.sleep(for: .milliseconds(20)); await MainActor.run { box.snapshot = makeSnapshot(id: id, enabled: false) } }
+        let result = await coordinator.handleAction(identifier: "WATTLINE_TURN_OFF_DC")
+        XCTAssertEqual(result, .success)
+    }
+
     func testActionMapsUnsupportedAndUnavailableDistinctly() async {
         let recorder = NotificationRecorder()
         let unsupported = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder, capabilities: { DeviceCapabilities(features: []) }) }
@@ -71,6 +88,15 @@ final class LowBatteryNotificationTests: XCTestCase {
         let posts = await recorder.posts
         XCTAssertEqual(posts.count, 1)
     }
+}
+
+@MainActor final class SnapshotBox {
+    var snapshot: SharedDeviceSnapshot
+    init(snapshot: SharedDeviceSnapshot) { self.snapshot = snapshot }
+}
+
+@MainActor func makeSnapshot(id: UUID, enabled: Bool) -> SharedDeviceSnapshot {
+    SharedDeviceSnapshot(peripheralID: id, featuresRawValue: FeatureFlags.dcControl.rawValue, battery: nil, dc: .init(enabled: enabled, status: .idle, voltage: 0, current: 0, power: 0), typeC: nil, connection: .live, observedAt: Date())
 }
 
 actor NotificationRecorder: NotificationCenterAdapter {
