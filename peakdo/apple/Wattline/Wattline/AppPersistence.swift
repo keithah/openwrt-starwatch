@@ -31,6 +31,8 @@ final class AppPersistence {
     static let onboardingCompleteKey = "onboardingComplete"
     static let knownDevicesKey = "knownDevices"
     static let lastSuccessfulPeripheralIDKey = "lastSuccessfulPeripheralID"
+    static let lowBatteryEnabledKey = "lowBatteryEnabled"
+    static let lowBatteryThresholdKey = "lowBatteryThreshold"
 
     private let defaults: UserDefaults
     private let wallClock: @MainActor () -> Date
@@ -58,6 +60,19 @@ final class AppPersistence {
         set {
             defaults.set(newValue?.uuidString, forKey: Self.lastSuccessfulPeripheralIDKey)
         }
+    }
+
+    var lowBatteryEnabled: Bool {
+        get { defaults.bool(forKey: Self.lowBatteryEnabledKey) }
+        set { defaults.set(newValue, forKey: Self.lowBatteryEnabledKey) }
+    }
+
+    var lowBatteryThreshold: Int {
+        get {
+            guard defaults.object(forKey: Self.lowBatteryThresholdKey) != nil else { return 20 }
+            return min(max(defaults.integer(forKey: Self.lowBatteryThresholdKey), 1), 99)
+        }
+        set { defaults.set(min(max(newValue, 1), 99), forKey: Self.lowBatteryThresholdKey) }
     }
 
     func loadKnownDevices() -> [UUID: AppModel.CachedIdentity] {

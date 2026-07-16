@@ -61,8 +61,15 @@ final class LowBatteryNotificationCoordinator {
         guard enabled != isEnabled else { return .success }
         if enabled {
             guard !authorizationRequested else { isEnabled = true; return .success }
+            let granted = (try? await notifications.requestAuthorization()) == true
+            guard granted else {
+                // A denial is not a successful enable. Leave the latch clear so a
+                // later user retry can request authorization again after changing
+                // the system permission.
+                authorizationRequested = false
+                return .denied
+            }
             authorizationRequested = true
-            guard (try? await notifications.requestAuthorization()) == true else { return .denied }
             isEnabled = true
             await notifications.registerLowBatteryCategory(includeDCAction: capabilities().hasDCControl)
             return .success

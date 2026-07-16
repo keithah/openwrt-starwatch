@@ -26,6 +26,20 @@ final class LowBatteryNotificationTests: XCTestCase {
         XCTAssertFalse(enabled)
     }
 
+    func testAuthorizationDeniedAllowsRetryAfterPermissionChanges() async {
+        let recorder = ToggleableNotificationRecorder(authorization: false)
+        let coordinator = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder) }
+        let first = await coordinator.setEnabled(true)
+        XCTAssertEqual(first, .denied)
+        await recorder.setAuthorization(true)
+        let second = await coordinator.setEnabled(true)
+        let enabled = await MainActor.run { coordinator.isEnabled }
+        let requests = await recorder.authorizationRequests
+        XCTAssertEqual(second, .success)
+        XCTAssertTrue(enabled)
+        XCTAssertEqual(requests, 2)
+    }
+
     func testDCActionIsStructurallyAbsentWithoutCapability() async {
         let recorder = NotificationRecorder()
         let coordinator = await MainActor.run { LowBatteryNotificationCoordinator(notifications: recorder, capabilities: { DeviceCapabilities(features: []) }) }
@@ -109,4 +123,14 @@ actor NotificationRecorder: NotificationCenterAdapter {
     func requestAuthorization() async throws -> Bool { authorizationRequests += 1; return authorization }
     func registerLowBatteryCategory(includeDCAction: Bool) async { categories.append(includeDCAction); lastIncludedDCAction = includeDCAction }
     func postLowBattery(level: Int, threshold: Int) async throws { posts.append((level, threshold)) }
+}
+
+actor ToggleableNotificationRecorder: NotificationCenterAdapter {
+    var authorization: Bool
+    private(set) var authorizationRequests = 0
+    init(authorization: Bool) { self.authorization = authorization }
+    func setAuthorization(_ value: Bool) { authorization = value }
+    func requestAuthorization() async throws -> Bool { authorizationRequests += 1; return authorization }
+    func registerLowBatteryCategory(includeDCAction: Bool) async {}
+    func postLowBattery(level: Int, threshold: Int) async throws {}
 }

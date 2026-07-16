@@ -152,12 +152,21 @@ final class AppModel {
     var pendingLimits: [PowerLimitType] = []
     var toastMessage: String?
     var demoChargerConnected = false
+    private(set) var sharedSnapshot: SharedDeviceSnapshot?
     private(set) var lastClockSync: Date?
     private(set) var deviceClockDrift: TimeInterval?
 
     var clockStatusText: String {
         guard let drift = deviceClockDrift else { return "Drift unavailable" }
         return String(format: "Drift %.1fs", drift)
+    }
+
+    var lowBatteryEnabled: Bool { persistence.lowBatteryEnabled }
+    var lowBatteryThreshold: Int { persistence.lowBatteryThreshold }
+
+    func setLowBatteryEnabled(_ enabled: Bool) async -> NotificationActionResult {
+        persistence.lowBatteryEnabled = enabled
+        return await lowBatteryNotificationCoordinator.setEnabled(enabled)
     }
 
     private(set) var knownDevices: [UUID: CachedIdentity]
@@ -208,6 +217,16 @@ final class AppModel {
     ) { [weak self] attempt in
         await self?.startBrokerReconnect(attempt)
     }
+
+    @ObservationIgnored
+    private(set) lazy var lowBatteryNotificationCoordinator: LowBatteryNotificationCoordinator = {
+        LowBatteryNotificationCoordinator(
+            broker: deviceOperationBroker,
+            peripheralID: { [weak self] in self?.selectedPeripheralID },
+            snapshot: { [weak self] in self?.sharedSnapshot },
+            capabilities: { [weak self] in self?.capabilities ?? DeviceCapabilities(features: []) }
+        )
+    }()
 
     init(
         persistence: AppPersistence = AppPersistence(),
@@ -262,7 +281,8 @@ final class AppModel {
         let brokerContext = prepareBrokerContext(
             peripheralID: DemoTransport.deviceID,
             generation: generation
-        )
+    )
+
         operationTask = Task { [weak self] in
             do {
                 await self?.publishBrokerContext(brokerContext)
@@ -1229,6 +1249,10 @@ final class AppModel {
                 capabilities: capabilities,
                 generation: generation
             )
+            if let fanOut {
+                self.sharedSnapshot = fanOut.snapshot
+                await self.lowBatteryNotificationCoordinator.receive(fanOut.snapshot)
+            }
             // Yield once so same-turn battery/DC/Type-C callbacks coalesce in the coordinator.
             await Task.yield()
             guard fanOut != nil, !Task.isCancelled, self.transportGeneration == generation else { return }
