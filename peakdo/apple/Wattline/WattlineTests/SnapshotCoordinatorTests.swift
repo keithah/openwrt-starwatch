@@ -86,6 +86,27 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let model = AppModel(persistence: persistence, transportFactory: { DemoTransport(seed: 1) })
         XCTAssertTrue(model.hasSnapshotCoordinatorForTesting)
     }
+
+    func testAppModelAppliesWidgetReloadDecisionForAcceptedTelemetry() async throws {
+        let backend = RecordingSnapshotBackend()
+        let coordinator = Wattline.SnapshotCoordinator(store: SharedSnapshotStore(backend: backend), now: { Date(timeIntervalSince1970: 200) })
+        var reloads = 0
+        let adapter = Wattline.WidgetReloadAdapter { reloads += 1 }
+        let model = AppModel(persistence: AppPersistence(defaults: UserDefaults(suiteName: "WidgetReload-\(UUID().uuidString)!")!), snapshotCoordinator: coordinator, widgetReloadAdapter: adapter)
+        let id = UUID()
+        let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: "Demo", mode: .application, capabilities: DeviceCapabilities(features: []))
+        model.applySessionState(DeviceState(identity: identity, connection: .live, freshness: .live))
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(reloads, 1)
+    }
+
+    func testDashboardDeepLinkSelectsConnectedRouteAndInfoPlistRegistersScheme() throws {
+        let model = AppModel(persistence: AppPersistence(defaults: UserDefaults(suiteName: "DeepLink-\(UUID().uuidString)")!), snapshotCoordinator: nil)
+        model.handleDeepLink(URL(string: "wattline://dashboard")!)
+        XCTAssertEqual(model.route, .connected)
+        let plist = try String(contentsOfFile: "Wattline/Info.plist")
+        XCTAssertTrue(plist.contains("<string>wattline</string>"))
+    }
 }
 
 private final class RecordingSnapshotBackend: @unchecked Sendable, SnapshotKeyValueStore {

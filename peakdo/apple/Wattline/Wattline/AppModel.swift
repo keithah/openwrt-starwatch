@@ -182,6 +182,7 @@ final class AppModel {
     private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
     private let maintenanceClock: any DeviceClock
     private let snapshotCoordinator: SnapshotCoordinator?
+    private let widgetReloadAdapter: WidgetReloadAdapter?
     private var snapshotFlushTask: Task<Void, Never>?
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
@@ -241,7 +242,8 @@ final class AppModel {
         brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
         connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {},
         maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
-        snapshotCoordinator: SnapshotCoordinator? = SnapshotCoordinator.production()
+        snapshotCoordinator: SnapshotCoordinator? = SnapshotCoordinator.production(),
+        widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter()
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
@@ -250,6 +252,7 @@ final class AppModel {
         self.connectedLifecycleBarrier = connectedLifecycleBarrier
         self.maintenanceClock = maintenanceClock
         self.snapshotCoordinator = snapshotCoordinator
+        self.widgetReloadAdapter = widgetReloadAdapter
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
@@ -271,6 +274,13 @@ final class AppModel {
             if lhs.rssi != rhs.rssi { return lhs.rssi > rhs.rssi }
             return lhs.localName.localizedCaseInsensitiveCompare(rhs.localName) == .orderedAscending
         }
+    }
+
+    func handleDeepLink(_ url: URL) {
+        guard url.scheme?.lowercased() == "wattline",
+              url.host?.lowercased() == "dashboard" else { return }
+        guard route != .onboarding else { return }
+        route = .connected
     }
 
     func enterDemo() {
@@ -1257,6 +1267,7 @@ final class AppModel {
             )
             if let fanOut {
                 self.sharedSnapshot = fanOut.snapshot
+                self.widgetReloadAdapter?.apply(fanOut.decision)
                 await self.lowBatteryNotificationCoordinator.receive(fanOut.snapshot)
             }
             // Yield once so same-turn battery/DC/Type-C callbacks coalesce in the coordinator.

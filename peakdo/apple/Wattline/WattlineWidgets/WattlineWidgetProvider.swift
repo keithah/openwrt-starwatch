@@ -13,20 +13,25 @@ struct WattlineWidgetProvider: TimelineProvider {
     func getSnapshot(in context: Context, completion: @escaping (WattlineWidgetEntry) -> Void) {
         let callback = CompletionBox(completion)
         Task { @MainActor in
-            let entry = WattlineWidgetEntry(date: Date(), snapshot: await source.read())
+            let entry = WattlineWidgetEntry(date: Date(), snapshot: await readAvailableSnapshot())
             callback.call(entry)
         }
     }
     func getTimeline(in context: Context, completion: @escaping (Timeline<WattlineWidgetEntry>) -> Void) {
         let callback = CompletionBox(completion)
         Task { @MainActor in
-            let entry = WattlineWidgetEntry(date: Date(), snapshot: await source.read())
+            let entry = WattlineWidgetEntry(date: Date(), snapshot: await readAvailableSnapshot())
             callback.call(Timeline(entries: [entry], policy: .after(Date().addingTimeInterval(15 * 60))))
         }
     }
 
-    func snapshotEntry() async -> WattlineWidgetEntry { WattlineWidgetEntry(date: Date(), snapshot: await source.read()) }
+    func snapshotEntry() async -> WattlineWidgetEntry { WattlineWidgetEntry(date: Date(), snapshot: await readAvailableSnapshot()) }
     func timelineEntry() async -> WattlineWidgetEntry { await snapshotEntry() }
+
+    private func readAvailableSnapshot() async -> SharedDeviceSnapshot? {
+        guard let snapshot = await source.read(), snapshot.battery != nil else { return nil }
+        return snapshot
+    }
 
     private static let sampleSnapshot = SharedDeviceSnapshot(
         peripheralID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!, featuresRawValue: 0,

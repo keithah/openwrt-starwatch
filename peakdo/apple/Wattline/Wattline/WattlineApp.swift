@@ -23,6 +23,7 @@ struct WattlineApp: App {
                 .environment(model)
                 .preferredColorScheme(.dark)
                 .tint(WattlineTheme.accent)
+                .onOpenURL { model.handleDeepLink($0) }
         }
     }
 }
