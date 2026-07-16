@@ -1219,7 +1219,7 @@ final class AppModel {
         snapshotFlushTask?.cancel()
         snapshotFlushTask = Task { [weak self] in
             guard let self else { return }
-            _ = await snapshotCoordinator.receive(
+            let fanOut = await snapshotCoordinator.receive(
                 state: nextState,
                 identity: identity,
                 capabilities: capabilities,
@@ -1227,7 +1227,7 @@ final class AppModel {
             )
             // Yield once so same-turn battery/DC/Type-C callbacks coalesce in the coordinator.
             await Task.yield()
-            guard !Task.isCancelled, self.transportGeneration == generation else { return }
+            guard fanOut != nil, !Task.isCancelled, self.transportGeneration == generation else { return }
             await snapshotCoordinator.flushPendingWrites()
         }
     }
