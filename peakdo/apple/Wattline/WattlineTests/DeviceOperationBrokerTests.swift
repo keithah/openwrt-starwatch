@@ -6,7 +6,11 @@ import XCTest
 final class DeviceOperationBrokerTests: XCTestCase {
     func testBrokerUsesAttachedSessionAndRejectsStaleGeneration() async throws {
         let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
-        let replay = ReplayTransport(steps: [.reply(bytes: reply)])
+        let clock = BrokerTestClock()
+        let replay = ReplayTransport(steps: [
+            .reply(after: .seconds(1), bytes: reply),
+            .reply(bytes: reply),
+        ], clock: clock)
         let session = DeviceSession(transport: replay)
         let broker = DeviceOperationBroker()
         let peripheralID = UUID()
@@ -17,7 +21,15 @@ final class DeviceOperationBrokerTests: XCTestCase {
             session: session
         ))
 
-        _ = try await broker.perform(.setDC(true), generation: 4)
+        async let first = broker.perform(.setDC(true), generation: 4)
+        while await replay.inFlightCount == 0 { await Task.yield() }
+        async let second = broker.perform(.setDC(false), generation: 4)
+        while await replay.maximumPendingTransactionCount < 2 { await Task.yield() }
+
+        let maximumWhileBothPending = await replay.maximumInFlightCount
+        XCTAssertEqual(maximumWhileBothPending, 1)
+        await clock.advance(by: .seconds(1))
+        _ = try await (first, second)
         await assertThrows(.superseded) {
             try await broker.perform(.setDC(false), generation: 3)
         }
@@ -28,10 +40,7 @@ final class DeviceOperationBrokerTests: XCTestCase {
 
     func testConnectedContextIsReusedWithoutReconnect() async throws {
         let harness = await makeHarness(generation: 3)
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 3
-        )
+        await harness.broker.markConnected(peripheralID: harness.peripheralID, generation: 3)
 
         let generation = try await harness.broker.withConnection(to: harness.peripheralID) {
             $0.generation
@@ -44,10 +53,7 @@ final class DeviceOperationBrokerTests: XCTestCase {
 
     func testAttachingDifferentPeripheralInSameGenerationRequiresReconnect() async {
         let harness = await makeHarness(generation: 3)
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 3
-        )
+        await harness.broker.markConnected(peripheralID: harness.peripheralID, generation: 3)
         let nextPeripheralID = UUID()
         let transport = ReplayTransport()
         await harness.broker.attach(.init(
@@ -63,9 +69,81 @@ final class DeviceOperationBrokerTests: XCTestCase {
         for _ in 0..<20 { await Task.yield() }
 
         let requests = await harness.reconnect.requests
-        XCTAssertEqual(requests, [.init(id: nextPeripheralID, generation: 3)])
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.peripheralID, nextPeripheralID)
+        XCTAssertEqual(requests.first?.generation, 3)
         result.cancel()
         await assertCancellation { try await result.value }
+    }
+
+    func testSameGenerationPeripheralReplacementSupersedesOldWaiterExactlyOnce() async {
+        let harness = await makeHarness(generation: 3)
+        let oldOperationCount = OperationCounter()
+        let old = Task {
+            try await harness.broker.withConnection(to: harness.peripheralID) { _ in
+                await oldOperationCount.increment()
+                return true
+            }
+        }
+        await harness.reconnect.waitForRequestCount(1)
+
+        let nextPeripheralID = UUID()
+        let nextTransport = ReplayTransport()
+        await harness.broker.attach(.init(
+            generation: 3,
+            peripheralID: nextPeripheralID,
+            transport: nextTransport,
+            session: DeviceSession(transport: nextTransport)
+        ))
+        let next = Task {
+            try await harness.broker.withConnection(to: nextPeripheralID) { context in
+                context.peripheralID
+            }
+        }
+        await harness.reconnect.waitForRequestCount(2)
+        let attempts = await harness.reconnect.requests
+
+        await harness.broker.handleConnectionEvent(.connected, attempt: attempts[1])
+
+        await assertThrows(.superseded) { try await old.value }
+        let oldInvocationCount = await oldOperationCount.value
+        let nextResult = try? await next.value
+        let pendingConnectionCount = await harness.broker.pendingConnectionCount
+        XCTAssertEqual(oldInvocationCount, 0)
+        XCTAssertEqual(nextResult, nextPeripheralID)
+        XCTAssertEqual(pendingConnectionCount, 0)
+    }
+
+    func testStaleSameGenerationTerminalCannotResolveReplacementWaiter() async throws {
+        let harness = await makeHarness(generation: 3)
+        let old = Task {
+            try await harness.broker.withConnection(to: harness.peripheralID) { _ in true }
+        }
+        await harness.reconnect.waitForRequestCount(1)
+        let oldAttempt = await harness.reconnect.requests[0]
+
+        let nextPeripheralID = UUID()
+        let nextTransport = ReplayTransport()
+        await harness.broker.attach(.init(
+            generation: 3,
+            peripheralID: nextPeripheralID,
+            transport: nextTransport,
+            session: DeviceSession(transport: nextTransport)
+        ))
+        let next = Task {
+            try await harness.broker.withConnection(to: nextPeripheralID) { $0.peripheralID }
+        }
+        await harness.reconnect.waitForRequestCount(2)
+        let nextAttempt = await harness.reconnect.requests[1]
+
+        await harness.broker.handleConnectionEvent(.terminal, attempt: oldAttempt)
+        let pendingAfterStaleEvent = await harness.broker.pendingConnectionCount
+        XCTAssertEqual(pendingAfterStaleEvent, 1)
+        await harness.broker.handleConnectionEvent(.connected, attempt: nextAttempt)
+
+        await assertThrows(.superseded) { try await old.value }
+        let nextResult = try await next.value
+        XCTAssertEqual(nextResult, nextPeripheralID)
     }
 
     func testClockOperationsUseTheAttachedTransport() async throws {
@@ -96,10 +174,8 @@ final class DeviceOperationBrokerTests: XCTestCase {
         await harness.clock.waitForSleepers(1)
 
         await harness.clock.advance(by: .milliseconds(9_900))
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 8
-        )
+        let attempt = await harness.reconnect.requests[0]
+        await harness.broker.handleConnectionEvent(.connected, attempt: attempt)
 
         let generation = try await result.value
         let pendingConnectionCount = await harness.broker.pendingConnectionCount
@@ -131,10 +207,8 @@ final class DeviceOperationBrokerTests: XCTestCase {
 
         result.cancel()
         await assertCancellation { try await result.value }
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 8
-        )
+        let attempt = await harness.reconnect.requests[0]
+        await harness.broker.handleConnectionEvent(.connected, attempt: attempt)
 
         let pendingConnectionCount = await harness.broker.pendingConnectionCount
         XCTAssertEqual(pendingConnectionCount, 0)
@@ -149,7 +223,8 @@ final class DeviceOperationBrokerTests: XCTestCase {
 
         await harness.broker.detach(generation: 8)
         await assertThrows(.unavailable) { try await result.value }
-        await harness.broker.handleConnectionEvent(.terminal, generation: 8)
+        let attempt = await harness.reconnect.requests[0]
+        await harness.broker.handleConnectionEvent(.terminal, attempt: attempt)
 
         let pendingConnectionCount = await harness.broker.pendingConnectionCount
         XCTAssertEqual(pendingConnectionCount, 0)
@@ -162,12 +237,10 @@ final class DeviceOperationBrokerTests: XCTestCase {
         }
         await harness.reconnect.waitForRequestCount(1)
 
-        await harness.broker.handleConnectionEvent(.terminal, generation: 8)
+        let attempt = await harness.reconnect.requests[0]
+        await harness.broker.handleConnectionEvent(.terminal, attempt: attempt)
         await assertThrows(.unavailable) { try await result.value }
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 8
-        )
+        await harness.broker.handleConnectionEvent(.connected, attempt: attempt)
 
         let pendingConnectionCount = await harness.broker.pendingConnectionCount
         XCTAssertEqual(pendingConnectionCount, 0)
@@ -180,16 +253,16 @@ final class DeviceOperationBrokerTests: XCTestCase {
         }
         await harness.reconnect.waitForRequestCount(1)
 
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 8
+        let staleAttempt = DeviceOperationBroker.ConnectionAttempt(
+            generation: 8,
+            peripheralID: harness.peripheralID,
+            token: 0
         )
+        await harness.broker.handleConnectionEvent(.connected, attempt: staleAttempt)
         let pendingBeforeCurrentCallback = await harness.broker.pendingConnectionCount
         XCTAssertEqual(pendingBeforeCurrentCallback, 1)
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 9
-        )
+        let attempt = await harness.reconnect.requests[0]
+        await harness.broker.handleConnectionEvent(.connected, attempt: attempt)
 
         let generation = try await result.value
         XCTAssertEqual(generation, 9)
@@ -219,10 +292,7 @@ final class DeviceOperationBrokerTests: XCTestCase {
 
     func testDetachOnlyAffectsMatchingGeneration() async throws {
         let harness = await makeHarness(generation: 9)
-        await harness.broker.handleConnectionEvent(
-            .connected(harness.peripheralID),
-            generation: 9
-        )
+        await harness.broker.markConnected(peripheralID: harness.peripheralID, generation: 9)
 
         await harness.broker.detach(generation: 8)
         _ = try await harness.broker.withConnection(to: harness.peripheralID) { $0 }
@@ -237,8 +307,8 @@ final class DeviceOperationBrokerTests: XCTestCase {
         let peripheralID = UUID()
         let reconnect = ReconnectRequestSpy()
         let clock = BrokerTestClock()
-        let broker = DeviceOperationBroker(clock: clock) { id, requestedGeneration in
-            await reconnect.record(id: id, generation: requestedGeneration)
+        let broker = DeviceOperationBroker(clock: clock) { attempt in
+            await reconnect.record(attempt)
         }
         let transport = ReplayTransport()
         let session = DeviceSession(transport: transport)
@@ -295,16 +365,16 @@ private struct BrokerHarness: Sendable {
     let peripheralID: UUID
 }
 
+private actor OperationCounter {
+    private(set) var value = 0
+    func increment() { value += 1 }
+}
+
 private actor ReconnectRequestSpy {
-    struct Request: Equatable, Sendable {
-        let id: UUID
-        let generation: UInt
-    }
+    private(set) var requests: [DeviceOperationBroker.ConnectionAttempt] = []
 
-    private(set) var requests: [Request] = []
-
-    func record(id: UUID, generation: UInt) {
-        requests.append(Request(id: id, generation: generation))
+    func record(_ attempt: DeviceOperationBroker.ConnectionAttempt) {
+        requests.append(attempt)
     }
 
     func waitForRequestCount(_ count: Int) async {

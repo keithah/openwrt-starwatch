@@ -303,6 +303,92 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(model.route, .scan)
     }
 
+    func testReturnToScanRejectsOldBrokerContextWhileDetachPublicationIsHeld() async throws {
+        let fixture = makeFixture(onboardingComplete: false)
+        let publication = BrokerPublicationBarrier()
+        let model = AppModel(
+            persistence: fixture.persistence,
+            transportFactory: { fixture.transport },
+            brokerPublicationBarrier: { await publication.waitIfHeld() }
+        )
+        let peripheralID = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(
+            id: peripheralID,
+            localName: "Link-Power 2",
+            rssi: -45,
+            mode: .application
+        ))
+        try await eventually { model.connectionStatus == .connected }
+        await publication.holdNext()
+
+        model.returnToScan()
+        await publication.waitUntilBlocked()
+        let operationCount = OperationInvocationCounter()
+        let result = Task {
+            try await model.deviceOperationBroker.withConnection(to: peripheralID) { _ in
+                await operationCount.increment()
+                return true
+            }
+        }
+
+        do {
+            _ = try await result.value
+            XCTFail("Old broker context must be rejected after scan state is visible")
+        } catch let error as DeviceOperationBroker.BrokerError {
+            XCTAssertEqual(error, .unavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        let invocationCount = await operationCount.value
+        XCTAssertEqual(invocationCount, 0)
+        await publication.release()
+    }
+
+    func testTransportReplacementRejectsOldBrokerContextWhileAttachPublicationIsHeld() async throws {
+        let first = RecordingTransport(connectResult: .success)
+        let second = RecordingTransport(connectResult: .success)
+        var transports = [first, second]
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let publication = BrokerPublicationBarrier()
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transports.removeFirst() },
+            brokerPublicationBarrier: { await publication.waitIfHeld() }
+        )
+        let peripheralID = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(
+            id: peripheralID,
+            localName: "Link-Power 2",
+            rssi: -45,
+            mode: .application
+        ))
+        try await eventually { model.connectionStatus == .connected }
+        await publication.holdNext()
+
+        model.requestBluetoothAfterPriming()
+        await publication.waitUntilBlocked()
+        let operationCount = OperationInvocationCounter()
+
+        do {
+            _ = try await model.deviceOperationBroker.withConnection(to: peripheralID) { _ in
+                await operationCount.increment()
+                return true
+            }
+            XCTFail("Old broker context must be rejected after transport replacement returns")
+        } catch let error as DeviceOperationBroker.BrokerError {
+            XCTAssertEqual(error, .unavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        let invocationCount = await operationCount.value
+        XCTAssertEqual(invocationCount, 0)
+        await publication.release()
+    }
+
     func testBrokerReconnectRoutesThroughAppModelAsSoleConnectOwner() async throws {
         let transport = RecordingTransport(connectResult: .success)
         let suiteName = "WattlineTests.\(UUID().uuidString)"
@@ -844,6 +930,36 @@ private actor MutationTransport: DeviceTransport {
         case .failure: throw Failure.expected
         }
     }
+}
+
+private actor BrokerPublicationBarrier {
+    private var shouldHold = false
+    private var blocked = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func holdNext() { shouldHold = true }
+
+    func waitIfHeld() async {
+        guard shouldHold else { return }
+        shouldHold = false
+        blocked = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilBlocked() async {
+        while !blocked { await Task.yield() }
+    }
+
+    func release() {
+        blocked = false
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor OperationInvocationCounter {
+    private(set) var value = 0
+    func increment() { value += 1 }
 }
 
 private actor RecordingTransport: DeviceTransport {
