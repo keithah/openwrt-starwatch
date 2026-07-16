@@ -40,7 +40,7 @@ final class SettingsOperationTests: XCTestCase {
     func testBypassNonstandardReplyLeavesTelemetryUnchangedAndOnlyMatchingTelemetryClearsPending() async throws {
         let transport = SettingsTestTransport(clockWrite: .success, clockRead: .unsupported)
         let model = try await makeConnectedModel(transport)
-        let off = try DCPortStatus(frame: Data(repeating: 0, count: 8))
+        let off = try DCPortStatus(frame: Data(repeating: 0, count: 9))
         await transport.emit(.dc(off, timestamp: .zero))
         try await eventually { model.state.dc == off }
 
@@ -48,13 +48,14 @@ final class SettingsOperationTests: XCTestCase {
         try await eventually { model.state.pendingMutations.contains { $0.reconciler == .bypass(true) } }
         XCTAssertEqual(model.state.dc, off, "A nonstandard bypass reply must not mutate telemetry")
 
-        let stillOff = try DCPortStatus(frame: Data(repeating: 0, count: 8))
+        let stillOff = try DCPortStatus(frame: Data(repeating: 0, count: 9))
         await transport.emit(.dc(stillOff, timestamp: .seconds(1)))
         try await eventually { model.state.dc == stillOff }
         XCTAssertTrue(model.state.pendingMutations.contains { $0.reconciler == .bypass(true) }, "Only matching telemetry should reconcile bypass")
 
-        var onFrame = Data(repeating: 0, count: 8)
+        var onFrame = Data(repeating: 0, count: 9)
         onFrame[0] = 1
+        onFrame[8] = 1
         let on = try DCPortStatus(frame: onFrame)
         await transport.emit(.dc(on, timestamp: .seconds(2)))
         try await eventually { model.state.dc == on && !model.state.pendingMutations.contains { $0.reconciler == .bypass(true) } }
