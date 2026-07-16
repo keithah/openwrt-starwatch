@@ -131,7 +131,7 @@ config alerts
 | | Topology | Dish reachability | Behavior |
 |---|---|---|---|
 | **A (primary)** | Dish in **bypass mode** → OpenWrt WAN gets CGNAT/public IP | Needs a host route: `192.168.100.1/32` out the WAN interface | Full functionality. Package `postinst` offers the route via a UCI static-route entry if missing (well-known community requirement; documented in starlink-grpc-tools setup guidance) |
-| **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC on port 9000 is polled for clients, ping health, configuration, radios, diagnostics, and interfaces. Curated Wi-Fi and client writes are exposed only through the guarded contract in `API.md`. The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
+| **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC on port 9000 is polled for clients, ping health, configuration, radios, diagnostics, and interfaces. Curated writes follow the guarded `API.md` contract: client blocking is schedule-based, transmit power uses the protocol's percentage levels, and whole-network writes remain gated on verified credential readback. The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
 | **C** | No dish reachable (probe fails) | — | **WAN-only mode:** dashboard shows WAN health cards + outage log from probes; dish cards show a setup hint. Daemon retries discovery every 60 s |
 
 Detection is automatic at startup and on failure: try `get_device_info` at `dish_addr`; classify topology; expose it in `/api/status` and the UI header.
@@ -184,7 +184,7 @@ Some requests return errors or `not authorized` on some hardware/firmware (docum
 
 ### 5.3 Audit log
 
-Every control action is appended to the events table (§8.2) with timestamp, action, parameters, result — visible in the Events card and `/api/events`.
+Every control action is appended to the events table (§8.2) with its time, action, parameters, and result — visible in the Events card and `/api/events`.
 
 ---
 
@@ -263,7 +263,7 @@ Float32 ring buffers at 1 s resolution for `ram_hours` (default 3 h) covering: d
 | `quarter` | per-15-min aggregates | 30 days |
 | `outages` | merged-timeline entries (source, cause, start, duration) | 10 000 rows |
 | `events` | alerts fired/cleared, control actions (§5.3), daemon lifecycle | 10 000 rows |
-| `speedtests` | timestamped results | 500 rows |
+| `speedtests` | time-keyed results | 500 rows |
 
 Backfill from `get_history` on startup fills gaps ≤ 15 min, so daemon restarts don't hole the graphs.
 
@@ -290,6 +290,25 @@ Bearer token (`Authorization: Bearer <token>` or `?token=` for the iframe bootst
 | `/api/wan/failover-assist` | GET/POST | GET: proposed UCI diff; POST: apply (§6.4) |
 | `/api/config` | GET/PUT | Daemon settings (writes go through UCI + reload) |
 | `/api/ws` | WS | 1 Hz status frames `{t, dish:{...}, wan:{...}}` + async `{event:...}` messages |
+
+### 9.1 1.1.0 implementation phases
+
+The expanded contracts in `API.md` are implemented in risk order, with each
+phase independently testable against a fake gRPC server:
+
+1. Diagnostics plus status GPS/PNT and disablement fields.
+2. Battery configuration and derived runtime.
+3. The read-only `/api/router` model.
+4. Client rename through the targeted `WifiSetClientGivenName` RPC carrying
+   `ClientConfig`.
+5. Client block/unblock through a Starwatch-owned `WeeklyBlockSchedule` on the
+   same targeted RPC.
+6. Wi-Fi network and radio writes. Whole-network writes are blocked from release
+   until on-device verification proves `wifi_get_config` returns every BSS
+   credential required to reconstruct the `ApplyNetworks` collection; if any
+   credential is redacted, network writes are withheld. Radio writes use only
+   the real transmit-power percentages and router-advertised non-DFS channels
+   defined in `API.md`.
 
 ---
 
@@ -321,13 +340,13 @@ Speedify's structure: status header, then a vertical stack of cards. Card order 
 | **Obstruction** | Fraction obstructed, time obstructed, sky-map render (SNR grid as polar plot), "clear map" action | `obstruction_stats`, `dish_get_obstruction_map` |
 | **Outage timeline** | Merged three-source timeline bars with cause tooltips + table of recent outages with durations | §6.3 |
 | **Alignment** | Compass-style azimuth/elevation/tilt readout | boresight fields |
-| **Power** | Instant/min/mean/max W + 24 h area chart + kWh/day derived; optional user-configured battery capacity/SOC/reserve/efficiency yields clearly labeled runtime estimates | `power_in` + local battery settings |
+| **Power** | Instant/min/mean/max W + 24 h area chart + kWh/day derived; optional user-configured battery capacity/SOC/reserve/efficiency yields the clearly labeled runtime estimates and SOC-staleness behavior defined in `API.md` | `power_in` + local battery settings |
 | **WAN health** | Per-WAN cards (Starlink, cellular, …): probe RTT/loss sparkline, state, byte counters; mwan3 status + failover-assist button when applicable | §6 |
 | **Controls** | Snow melt (3-state), sleep schedule editor (local-time UI, UTC stored), GPS toggle, stow/unstow, reboot, firmware update — confirmation-gated per §5.1 | §5 |
 | **Speed test** | Run button, latest + history table | §5.1, `speedtests` |
 | **Alerts** | Active raw dish flags + Starwatch alert history; link to settings | §7 |
 | **Hardware** | Model (friendly name mapped from `hardware_version`), firmware, dish id, country, mobility class, temperatures when available | §4.1 |
-| **Starlink router** (topology B only) | Clients with full MAC/IP/signal/SNR/rates, ping health, radios, temperatures, Ethernet/bridge/interfaces, plus guarded ordinary Wi-Fi settings and client rename/block controls | router gRPC :9000 |
+| **Starlink router** (topology B only) | Clients with full MAC/IP/signal/SNR/rates, ping health, radios, temperatures, Ethernet/bridge/interfaces, plus the guarded `API.md` write surface: targeted client rename, schedule-based block/unblock, protocol-defined transmit-power percentages, and credential-readback-gated network edits | router gRPC :9000 |
 | **Settings** | Token display/regenerate, dish address, probe hosts, alert thresholds + webhook/ntfy config with "send test", history retention | §2.1 |
 
 ---
@@ -339,7 +358,7 @@ Speedify's structure: status header, then a vertical stack of cards. Card order 
 | Dish unreachable at startup | Topology C: WAN-only mode, retry every 60 s, setup hint card (check bypass mode / host route) |
 | Dish rebooting (user-initiated) | Expected-outage window: `dish_unreachable` alert suppressed for 5 min after our own reboot command |
 | Unknown/new dish model | Parse what's present; unavailable-field machinery (§4.2) handles the rest; hardware card shows raw `hardware_version` string |
-| Router clock wrong at boot (common: no RTC) | History writes deferred until time is sane (year ≥ 2025 or NTP synced); dish `get_history` backfill re-anchors timestamps |
+| Router clock wrong at boot (common: no RTC) | History writes deferred until time is sane (year ≥ 2025 or NTP synced); dish `get_history` backfill re-anchors sample times |
 | sqlite corruption | Detect on open → move aside, recreate, event logged; RAM tier unaffected |
 | Token leaked / regenerate | Settings action regenerates UCI token; LuCI/GL embeds pick it up on next load |
 | opkg same-version reinstall no-op | Documented: bump VERSION or `--force-reinstall` (wattline-verified) |

@@ -203,7 +203,7 @@ Queues a test notification through configured webhook and ntfy delivery.
 Sends one-Hz frames containing `t`, `dish`, and `wan`, plus asynchronous
 `event` messages. Slow clients are disconnected when their bounded queue fills.
 
-## Diagnostic parity additions (1.1.0)
+## Diagnostic expansion (1.1.0)
 
 ### Additions to `GET /api/status`
 
@@ -217,7 +217,7 @@ Dish status gains satellite/GPS context when exposed by the local API:
       "satellites": 14,
       "inhibited": false,
       "no_satellites_after_ttff": false,
-      "convergence_state": "CONVERGED"
+      "pnt_filter_state": "FILTER_CONVERGED"
     },
     "seconds_to_first_nonempty_slot": 0.8,
     "disablement_code": "OKAY"
@@ -225,8 +225,11 @@ Dish status gains satellite/GPS context when exposed by the local API:
 }
 ```
 
-These fields describe receiver/GPS context. Starwatch does not claim to expose
-the identity or orbital position of the currently serving Starlink satellite.
+`pnt_filter_state` is the protobuf `AttitudeEstimationState`: `FILTER_RESET`,
+`FILTER_UNCONVERGED`, `FILTER_CONVERGED`, `FILTER_FAULTED`, or `FILTER_INVALID`.
+It describes the receiver's PNT/attitude filter, not a GPS-lock state. These
+fields provide receiver context only; Starwatch does not claim to expose the
+identity or orbital position of the currently serving Starlink satellite.
 
 ### `GET /api/diagnostics?span=<span>`
 
@@ -238,6 +241,7 @@ reason when no valid sample exists.
 {
   "span": "24h",
   "latency": {
+    "approximate": true,
     "current_ms": 24.2,
     "mean_ms": 27.1,
     "p95_ms": 44.8,
@@ -279,9 +283,10 @@ reason when no valid sample exists.
     "conversion_efficiency_percent": 90,
     "load_window": "15m",
     "load_w": 45.5,
-    "full_charge_runtime_hours": 20.25,
+    "full_charge_runtime_hours": 18.23,
     "remaining_runtime_hours": 13.37,
     "state_of_charge_updated_at": "2026-07-16T20:00:00Z",
+    "state_of_charge_stale": false,
     "derived": true
   }
 }
@@ -331,10 +336,16 @@ usable_wh = capacity_wh * max(0, state_of_charge - reserve) / 100
 remaining_runtime_hours = usable_wh / load_w
 ```
 
-Full-charge runtime uses `100 - reserve`. Estimates are hidden when telemetry is
-stale, the clock is insane, or there is no positive power sample. They describe
-the configured battery powering the Starlink terminal only—not the GL router,
-other loads, battery voltage behavior, temperature, aging, or charge input.
+Full-charge runtime uses `100 - reserve`. Power-derived estimates are hidden
+when power telemetry is stale, the clock is insane, or there is no positive
+power sample. `remaining_runtime_hours` is additionally omitted and its
+availability reason reports stale SOC when `state_of_charge_updated_at` is more
+than 24 hours old; `state_of_charge_stale` is then `true`. A stale SOC does not
+hide `full_charge_runtime_hours`, which does not depend on the entered SOC.
+These estimates describe the configured battery powering the Starlink terminal
+only—not the GL router, other loads, battery voltage behavior, temperature,
+aging, or charge input. Starwatch's runtime estimate is an added derived feature;
+StarBar reports power but explicitly does not estimate battery runtime.
 
 UCI persistence uses a dedicated `config battery` section. Unknown UCI content
 continues to be preserved.
@@ -420,7 +431,7 @@ The payload is a typed, local JSON model; protobuf messages are never embedded.
       "channel": 149,
       "channel_width_mhz": 80,
       "disabled": false,
-      "tx_power_level": "HIGH",
+      "tx_power_percent": 100,
       "rx_bytes": 1234,
       "tx_bytes": 5678,
       "temperature_c": 51.2,
@@ -448,19 +459,35 @@ three-consecutive-failures availability rule.
 All router mutations:
 
 1. Require topology B and a reachable Starlink router.
-2. Require the latest `config_revision` from `GET /api/router`; stale revisions
-   return `409` without writing.
-3. Set only the exact paired `apply_*` flag for the requested setting. Scalar
-   writes contain only their requested value. When the upstream API applies a
-   collection atomically (notably `networks`), Starwatch clones the latest
-   readback collection, changes only the addressed item, and sends that
-   collection with its single aggregate apply flag. No unrelated apply flag is
-   set.
-4. Reread configuration and compare requested fields before returning `202`.
+2. Require the latest `config_revision` from `GET /api/router`. Immediately
+   before every write, Starwatch rereads router configuration and compares its
+   `incarnation` with the supplied revision; a mismatch returns `409` without
+   writing. Because the displayed revision can be up to 60 seconds old and no
+   atomic compare-and-swap is known, this is a best-effort concurrency guard
+   unless on-device testing proves `wifi_set_config` enforces `incarnation`
+   server-side.
+3. A mutation that uses `wifi_set_config` sets only the exact paired `apply_*`
+   flag for the requested setting. Scalar writes contain only their requested
+   value. Aggregate flags such as
+   `ApplyNetworks`, `ApplyClientNames`, and `ApplyClientConfigs` replace whole
+   collections and therefore risk destroying omitted state. Network writes may
+   use `ApplyNetworks` only under the credential-readback gate below; client
+   writes use the targeted RPC and never resend either client collection. No
+   unrelated apply flag is set.
+4. Reread configuration and compare every requested field before returning
+   `202`. This is a new 1.1.0 requirement, not behavior guaranteed by a 1.0.2
+   success response. A mismatch is an upstream failure and must not be reported
+   as accepted.
 5. Append a `router_control` audit event containing action, non-secret
    parameters, result/error, and affected network/client identifiers.
 6. Publish the audit event over `/api/ws`.
-7. Never log, persist, echo, or publish a Wi-Fi passphrase.
+7. Never log, persist, echo, or publish a Wi-Fi passphrase. Full client MAC
+   addresses are non-secret identifiers and do persist in `router_control`
+   audit events and sqlite when they identify the affected client.
+
+Every 1.1.0 PATCH body rejects unknown fields and is limited to 128 KiB. In
+addition to the released error codes, these endpoints use `422` for a known but
+unsupported or unsafe-on-this-router value.
 
 ### `PATCH /api/router/wifi`
 
@@ -483,7 +510,7 @@ Accepts one or more safe partial updates:
     "enabled": true,
     "channel": 149,
     "channel_width_mhz": 80,
-    "tx_power_level": "HIGH"
+    "tx_power_percent": 100
   },
   "band_steering_enabled": true,
   "outdoor_mode": false,
@@ -495,20 +522,41 @@ Accepts one or more safe partial updates:
 ```
 
 Every top-level member is optional except `config_revision` and `confirmation`.
-At least one mutation must be present. Allowed security modes are `OPEN`,
-`WPA2`, `WPA3`, and `WPA2_WPA3`. An open network requires the stronger
-confirmation `CREATE OPEN NETWORK`. Existing credentials are never returned;
-omitting `passphrase` preserves them. A supplied passphrase is accepted only for
-PSK security and must satisfy the upstream length constraints.
+At least one mutation must be present. Allowed security modes map directly to
+the BSS `Auth` oneof: `OPEN` → `AuthOpen`, `WPA2` → `AuthWpa2`, `WPA3` →
+`AuthWpa3`, and `WPA2_WPA3` → `AuthWpa2Wpa3`. A PSK is the selected auth arm's
+`Password`; an open network requires the stronger confirmation `CREATE OPEN
+NETWORK`. A supplied passphrase is accepted only for PSK security and must
+satisfy upstream length constraints.
+
+**BLOCKING precondition for network writes:** the only protobuf write is
+`ApplyNetworks`, which replaces the entire networks collection; there is no
+per-network or per-BSS apply flag. Network mutation must not ship until
+on-device testing on every supported firmware family proves `wifi_get_config`
+returns every live BSS credential needed to reconstruct the collection. If any
+credential is redacted or omitted, Starwatch withholds network writes rather
+than relying on omission to preserve it. Passphrases remain write-only at the
+HTTP boundary even when upstream readback provides them internally.
 
 The API exposes only:
 
 - SSID, PSK security, write-only passphrase, hidden state, and enable state.
 - 2.4 GHz, 5 GHz, and 5 GHz-high enablement.
 - Band steering.
-- Supported channel and channel width values advertised by/read from the router.
-- Transmit power levels defined by the vendored protocol.
-- Outdoor mode.
+- Channels only when the candidate appears in the router-advertised supported
+  non-DFS set; if no such set is available, manual channel writes are withheld.
+- Channel widths mapped for the selected band: integer `20` → that band's
+  `HT_BANDWIDTH_20_MHZ`, `40` → `HT_BANDWIDTH_20_OR_40_MHZ`, `80` → the
+  selected 5 GHz band's `VHT_BANDWIDTH_80_MHZ`, and `160` →
+  `VHT_BANDWIDTH_160_MHZ`. The 2.4 GHz band accepts only the HT widths. A width
+  not supported by that band/router returns `422` without writing; `80+80` is
+  not exposed by this integer contract.
+- Per-band `tx_power_percent` values `100`, `80`, `50`, `25`, `12`, and `6`,
+  mapped respectively to `TX_POWER_LEVEL_100`, `_80`, `_50`, `_25`, `_12`, and
+  `_6` through `ApplyTxPowerLevel_2Ghz`, `_5Ghz`, or `_5GhzHigh`.
+- Outdoor mode through `ApplyOutdoorMode`, confirmation-gated and only when the
+  router reports support. Starwatch relies on firmware regional enforcement;
+  DFS enablement remains excluded below.
 - Static DNS servers and secure-DNS toggle.
 
 If a model/firmware does not expose a setting, Starwatch returns `422` and leaves
@@ -518,17 +566,35 @@ configuration untouched.
 
 ```json
 {
-  "given_name": "Work Mac",
-  "blocked": true,
+  "access": "block",
   "confirmation": "BLOCK CLIENT"
 }
 ```
 
-`given_name` and `blocked` are independently optional; at least one is required.
-Blocking and unblocking require `BLOCK CLIENT` and `UNBLOCK CLIENT`
-respectively. Renaming requires `RENAME CLIENT`. The path MAC is normalized to
-lowercase colon notation and must match a client from the latest router snapshot.
-Unsupported sandbox/client-config behavior returns `422`, not a false success.
+Each request performs exactly one operation: `given_name`, or `access` set to
+`block` or `unblock`. Blocking and unblocking require `BLOCK CLIENT` and
+`UNBLOCK CLIENT`; renaming requires `RENAME CLIENT`. The path MAC is normalized
+to lowercase colon notation and must match a client from the latest router
+snapshot.
+
+Both rename and access changes use the targeted
+`WifiSetClientGivenName` request (request oneof field 3017) carrying the current
+`ClientConfig` form. Before writing, Starwatch rereads the addressed client and
+preserves its unrelated fields. It does not use the deprecated `ClientName`
+payload, `ApplyClientNames`, or the atomic `ApplyClientConfigs` collection. The
+feature ships only after on-device verification confirms the router honors
+`ClientConfig.GivenName` and `WeeklyBlockSchedules`; a firmware that honors only
+the deprecated naming path is reported unsupported rather than silently using
+it.
+
+There is no block setter: `WifiClient.Blocked` is read-only status. To block,
+Starwatch preserves all user schedules and adds or replaces exactly one marked
+`WeeklyBlockSchedule` with `group_id` `starwatch:block:v1` and the all-week
+half-open range `[0,10080)` minutes. To unblock, it removes only that marked
+schedule and leaves every other schedule byte-for-byte unchanged. If the marker
+is absent, unblock returns `409` rather than deleting a schedule Starwatch does
+not own. Readback must confirm the targeted name or schedule change before
+`202`; unsupported schedule behavior returns `422`, not a false success.
 
 ## Explicitly excluded router writes
 
@@ -543,6 +609,13 @@ exist:
   firewall, DHCP, static routes, or HTTP-server configuration.
 - Mesh trust, mesh topology/onboarding, dynamic keys, client keys, RADIUS, or
   enterprise/onboarding authentication.
+- `DisableSetWifiConfigFromController` (`1090`), which can lock out the
+  controller write path.
+- Sandbox controls (`SandboxEnabled`, `SandboxId`,
+  `SandboxDomainAllowList`, and `ApplyDisableSandboxFailOpen` `1116`).
+- DFS enablement (`ApplyDfsEnabled` `1058`), arbitrary DFS channels, and custom
+  regulatory behavior. Manual channels are limited to the router-advertised
+  non-DFS set described above.
 - Arbitrary protobuf passthrough.
 
 These exclusions prevent Starwatch from stranding the upstream router, altering
@@ -555,7 +628,9 @@ authority.
 The SPA will add:
 
 - Ping-success values and source-labeled dish/router/WAN checks.
-- Latency current/mean/P95/max, distribution, and router-vs-dish context.
+- Latency current/mean/P95/max, distribution, and router-vs-dish context. The
+  percentile/distribution analysis exceeds StarBar's latency and ping-success
+  display and is labeled approximate where aggregate tiers are used.
 - Outage count, total downtime, longest outage, timeline, and recent table.
 - Power current/min/mean/max, 24-hour chart, kWh/day, snow-melt/sleep state,
   source badge, and the optional derived battery-runtime panel.
@@ -564,8 +639,8 @@ The SPA will add:
   link/throughput rates, traffic counters, lease/activity state, and ping health.
 - A Radios & Interfaces view with bands, channels, widths, temperatures,
   traffic, Ethernet, bridge, WAN, and partial-telemetry reasons.
-- A guarded Wi-Fi editor and client rename/block controls using the mutation
-  contracts above.
+- A guarded Wi-Fi editor and client rename/schedule-based block controls using
+  the mutation contracts and network-write gate above.
 
 The page remains fully offline, uses relative daemon URLs only, and hides cards
 whose entire data source is absent. Individual missing fields render `—` with an
@@ -576,6 +651,8 @@ availability reason rather than a fabricated zero.
 - Fake gRPC coverage for every new read and write request type.
 - Tests asserting exact `apply_*` flags and absence of unrelated apply flags.
 - Tests proving passphrases never appear in responses, events, logs, or sqlite.
+- On-device credential-readback verification for each supported firmware family
+  before enabling any `ApplyNetworks` write; redaction keeps the feature off.
 - Stale-revision, unsupported-field, confirmation, validation, readback-mismatch,
   and upstream-error tests.
 - Battery formula, stale-SOC, zero-load, invalid-clock, bounds, and UCI
