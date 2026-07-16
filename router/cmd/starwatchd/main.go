@@ -215,6 +215,7 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 		Outages: timeline, Events: persistent, Live: liveEvents, Now: deps.now,
 		Controls: controller, Obstruction: poller, Speedtest: speedtests, MapInterval: cfg.PollMap,
 		FailoverAssist: mwanManager,
+		AlertDelivery:  dispatcher,
 	}
 	if settings != nil {
 		apiDeps.Settings = settings

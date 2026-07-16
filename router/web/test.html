@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Starwatch logic tests</title></head>
+<body>
+<h1>Starwatch browser logic tests</h1>
+<pre id="results">Running…</pre>
+<script type="module">
+import {
+  deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
+  friendlyModel, assembleSeries,
+} from './logic.js';
+
+const results = [];
+const assert = (name, condition) => {
+  if (!condition) throw new Error(name);
+  results.push(`✓ ${name}`);
+};
+
+try {
+  assert('WAN-only topology wins', deriveState({topology: 'wan-only'}) === 'WAN-only');
+  assert('unreachable full topology', deriveState({topology: 'full', dish_reachable: false}) === 'Unreachable');
+  assert('searching outage', deriveState({topology: 'full', dish_reachable: true, dish: {outage: {cause: 'NO_DOWNLINK'}}}) === 'Searching');
+  assert('obstruction state', deriveState({topology: 'full', dish_reachable: true, dish: {obstruction: {currently_obstructed: true}}}) === 'Obstructed');
+  assert('online state', deriveState({topology: 'full', dish_reachable: true, dish: {}}) === 'Online');
+  assert('zero remains available', availabilityValue(0, {available: true}).available === true);
+  assert('reason is retained', availabilityValue(3, {available: false, reason: 'not on this dish'}).reason === 'not on this dish');
+  assert('local to UTC wraps', localMinutesToUTC(30, -120) === 1350);
+  assert('UTC to local wraps', utcMinutesToLocal(1350, -120) === 30);
+  assert('known model gets friendly name', friendlyModel('rev_mini_prod1').includes('Mini'));
+  assert('unknown model remains raw', friendlyModel('future_dish') === 'future_dish');
+  const aligned = assembleSeries([
+    {series: 'a', tier: 'ram', points: [{time: '2026-01-01T00:00:00Z', value: 1}, {time: '2026-01-01T00:00:02Z', value: 3}]},
+    {series: 'b', tier: 'minute', points: [{time: '2026-01-01T00:00:01Z', value: 2, min: 1, max: 4}]},
+  ]);
+  assert('series timestamps align', aligned.timestamps.length === 3 && aligned.series[0].values[1] === null);
+  assert('aggregate envelope survives', aligned.series[1].min[1] === 1 && aligned.series[1].max[1] === 4);
+  document.querySelector('#results').textContent = `${results.join('\n')}\n\n${results.length} assertions passed.`;
+  document.body.dataset.result = 'pass';
+} catch (error) {
+  document.querySelector('#results').textContent = `✗ ${error.message}`;
+  document.body.dataset.result = 'fail';
+  throw error;
+}
+</script>
+</body>
+</html>

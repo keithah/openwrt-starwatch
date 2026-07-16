@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"starwatch/internal/alert"
 	"starwatch/internal/dish"
 	liveevent "starwatch/internal/event"
 	"starwatch/internal/history"
@@ -40,6 +43,12 @@ func (s outageStub) Query(time.Time, int) ([]outage.Entry, error) { return s.ent
 type eventStub struct{ events []history.Event }
 
 func (s eventStub) QueryEvents(time.Time, int) ([]history.Event, error) { return s.events, nil }
+
+type alertDeliveryStub struct{ notifications []alert.Notification }
+
+func (s *alertDeliveryStub) Enqueue(notification alert.Notification) {
+	s.notifications = append(s.notifications, notification)
+}
 
 type controlStub struct {
 	params dish.ControlParams
@@ -108,6 +117,67 @@ func requestBody(handler http.Handler, method, target, token, body string) *http
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	return response
+}
+
+func TestStaticServingIsUnauthenticatedAndIframeSafe(t *testing.T) {
+	t.Setenv("STARWATCH_WEB_DIR", "")
+	handler, _ := testHandler(t, "secret", 10)
+
+	index := request(handler, http.MethodGet, "/", "")
+	if index.Code != http.StatusOK || !bytes.Contains(index.Body.Bytes(), []byte(`data-starwatch-app`)) {
+		t.Fatalf("index code=%d body=%s", index.Code, index.Body.String())
+	}
+	if got := index.Header().Get("X-Frame-Options"); got != "" {
+		t.Fatalf("X-Frame-Options=%q", got)
+	}
+	asset := request(handler, http.MethodGet, "/vendor/preact.module.js", "")
+	if asset.Code != http.StatusOK || !bytes.Contains(asset.Body.Bytes(), []byte("preact")) {
+		t.Fatalf("asset code=%d body=%s", asset.Code, asset.Body.String())
+	}
+	harness := request(handler, http.MethodGet, "/test.html", "")
+	if harness.Code != http.StatusOK || !bytes.Contains(harness.Body.Bytes(), []byte("Starwatch browser logic tests")) {
+		t.Fatalf("harness code=%d body=%s", harness.Code, harness.Body.String())
+	}
+	if response := request(handler, http.MethodGet, "/api/status", ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated API code=%d", response.Code)
+	}
+}
+
+func TestStaticServingUsesWebDirectoryOverride(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "index.html"), []byte("override shell"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STARWATCH_WEB_DIR", directory)
+	handler, _ := testHandler(t, "secret", 10)
+
+	response := request(handler, http.MethodGet, "/", "")
+	if response.Code != http.StatusOK || response.Body.String() != "override shell" {
+		t.Fatalf("code=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestAlertTestEnqueuesNormalNotification(t *testing.T) {
+	delivery := &alertDeliveryStub{}
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), AlertDelivery: delivery,
+		Now: func() time.Time { return time.Unix(123, 0) },
+	})
+
+	if response := request(handler, http.MethodPost, "/api/alerts/test", ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated POST code=%d", response.Code)
+	}
+	if response := request(handler, http.MethodGet, "/api/alerts/test", "secret"); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET code=%d", response.Code)
+	}
+	response := request(handler, http.MethodPost, "/api/alerts/test", "secret")
+	if response.Code != http.StatusAccepted || len(delivery.notifications) != 1 {
+		t.Fatalf("POST code=%d notifications=%+v body=%s", response.Code, delivery.notifications, response.Body.String())
+	}
+	got := delivery.notifications[0]
+	if got.Alert != "test" || got.Severity != alert.SeverityInfo || got.State != alert.StateFiring || got.At != 123 || got.Detail["test"] != true {
+		t.Fatalf("notification=%+v", got)
+	}
 }
 
 func TestControlEndpointAcceptsPostAndRejectsOtherMethods(t *testing.T) {

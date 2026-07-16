@@ -16,12 +16,14 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"starwatch/internal/alert"
 	"starwatch/internal/config"
 	"starwatch/internal/dish"
 	"starwatch/internal/event"
 	"starwatch/internal/history"
 	"starwatch/internal/mwan"
 	"starwatch/internal/outage"
+	starwatchweb "starwatch/web"
 )
 
 type SnapshotProvider interface {
@@ -85,6 +87,7 @@ type Deps struct {
 	MapInterval    time.Duration
 	FailoverAssist FailoverAssistProvider
 	Settings       SettingsProvider
+	AlertDelivery  alert.Delivery
 	Now            func() time.Time
 	WSInterval     time.Duration
 	WSBuffer       int
@@ -95,6 +98,7 @@ type Deps struct {
 type server struct {
 	deps   Deps
 	mux    *http.ServeMux
+	static http.Handler
 	ctx    context.Context
 	cancel context.CancelFunc
 	wsMu   sync.Mutex
@@ -141,11 +145,43 @@ func NewServer(deps Deps) *server {
 	mux.HandleFunc("GET /api/config", s.auth(s.configGet))
 	mux.HandleFunc("PUT /api/config", s.auth(s.configPut))
 	mux.HandleFunc("POST /api/config/regenerate-token", s.auth(s.configRegenerateToken))
+	mux.HandleFunc("POST /api/alerts/test", s.auth(s.alertTest))
 	s.mux = mux
+	s.static = http.FileServerFS(starwatchweb.FileSystem())
 	return s
 }
 
-func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *server) alertTest(w http.ResponseWriter, _ *http.Request) {
+	if s.deps.AlertDelivery == nil {
+		http.Error(w, "alert delivery unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	snapshot := s.deps.Snapshot.Snapshot()
+	device := ""
+	if snapshot.DeviceInfo != nil {
+		device = snapshot.DeviceInfo.ID
+	}
+	s.deps.AlertDelivery.Enqueue(alert.Notification{
+		Alert: "test", Severity: alert.SeverityInfo, State: alert.StateFiring,
+		At: s.deps.Now().Unix(), Detail: map[string]any{"test": true}, Device: device,
+	})
+	writeJSON(w, http.StatusAccepted, struct {
+		Accepted bool `json:"accepted"`
+	}{Accepted: true})
+}
+
+func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.static.ServeHTTP(w, r)
+}
 
 func (s *server) Close() {
 	s.wsMu.Lock()
