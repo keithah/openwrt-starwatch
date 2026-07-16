@@ -11,3 +11,9 @@ The pre-existing Task 5 production edits in `AppModel.swift`, `SettingsView.swif
 Restart recovery is now explicitly scoped to the saved peripheral and transport generation. It drives reconnect through `DeviceOperationBroker`, retries until a 30-second deadline using an injected `DeviceClock`, and quarantines stale completion/timer work. Restart write errors during an expected disconnect still enter recovery. Settings now uses destructive restart confirmation and renders restarting, shutdown, failure, and Retry states. Demo mode retains its persistent badge and real-device affordance while returning to scan.
 
 Verification: `swift test` in WattlineCore passes 142 tests; iOS Simulator app build succeeds. XCTest runtime execution remains unavailable in this environment (the `xcodebuild test` invocation built test bundles but emitted no runtime results).
+
+## Follow-up fix report
+
+Restart recovery now records only the matching generation/peripheral scoped disconnect and refuses the broker connected fast path until that disconnect has occurred. An ordinary restart write error therefore transitions to `restartFailed` with Retry, while a write error accompanying the expected disconnect continues through fresh reconnect recovery. Demo restart no longer self-reconnects outside the broker scope. Stale generation and scope guards remain intact.
+
+Verification: WattlineCore `swift test` passes all 142 tests; iOS Simulator `build-for-testing` succeeds. No simulator runtime was started.

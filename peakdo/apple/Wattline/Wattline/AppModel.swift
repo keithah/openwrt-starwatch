@@ -191,6 +191,10 @@ final class AppModel {
     private var brokerReconnectTask: Task<Void, Never>?
     private var restartTimeoutTask: Task<Void, Never>?
     private var restartRecoveryTask: Task<Void, Never>?
+    // Set only by the scoped disconnect event caused by the current restart.
+    // This prevents a connected fast-path (or an unrelated write error) from
+    // being mistaken for successful restart recovery.
+    private var restartDisconnectObserved: (generation: UInt, peripheralID: UUID)?
     private var connectionOperationKey: ConnectionOperationKey?
     private var activeConnectionScope: DeviceConnectionScope?
     private var retiredConnectionScopeIDs: Set<UUID> = []
@@ -305,12 +309,18 @@ final class AppModel {
         let generation = transportGeneration
         restartTimeoutTask?.cancel()
         restartRecoveryTask?.cancel()
+        restartDisconnectObserved = nil
         maintenanceState = .restarting
         do {
             _ = try await deviceOperationBroker.perform(.restart, generation: generation)
         } catch {
-            // A restart may report a write error while the expected disconnect is
-            // already in flight. Recovery is still attempted against that session.
+            // A write error is recoverable only when the current scoped disconnect
+            // has already been observed. Otherwise this is an ordinary failure.
+            guard restartDisconnectObserved?.generation == generation,
+                  restartDisconnectObserved?.peripheralID == peripheralID else {
+                maintenanceState = .restartFailed(String(describing: error))
+                return
+            }
         }
         restartRecoveryTask = Task { [weak self] in
             await self?.recoverRestart(peripheralID: peripheralID, generation: generation)
@@ -327,6 +337,15 @@ final class AppModel {
               transportGeneration == generation,
               selectedPeripheralID == peripheralID,
               maintenanceState == .restarting {
+            // Do not let withConnection reuse the still-connected context. A
+            // fresh reconnect is valid only after the expected disconnect event
+            // for this exact generation/peripheral has arrived.
+            guard restartDisconnectObserved?.generation == generation,
+                  restartDisconnectObserved?.peripheralID == peripheralID else {
+                do { try await maintenanceClock.sleep(for: .seconds(1)) }
+                catch { return }
+                continue
+            }
             let now = await maintenanceClock.now
             guard now < deadline else {
                 maintenanceState = .restartFailed("Restart timed out. Try again.")
@@ -958,9 +977,13 @@ final class AppModel {
             selectedPeripheralID = id
             connectionStatus = .reconnecting
             route = .connected
-        case let .disconnected(_, failure):
+        case let .disconnected(scope, failure):
             await deviceOperationBroker.markDisconnected(generation: generation)
             flushPendingTelemetryPersistence()
+            if maintenanceState == .restarting,
+               selectedPeripheralID == scope.peripheralID {
+                restartDisconnectObserved = (generation, scope.peripheralID)
+            }
             connectionStatus = .disconnected(failure?.message)
             if otaRecoveryPeripheralID != nil {
                 route = .scan
