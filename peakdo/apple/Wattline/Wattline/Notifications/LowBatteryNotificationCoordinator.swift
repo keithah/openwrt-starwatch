@@ -41,7 +41,7 @@ final class LowBatteryNotificationCoordinator {
     private let snapshot: @MainActor () -> SharedDeviceSnapshot?
     private let capabilities: @MainActor () -> DeviceCapabilities
     private let telemetryTimeout: Duration
-    private var policy = LowBatteryPolicy()
+    private var policy: LowBatteryPolicy
     private(set) var isEnabled = false
     private var authorizationRequested = false
 
@@ -51,9 +51,11 @@ final class LowBatteryNotificationCoordinator {
         peripheralID: @escaping @MainActor () -> UUID? = { nil },
         snapshot: @escaping @MainActor () -> SharedDeviceSnapshot? = { nil },
         capabilities: @escaping @MainActor () -> DeviceCapabilities = { DeviceCapabilities(features: []) },
-        telemetryTimeout: Duration = .seconds(10)
+        telemetryTimeout: Duration = .seconds(10),
+        threshold: Int = 20
     ) {
         self.notifications = notifications; self.broker = broker; self.peripheralID = peripheralID; self.snapshot = snapshot; self.capabilities = capabilities; self.telemetryTimeout = telemetryTimeout
+        self.policy = LowBatteryPolicy(threshold: threshold)
     }
 
     @discardableResult
@@ -73,7 +75,7 @@ final class LowBatteryNotificationCoordinator {
             isEnabled = true
             await notifications.registerLowBatteryCategory(includeDCAction: capabilities().hasDCControl)
             return .success
-        } else { isEnabled = false; policy = LowBatteryPolicy(); return .success }
+        } else { isEnabled = false; policy = LowBatteryPolicy(threshold: policy.threshold); return .success }
     }
 
     func receive(_ snapshot: SharedDeviceSnapshot) async {

@@ -102,6 +102,23 @@ final class LowBatteryNotificationTests: XCTestCase {
         let posts = await recorder.posts
         XCTAssertEqual(posts.count, 1)
     }
+
+    func testUsesConfiguredThresholdForPolicyAndNotification() async {
+        let recorder = NotificationRecorder()
+        let coordinator = await MainActor.run {
+            LowBatteryNotificationCoordinator(notifications: recorder, threshold: 35)
+        }
+        let result = await coordinator.setEnabled(true)
+        XCTAssertEqual(result, .success)
+        let id = UUID()
+        let battery = SharedBatterySnapshot(enabled: true, status: .discharging, isFull: false, maxCapacity: 100, capacity: 34, level: 34, voltage: 0, current: 0, power: 0, remainingMinutes: 0)
+        let snapshot = SharedDeviceSnapshot(peripheralID: id, featuresRawValue: 0, battery: battery, dc: nil, typeC: nil, connection: .live, observedAt: Date())
+        await coordinator.receive(snapshot)
+        let posts = await recorder.posts
+        XCTAssertEqual(posts.count, 1)
+        XCTAssertEqual(posts.first?.0, 34)
+        XCTAssertEqual(posts.first?.1, 35)
+    }
 }
 
 @MainActor final class SnapshotBox {

@@ -165,8 +165,13 @@ final class AppModel {
     var lowBatteryThreshold: Int { persistence.lowBatteryThreshold }
 
     func setLowBatteryEnabled(_ enabled: Bool) async -> NotificationActionResult {
-        persistence.lowBatteryEnabled = enabled
-        return await lowBatteryNotificationCoordinator.setEnabled(enabled)
+        let result = await lowBatteryNotificationCoordinator.setEnabled(enabled)
+        // Persist only an actually authorized/enabled state; denied authorization
+        // must leave the user preference off so a later retry remains possible.
+        if result == .success {
+            persistence.lowBatteryEnabled = enabled
+        }
+        return result
     }
 
     private(set) var knownDevices: [UUID: CachedIdentity]
@@ -224,7 +229,8 @@ final class AppModel {
             broker: deviceOperationBroker,
             peripheralID: { [weak self] in self?.selectedPeripheralID },
             snapshot: { [weak self] in self?.sharedSnapshot },
-            capabilities: { [weak self] in self?.capabilities ?? DeviceCapabilities(features: []) }
+            capabilities: { [weak self] in self?.capabilities ?? DeviceCapabilities(features: []) },
+            threshold: persistence.lowBatteryThreshold
         )
     }()
 
