@@ -36,7 +36,7 @@ No Starlink account, no cloud API, no telemetry leaves the router. Everything wo
 - **No automatic routing changes.** The mwan3 assist is an explicit user action; Starwatch never rewrites routing/firewall config on its own.
 - **No factory reset button.** The API offers it; we deliberately don't expose it.
 - **No general rules engine.** Fixed alert catalog with thresholds (§7). Condition→action rules (wattline-style) are a v1.x candidate (§14).
-- **No Starlink-router Wi-Fi management.** The router-side gRPC (`wifi_*` on port 9000 of a Starlink router) is only read for client counts *when present* (§3, topology B); we never configure Starlink Wi-Fi.
+- **Curated Starlink-router Wi-Fi management only.** Topology B may expose ordinary Wi-Fi settings and client controls through guarded, audited, readback-confirmed writes. Factory, regulatory, mesh-trust, bypass/routing, firewall, DHCP, aviation, calibration, and debug surfaces remain excluded; see `API.md`.
 
 ### 1.4 Target users
 
@@ -131,7 +131,7 @@ config alerts
 | | Topology | Dish reachability | Behavior |
 |---|---|---|---|
 | **A (primary)** | Dish in **bypass mode** → OpenWrt WAN gets CGNAT/public IP | Needs a host route: `192.168.100.1/32` out the WAN interface | Full functionality. Package `postinst` offers the route via a UCI static-route entry if missing (well-known community requirement; documented in starlink-grpc-tools setup guidance) |
-| **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC (port 9000: `wifi_get_clients`, `wifi_get_status`) is probed and, if present, a "Starlink router" card appears (read-only). The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
+| **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC on port 9000 is polled for clients, ping health, configuration, radios, diagnostics, and interfaces. Curated Wi-Fi and client writes are exposed only through the guarded contract in `API.md`. The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
 | **C** | No dish reachable (probe fails) | — | **WAN-only mode:** dashboard shows WAN health cards + outage log from probes; dish cards show a setup hint. Daemon retries discovery every 60 s |
 
 Detection is automatic at startup and on failure: try `get_device_info` at `dish_addr`; classify topology; expose it in `/api/status` and the UI header.
@@ -321,13 +321,13 @@ Speedify's structure: status header, then a vertical stack of cards. Card order 
 | **Obstruction** | Fraction obstructed, time obstructed, sky-map render (SNR grid as polar plot), "clear map" action | `obstruction_stats`, `dish_get_obstruction_map` |
 | **Outage timeline** | Merged three-source timeline bars with cause tooltips + table of recent outages with durations | §6.3 |
 | **Alignment** | Compass-style azimuth/elevation/tilt readout | boresight fields |
-| **Power** | Instant W + 24 h area chart + kWh/day derived (labeled as derived) | `power_in` |
+| **Power** | Instant/min/mean/max W + 24 h area chart + kWh/day derived; optional user-configured battery capacity/SOC/reserve/efficiency yields clearly labeled runtime estimates | `power_in` + local battery settings |
 | **WAN health** | Per-WAN cards (Starlink, cellular, …): probe RTT/loss sparkline, state, byte counters; mwan3 status + failover-assist button when applicable | §6 |
 | **Controls** | Snow melt (3-state), sleep schedule editor (local-time UI, UTC stored), GPS toggle, stow/unstow, reboot, firmware check — confirmation-gated per §5.1 | §5 |
 | **Speed test** | Run button, latest + history table | §5.1, `speedtests` |
 | **Alerts** | Active raw dish flags + Starwatch alert history; link to settings | §7 |
 | **Hardware** | Model (friendly name mapped from `hardware_version`), firmware, dish id, country, mobility class, temperatures when available | §4.1 |
-| **Starlink router** (topology B only) | Client count, Wi-Fi status — read-only | router gRPC :9000 |
+| **Starlink router** (topology B only) | Clients with full MAC/IP/signal/SNR/rates, ping health, radios, temperatures, Ethernet/bridge/interfaces, plus guarded ordinary Wi-Fi settings and client rename/block controls | router gRPC :9000 |
 | **Settings** | Token display/regenerate, dish address, probe hosts, alert thresholds + webhook/ntfy config with "send test", history retention | §2.1 |
 
 ---
