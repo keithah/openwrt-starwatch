@@ -347,3 +347,48 @@ func TestSnapshotUsesStableStringEnumsAndNamedAlerts(t *testing.T) {
 		t.Fatalf("alerts: %#v", got.Alerts)
 	}
 }
+
+func TestBackfillSurfacesDishReportedOutages(t *testing.T) {
+	start := time.Date(2026, 7, 15, 11, 55, 0, 0, time.UTC)
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		response, err := cannedResponse(request)
+		if historyResponse := response.GetDishGetHistory(); historyResponse != nil {
+			historyResponse.Outages = []*device.DishOutage{{
+				Cause: device.DishOutage_OBSTRUCTED, StartTimestampNs: start.UnixNano(), DurationNs: uint64(45 * time.Second),
+			}}
+		}
+		return response, err
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.backfill(context.Background())
+
+	got := poller.Snapshot().HistoryOutages
+	if len(got) != 1 || got[0].Cause != "OBSTRUCTED" || !got[0].Start.Equal(start) || got[0].Duration != 45*time.Second {
+		t.Fatalf("history outages: %#v", got)
+	}
+}
+
+func TestSnapshotTracksDishFailureSpanAndRecovery(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	failing := true
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		if _, ok := request.GetRequest().(*device.Request_GetStatus); ok && failing {
+			return nil, status.Error(codes.Unavailable, "offline")
+		}
+		return cannedResponse(request)
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.options.Now = func() time.Time { return now }
+	poller.pollStatus(context.Background())
+	snapshot := poller.Snapshot()
+	if snapshot.DishReachable || snapshot.DishFailureSince == nil || !snapshot.DishFailureSince.Equal(now) {
+		t.Fatalf("failure snapshot: %+v", snapshot)
+	}
+	now = now.Add(time.Minute)
+	failing = false
+	poller.pollStatus(context.Background())
+	snapshot = poller.Snapshot()
+	if !snapshot.DishReachable || snapshot.DishFailureSince != nil {
+		t.Fatalf("recovery snapshot: %+v", snapshot)
+	}
+}

@@ -146,3 +146,15 @@ func TestMonitorPeriodicallyRediscoversInterface(t *testing.T) {
 		t.Fatalf("interface after rediscovery: %q", got)
 	}
 }
+
+func TestMonitorExposesCurrentProbeRoundLossForOutageTiming(t *testing.T) {
+	monitor := NewMonitor(Options{
+		Hosts: []string{"1.1.1.1", "8.8.8.8"}, Now: func() time.Time { return time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC) },
+		Discoverer: fakeDiscoverer{name: "wan0"}, Prober: &fakeProber{results: []probeResult{{err: errors.New("lost")}, {err: errors.New("lost")}}},
+	}, history.NewStore(10))
+	monitor.discover()
+	monitor.probeOnce(context.Background())
+	if got := monitor.Snapshot().ProbeLossNow; got != 1 {
+		t.Fatalf("current probe loss: %v", got)
+	}
+}

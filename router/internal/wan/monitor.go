@@ -182,6 +182,7 @@ func (m *Monitor) probeOnce(ctx context.Context) {
 	}
 	m.mu.Lock()
 	m.probes = append(m.probes, newSamples...)
+	m.snapshot.ProbeLossNow = float32(len(m.options.Hosts)-successes) / float32(len(m.options.Hosts))
 	cutoff := now.Add(-5 * time.Minute)
 	first := 0
 	for first < len(m.probes) && m.probes[first].at.Before(cutoff) {

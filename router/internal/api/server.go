@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -9,10 +10,16 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+
 	"starwatch/internal/dish"
+	"starwatch/internal/event"
 	"starwatch/internal/history"
+	"starwatch/internal/outage"
 )
 
 type SnapshotProvider interface {
@@ -23,28 +30,200 @@ type WANProvider interface {
 	Snapshot() dish.WANStatus
 }
 
+type OutageProvider interface {
+	Query(since time.Time, limit int) ([]outage.Entry, error)
+}
+
+type EventProvider interface {
+	QueryEvents(since time.Time, limit int) ([]history.Event, error)
+}
+
+type EventSubscriber interface {
+	Subscribe(capacity int) (<-chan event.Message, func())
+}
+
 type Deps struct {
-	Token    string
-	Snapshot SnapshotProvider
-	History  history.SpanReader
-	WAN      WANProvider
-	Now      func() time.Time
+	Token          string
+	Snapshot       SnapshotProvider
+	History        history.SpanReader
+	WAN            WANProvider
+	Outages        OutageProvider
+	Events         EventProvider
+	Live           EventSubscriber
+	Now            func() time.Time
+	WSInterval     time.Duration
+	WSBuffer       int
+	WSWriteTimeout time.Duration
+	WSWrite        func(context.Context, *websocket.Conn, any) error
 }
 
 type server struct {
-	deps Deps
+	deps   Deps
+	mux    *http.ServeMux
+	ctx    context.Context
+	cancel context.CancelFunc
+	wsMu   sync.Mutex
+	closed bool
+	wsDone sync.WaitGroup
 }
 
-func NewServer(deps Deps) http.Handler {
+func NewServer(deps Deps) *server {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	s := &server{deps: deps}
+	if deps.WSInterval <= 0 {
+		deps.WSInterval = time.Second
+	}
+	if deps.WSBuffer <= 0 {
+		deps.WSBuffer = 16
+	}
+	if deps.WSWriteTimeout <= 0 {
+		deps.WSWriteTimeout = 2 * time.Second
+	}
+	if deps.WSWrite == nil {
+		deps.WSWrite = func(ctx context.Context, connection *websocket.Conn, value any) error {
+			return wsjson.Write(ctx, connection, value)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &server{deps: deps, ctx: ctx, cancel: cancel}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/history", s.auth(s.history))
 	mux.HandleFunc("GET /api/wan", s.auth(s.wan))
-	return mux
+	mux.HandleFunc("GET /api/outages", s.auth(s.outages))
+	mux.HandleFunc("GET /api/events", s.auth(s.events))
+	mux.HandleFunc("GET /api/ws", s.auth(s.websocket))
+	s.mux = mux
+	return s
+}
+
+func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+
+func (s *server) Close() {
+	s.wsMu.Lock()
+	if s.closed {
+		s.wsMu.Unlock()
+		return
+	}
+	s.closed = true
+	s.cancel()
+	s.wsMu.Unlock()
+	s.wsDone.Wait()
+}
+
+func (s *server) outages(w http.ResponseWriter, r *http.Request) {
+	span, ok := s.requestSpan(w, r, "30d")
+	if !ok {
+		return
+	}
+	if s.deps.Outages == nil {
+		writeJSON(w, http.StatusOK, []outage.Entry{})
+		return
+	}
+	entries, err := s.deps.Outages.Query(s.deps.Now().Add(-span), 1000)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+func (s *server) events(w http.ResponseWriter, r *http.Request) {
+	span, ok := s.requestSpan(w, r, "30d")
+	if !ok {
+		return
+	}
+	if s.deps.Events == nil {
+		writeJSON(w, http.StatusOK, []history.Event{})
+		return
+	}
+	events, err := s.deps.Events.QueryEvents(s.deps.Now().Add(-span), 1000)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *server) requestSpan(w http.ResponseWriter, r *http.Request, fallback string) (time.Duration, bool) {
+	value := r.URL.Query().Get("span")
+	if value == "" {
+		value = fallback
+	}
+	span, err := parseSpan(value)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return 0, false
+	}
+	return span, true
+}
+
+func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
+	s.wsMu.Lock()
+	if s.closed {
+		s.wsMu.Unlock()
+		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	s.wsDone.Add(1)
+	s.wsMu.Unlock()
+	connection, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		s.wsDone.Done()
+		return
+	}
+	defer s.wsDone.Done()
+	defer connection.CloseNow()
+	connection.SetReadLimit(1024)
+	connectionCtx := connection.CloseRead(s.ctx)
+
+	var messages <-chan event.Message
+	cancelSubscription := func() {}
+	if s.deps.Live != nil {
+		messages, cancelSubscription = s.deps.Live.Subscribe(s.deps.WSBuffer)
+	}
+	defer cancelSubscription()
+	ticker := time.NewTicker(s.deps.WSInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			_ = connection.Close(websocket.StatusGoingAway, "server shutdown")
+			return
+		case <-connectionCtx.Done():
+			return
+		case <-ticker.C:
+			snapshot := s.deps.Snapshot.Snapshot()
+			wan := snapshot.WAN
+			if s.deps.WAN != nil {
+				wan = s.deps.WAN.Snapshot()
+			}
+			if !s.writeWS(connection, struct {
+				T    int64          `json:"t"`
+				Dish *dish.Status   `json:"dish,omitempty"`
+				WAN  dish.WANStatus `json:"wan"`
+			}{T: s.deps.Now().Unix(), Dish: snapshot.Dish, WAN: wan}) {
+				return
+			}
+		case message, ok := <-messages:
+			if !ok {
+				_ = connection.Close(websocket.StatusPolicyViolation, "client too slow")
+				return
+			}
+			if !s.writeWS(connection, struct {
+				Event event.Message `json:"event"`
+			}{Event: message}) {
+				return
+			}
+		}
+	}
+}
+
+func (s *server) writeWS(connection *websocket.Conn, value any) bool {
+	ctx, cancel := context.WithTimeout(s.ctx, s.deps.WSWriteTimeout)
+	defer cancel()
+	return s.deps.WSWrite(ctx, connection, value) == nil
 }
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {

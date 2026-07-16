@@ -33,6 +33,15 @@ type HistoryConfig struct {
 type AlertsConfig struct {
 	WebhookURL string
 	NtfyURL    string
+	Rules      map[string]AlertRuleConfig
+}
+
+type AlertRuleConfig struct {
+	Enabled    bool
+	Threshold  float64
+	Threshold2 float64
+	Hold       time.Duration
+	ClearHold  time.Duration
 }
 
 func defaults() *Config {
@@ -42,7 +51,32 @@ func defaults() *Config {
 		ProbeHosts: []string{"1.1.1.1", "8.8.8.8"}, ProbeInterval: 2 * time.Second,
 		History: HistoryConfig{RAMHours: 3, MinuteDays: 7, QuarterDays: 30,
 			DBPath: "/etc/starwatch/history.db", FlushInterval: 5 * time.Minute},
+		Alerts: defaultAlerts(),
 	}
+}
+
+func defaultAlerts() AlertsConfig {
+	rules := make(map[string]AlertRuleConfig)
+	for _, name := range []string{
+		"outage_started", "dish_unreachable", "path_degraded", "obstruction_high",
+		"thermal_throttle", "thermal_shutdown", "motors_stuck", "water_detected",
+		"mast_not_vertical", "slow_ethernet", "firmware_pending",
+	} {
+		rules[name] = AlertRuleConfig{Enabled: true}
+	}
+	outage := rules["outage_started"]
+	outage.Hold = 30 * time.Second
+	rules["outage_started"] = outage
+	unreachable := rules["dish_unreachable"]
+	unreachable.Hold = time.Minute
+	rules["dish_unreachable"] = unreachable
+	path := rules["path_degraded"]
+	path.Threshold, path.Threshold2, path.ClearHold = .2, 300, 5*time.Minute
+	rules["path_degraded"] = path
+	obstruction := rules["obstruction_high"]
+	obstruction.Threshold = .02
+	rules["obstruction_high"] = obstruction
+	return AlertsConfig{Rules: rules}
 }
 
 func Load(path string) (*Config, error) {
@@ -102,8 +136,83 @@ func Load(path string) (*Config, error) {
 	if section := doc.Find("alerts", ""); section != nil {
 		cfg.Alerts.WebhookURL = section.Options["webhook_url"]
 		cfg.Alerts.NtfyURL = section.Options["ntfy_url"]
+		for option, name := range map[string]string{
+			"outage_started_enabled": "outage_started", "dish_unreachable_enabled": "dish_unreachable",
+			"path_degraded_enabled": "path_degraded", "obstruction_high_enabled": "obstruction_high",
+			"thermal_throttle_enabled": "thermal_throttle", "thermal_shutdown_enabled": "thermal_shutdown",
+			"motors_stuck_enabled": "motors_stuck", "water_detected_enabled": "water_detected",
+			"mast_not_vertical_enabled": "mast_not_vertical", "slow_ethernet_enabled": "slow_ethernet",
+			"firmware_pending_enabled": "firmware_pending",
+		} {
+			rule := cfg.Alerts.Rules[name]
+			if err := parseBool(section, option, &rule.Enabled); err != nil {
+				return nil, err
+			}
+			cfg.Alerts.Rules[name] = rule
+		}
+		if err := parseAlertSeconds(section, "outage_started_secs", cfg.Alerts.Rules, "outage_started", false); err != nil {
+			return nil, err
+		}
+		if err := parseAlertSeconds(section, "dish_unreachable_secs", cfg.Alerts.Rules, "dish_unreachable", false); err != nil {
+			return nil, err
+		}
+		if err := parseAlertSeconds(section, "path_clear_secs", cfg.Alerts.Rules, "path_degraded", true); err != nil {
+			return nil, err
+		}
+		path := cfg.Alerts.Rules["path_degraded"]
+		if err := parseFloat(section, "path_loss_percent", 0, 100, &path.Threshold, .01); err != nil {
+			return nil, err
+		}
+		if err := parseFloat(section, "path_rtt_ms", 0, 60_000, &path.Threshold2, 1); err != nil {
+			return nil, err
+		}
+		cfg.Alerts.Rules["path_degraded"] = path
+		obstruction := cfg.Alerts.Rules["obstruction_high"]
+		if err := parseFloat(section, "obstruction_percent", 0, 100, &obstruction.Threshold, .01); err != nil {
+			return nil, err
+		}
+		cfg.Alerts.Rules["obstruction_high"] = obstruction
 	}
 	return cfg, nil
+}
+
+func parseBool(section *UCISection, option string, destination *bool) error {
+	value := section.Options[option]
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("%s.%s must be boolean", section.Type, option)
+	}
+	*destination = parsed
+	return nil
+}
+
+func parseFloat(section *UCISection, option string, min, max float64, destination *float64, scale float64) error {
+	value := section.Options[option]
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed < min || parsed > max {
+		return fmt.Errorf("%s.%s must be between %g and %g", section.Type, option, min, max)
+	}
+	*destination = parsed * scale
+	return nil
+}
+
+func parseAlertSeconds(section *UCISection, option string, rules map[string]AlertRuleConfig, name string, clear bool) error {
+	rule := rules[name]
+	destination := &rule.Hold
+	if clear {
+		destination = &rule.ClearHold
+	}
+	if err := parseSeconds(section, option, destination); err != nil {
+		return err
+	}
+	rules[name] = rule
+	return nil
 }
 
 func parseInt(section *UCISection, option string, min, max int, destination *int) error {

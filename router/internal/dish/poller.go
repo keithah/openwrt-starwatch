@@ -69,6 +69,11 @@ func (p *Poller) Snapshot() Snapshot {
 	for field, available := range p.snapshot.FieldAvailability {
 		result.FieldAvailability[field] = available
 	}
+	result.HistoryOutages = append([]HistoryOutage(nil), p.snapshot.HistoryOutages...)
+	if p.snapshot.DishFailureSince != nil {
+		failureSince := *p.snapshot.DishFailureSince
+		result.DishFailureSince = &failureSince
+	}
 	return result
 }
 
@@ -132,6 +137,7 @@ func (p *Poller) discover(parent context.Context) bool {
 	defer cancel()
 	info, err := p.api.GetDeviceInfo(ctx)
 	if err != nil || info == nil {
+		p.markDishFailure(p.options.Now())
 		p.failed(FieldDeviceInfo)
 		p.mu.Lock()
 		if p.snapshot.DeviceInfo == nil || p.failures[FieldDeviceInfo] >= 3 {
@@ -141,6 +147,7 @@ func (p *Poller) discover(parent context.Context) bool {
 		return false
 	}
 	p.succeeded(FieldDeviceInfo)
+	p.markDishReachable()
 	p.mu.Lock()
 	p.snapshot.Topology = TopologyFull
 	p.snapshot.DeviceInfo = &DeviceInfo{
@@ -156,6 +163,7 @@ func (p *Poller) pollStatus(parent context.Context) {
 	defer cancel()
 	status, err := p.api.GetStatus(ctx)
 	if err != nil || status == nil {
+		p.markDishFailure(p.options.Now())
 		p.failed(FieldStatus, FieldObstruction, FieldAlignment, FieldPower)
 		p.mu.Lock()
 		if p.failures[FieldStatus] >= 3 {
@@ -165,6 +173,7 @@ func (p *Poller) pollStatus(parent context.Context) {
 		return
 	}
 	p.succeeded(FieldStatus)
+	p.markDishReachable()
 	now := p.options.Now()
 	if now.Year() >= 2025 && p.initialBackfillPending() {
 		p.backfill(parent)
@@ -174,7 +183,8 @@ func (p *Poller) pollStatus(parent context.Context) {
 		LatencyMS: status.GetPopPingLatencyMs(), DropRate: status.GetPopPingDropRate(),
 		DownlinkThroughputBPS: status.GetDownlinkThroughputBps(), UplinkThroughputBPS: status.GetUplinkThroughputBps(),
 		Outage: outageSnapshot(status.GetOutage()), Alerts: alertSnapshot(status.GetAlerts()), MobilityClass: status.GetMobilityClass().String(),
-		ClassOfService: status.GetClassOfService().String(),
+		ClassOfService:      status.GetClassOfService().String(),
+		SoftwareUpdateState: status.GetSoftwareUpdateState().String(),
 	}
 	if obstruction := status.GetObstructionStats(); obstruction != nil {
 		p.succeeded(FieldObstruction)
@@ -265,6 +275,7 @@ func (p *Poller) backfill(parent context.Context) {
 		return
 	}
 	p.succeeded(FieldHistory)
+	p.setHistoryOutages(response.GetOutages())
 	length := maxLength(response)
 	valid := min(int(response.GetCurrent()), length)
 	if valid > 0 && length > 0 {
@@ -286,6 +297,22 @@ func (p *Poller) backfill(parent context.Context) {
 	if power, ok := newestHistoryValue(response.GetPowerIn(), response.GetCurrent()); ok {
 		p.setPowerFallback(power)
 	}
+}
+
+func (p *Poller) setHistoryOutages(outages []*device.DishOutage) {
+	result := make([]HistoryOutage, 0, len(outages))
+	for _, item := range outages {
+		if item == nil || item.GetStartTimestampNs() == 0 {
+			continue
+		}
+		result = append(result, HistoryOutage{
+			Cause: item.GetCause().String(), Start: time.Unix(0, item.GetStartTimestampNs()).UTC(),
+			Duration: time.Duration(item.GetDurationNs()),
+		})
+	}
+	p.mu.Lock()
+	p.snapshot.HistoryOutages = result
+	p.mu.Unlock()
 }
 
 func (p *Poller) refreshHistoryPower(parent context.Context) {
@@ -430,4 +457,21 @@ func (p *Poller) failed(fields ...string) {
 			p.snapshot.FieldAvailability[field] = false
 		}
 	}
+}
+
+func (p *Poller) markDishFailure(at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.snapshot.DishReachable = false
+	if p.snapshot.DishFailureSince == nil {
+		atCopy := at
+		p.snapshot.DishFailureSince = &atCopy
+	}
+}
+
+func (p *Poller) markDishReachable() {
+	p.mu.Lock()
+	p.snapshot.DishReachable = true
+	p.snapshot.DishFailureSince = nil
+	p.mu.Unlock()
 }

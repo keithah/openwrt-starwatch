@@ -1,0 +1,158 @@
+package alert
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"starwatch/internal/dish"
+	"starwatch/internal/history"
+	"starwatch/internal/outage"
+)
+
+type notificationSink struct{ notifications []Notification }
+
+func (s *notificationSink) Enqueue(notification Notification) {
+	s.notifications = append(s.notifications, notification)
+}
+
+type eventSink struct{ events []history.Event }
+
+func (s *eventSink) AddEvent(item history.Event) { s.events = append(s.events, item) }
+
+func testRules() map[string]Rule {
+	rules := DefaultRules()
+	rules["path_degraded"] = Rule{Enabled: true, Severity: SeverityWarning, Threshold: .2, Threshold2: 300, ClearHold: 5 * time.Minute}
+	return rules
+}
+
+func TestCatalogContainsEverySupportedSpecAlertAndSeverities(t *testing.T) {
+	rules := DefaultRules()
+	want := map[string]Severity{
+		"outage_started": SeverityCritical, "dish_unreachable": SeverityCritical,
+		"path_degraded": SeverityWarning, "obstruction_high": SeverityWarning,
+		"thermal_throttle": SeverityWarning, "thermal_shutdown": SeverityCritical,
+		"motors_stuck": SeverityWarning, "water_detected": SeverityWarning,
+		"mast_not_vertical": SeverityInfo, "slow_ethernet": SeverityInfo,
+		"firmware_pending": SeverityInfo,
+	}
+	if len(rules) != len(want) {
+		t.Fatalf("catalog length=%d want=%d: %#v", len(rules), len(want), rules)
+	}
+	for name, severity := range want {
+		if rule, ok := rules[name]; !ok || !rule.Enabled || rule.Severity != severity {
+			t.Fatalf("rule %q: %+v present=%v", name, rule, ok)
+		}
+	}
+	if _, exists := rules["failover_event"]; exists {
+		t.Fatal("failover_event must remain deferred until mwan3 lands")
+	}
+}
+
+func TestPathDegradedUsesStrictThresholdAndFiveMinuteClearHysteresis(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	notifications := &notificationSink{}
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: testRules(), Delivery: notifications})
+	inputs := Inputs{WAN: dish.WANStatus{Available: true, ProbeLoss5m: .2, ProbeRTT5mMS: 300}}
+
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 0 {
+		t.Fatal("equal-to thresholds must not fire")
+	}
+	inputs.WAN.ProbeLoss5m = .21
+	engine.Tick(inputs)
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 1 || notifications.notifications[0].State != StateFiring {
+		t.Fatalf("fire notifications: %#v", notifications.notifications)
+	}
+	inputs.WAN.ProbeLoss5m = .2
+	engine.Tick(inputs)
+	now = now.Add(5*time.Minute - time.Second)
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 1 {
+		t.Fatal("path alert cleared before five minutes")
+	}
+	now = now.Add(time.Second)
+	engine.Tick(inputs)
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 2 || notifications.notifications[1].State != StateResolved {
+		t.Fatalf("resolved notifications: %#v", notifications.notifications)
+	}
+}
+
+func TestUnavailableInputsDoNotFalselyClearActiveAlerts(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	notifications := &notificationSink{}
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: DefaultRules(), Delivery: notifications})
+	inputs := Inputs{Dish: dish.Snapshot{Dish: &dish.Status{Alerts: map[string]bool{"thermal_throttle": true}}}}
+	engine.Tick(inputs)
+	inputs.Dish.Dish = nil
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 1 || notifications.notifications[0].Alert != "thermal_throttle" {
+		t.Fatalf("notifications after unavailable input: %#v", notifications.notifications)
+	}
+}
+
+func TestOutageAndDishUnreachableHoldDedupAndSuppression(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	notifications := &notificationSink{}
+	rules := DefaultRules()
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, Delivery: notifications})
+	engine.SetDishUnreachableSuppressUntil(now.Add(2 * time.Minute))
+	inputs := Inputs{Outages: []outage.Entry{
+		{Source: outage.SourceDish, Cause: "NO_DOWNLINK", Start: now.Add(-30 * time.Second), Duration: 30 * time.Second, Ongoing: true},
+		{Source: outage.SourceUnreachable, Cause: "grpc_unreachable", Start: now.Add(-time.Minute), Duration: time.Minute, Ongoing: true},
+	}}
+
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 1 || notifications.notifications[0].Alert != "outage_started" {
+		t.Fatalf("suppressed fire set: %#v", notifications.notifications)
+	}
+	now = now.Add(2 * time.Minute)
+	inputs.Outages[0].Duration += 2 * time.Minute
+	inputs.Outages[1].Duration += 2 * time.Minute
+	engine.Tick(inputs)
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 2 || notifications.notifications[1].Alert != "dish_unreachable" {
+		t.Fatalf("unreachable notifications: %#v", notifications.notifications)
+	}
+	inputs.Outages = nil
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 4 || notifications.notifications[2].State != StateResolved || notifications.notifications[3].State != StateResolved {
+		t.Fatalf("clear notifications: %#v", notifications.notifications)
+	}
+}
+
+func TestDishFlagsFirmwareAndObstructionFireAndPersistExactEvents(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	ram := history.NewStore(10)
+	_ = ram.Append(history.ObstructionFraction, history.Point{Time: now.Add(-time.Hour), Value: .03})
+	notifications := &notificationSink{}
+	events := &eventSink{}
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: DefaultRules(), History: ram, Delivery: notifications, Events: events})
+	inputs := Inputs{Dish: dish.Snapshot{DeviceInfo: &dish.DeviceInfo{ID: "ut-1"}, Dish: &dish.Status{
+		Alerts: map[string]bool{
+			"thermal_throttle": true, "thermal_shutdown": true, "motors_stuck": true,
+			"dish_water_detected": true, "mast_not_near_vertical": true, "slow_ethernet_speeds": true,
+		},
+		SoftwareUpdateState: "REBOOT_REQUIRED",
+	}}}
+
+	engine.Tick(inputs)
+	wantAlerts := map[string]bool{"obstruction_high": true, "thermal_throttle": true, "thermal_shutdown": true, "motors_stuck": true, "water_detected": true, "mast_not_vertical": true, "slow_ethernet": true, "firmware_pending": true}
+	if len(notifications.notifications) != len(wantAlerts) || len(events.events) != len(wantAlerts) {
+		t.Fatalf("notifications=%#v events=%#v", notifications.notifications, events.events)
+	}
+	for i, notification := range notifications.notifications {
+		if !wantAlerts[notification.Alert] || notification.Device != "ut-1" || notification.State != StateFiring {
+			t.Fatalf("notification: %+v", notification)
+		}
+		if events.events[i].Kind != "alert_fired" {
+			t.Fatalf("event: %+v", events.events[i])
+		}
+		var decoded Notification
+		if err := json.Unmarshal([]byte(events.events[i].Detail), &decoded); err != nil || decoded.Alert != notification.Alert {
+			t.Fatalf("event detail=%q decoded=%+v err=%v", events.events[i].Detail, decoded, err)
+		}
+	}
+}

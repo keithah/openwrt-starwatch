@@ -24,8 +24,17 @@ type Snapshot struct {
 	Dish              *Status         `json:"dish,omitempty"`
 	DeviceInfo        *DeviceInfo     `json:"device_info,omitempty"`
 	Config            *ConfigReadback `json:"config,omitempty"`
+	DishReachable     bool            `json:"dish_reachable"`
+	DishFailureSince  *time.Time      `json:"dish_failure_since,omitempty"`
+	HistoryOutages    []HistoryOutage `json:"-"`
 	FieldAvailability map[string]bool `json:"field_availability"`
 	WAN               WANStatus       `json:"wan"`
+}
+
+type HistoryOutage struct {
+	Cause    string
+	Start    time.Time
+	Duration time.Duration
 }
 
 type WANStatus struct {
@@ -38,6 +47,7 @@ type WANStatus struct {
 	ProbeLoss30s  float32 `json:"probe_loss_30s"`
 	ProbeRTT5mMS  float32 `json:"probe_rtt_5m_ms"`
 	ProbeLoss5m   float32 `json:"probe_loss_5m"`
+	ProbeLossNow  float32 `json:"-"`
 }
 
 type Status struct {
@@ -55,6 +65,7 @@ type Status struct {
 	Alerts                map[string]bool `json:"alerts,omitempty"`
 	MobilityClass         string          `json:"mobility_class"`
 	ClassOfService        string          `json:"class_of_service"`
+	SoftwareUpdateState   string          `json:"software_update_state"`
 }
 
 type Outage struct {

@@ -7,10 +7,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"starwatch/internal/outage"
 )
 
 type SQLiteOptions struct {
@@ -20,9 +23,9 @@ type SQLiteOptions struct {
 }
 
 type Event struct {
-	At     time.Time
-	Kind   string
-	Detail string
+	At     time.Time `json:"at"`
+	Kind   string    `json:"kind"`
+	Detail string    `json:"detail"`
 }
 
 type SQLiteStore struct {
@@ -30,9 +33,10 @@ type SQLiteStore struct {
 	path    string
 	options SQLiteOptions
 
-	mu        sync.Mutex
-	pending   []Event
-	lastFlush time.Time
+	mu             sync.Mutex
+	pending        []Event
+	pendingOutages []outage.Entry
+	lastFlush      time.Time
 }
 
 const historySchema = `
@@ -135,6 +139,16 @@ func (s *SQLiteStore) AddEvent(event Event) {
 	s.mu.Lock()
 	s.pending = append(s.pending, event)
 	s.mu.Unlock()
+}
+
+func (s *SQLiteStore) SaveOutage(entry outage.Entry) error {
+	if entry.Ongoing {
+		return fmt.Errorf("cannot persist ongoing outage")
+	}
+	s.mu.Lock()
+	s.pendingOutages = append(s.pendingOutages, entry)
+	s.mu.Unlock()
+	return nil
 }
 
 type aggregate struct {
@@ -242,6 +256,23 @@ func (s *SQLiteStore) Flush(ctx context.Context, ram Reader, now time.Time) erro
 			return rollback(err)
 		}
 	}
+	for _, entry := range s.pendingOutages {
+		result, err := tx.ExecContext(ctx, `UPDATE outages SET duration_ns=MAX(duration_ns, ?)
+			WHERE source=? AND cause=? AND start_ts=?`, int64(entry.Duration), entry.Source, entry.Cause, entry.Start.UnixNano())
+		if err != nil {
+			return rollback(err)
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return rollback(err)
+		}
+		if updated == 0 {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO outages(source, cause, start_ts, duration_ns) VALUES(?, ?, ?, ?)`,
+				entry.Source, entry.Cause, entry.Start.UnixNano(), int64(entry.Duration)); err != nil {
+				return rollback(err)
+			}
+		}
+	}
 	for table, limit := range map[string]int{"events": 10_000, "outages": 10_000, "speedtests": 500} {
 		query := fmt.Sprintf("DELETE FROM %s WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT %d)", table, table, limit)
 		if _, err := tx.ExecContext(ctx, query); err != nil {
@@ -252,8 +283,86 @@ func (s *SQLiteStore) Flush(ctx context.Context, ram Reader, now time.Time) erro
 		return err
 	}
 	s.pending = nil
+	s.pendingOutages = nil
 	s.lastFlush = now
 	return nil
+}
+
+func (s *SQLiteStore) QueryOutages(since time.Time, limit int) ([]outage.Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT source, cause, start_ts, duration_ns FROM outages
+		WHERE start_ts+duration_ns>=? ORDER BY start_ts`, since.UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	type key struct {
+		source, cause string
+		start         int64
+	}
+	combined := make(map[key]outage.Entry)
+	for rows.Next() {
+		var entry outage.Entry
+		var startNS, durationNS int64
+		if err := rows.Scan(&entry.Source, &entry.Cause, &startNS, &durationNS); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		entry.Start = time.Unix(0, startNS).UTC()
+		entry.Duration = time.Duration(durationNS)
+		combined[key{entry.Source, entry.Cause, startNS}] = entry
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, entry := range s.pendingOutages {
+		if entry.Start.Add(entry.Duration).Before(since) {
+			continue
+		}
+		combined[key{entry.Source, entry.Cause, entry.Start.UnixNano()}] = entry
+	}
+	entries := make([]outage.Entry, 0, len(combined))
+	for _, entry := range combined {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Start.Before(entries[j].Start) })
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
+}
+
+func (s *SQLiteStore) QueryEvents(since time.Time, limit int) ([]Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query("SELECT ts, kind, detail FROM events WHERE ts>=? ORDER BY ts", since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	var events []Event
+	for rows.Next() {
+		var timestamp int64
+		var item Event
+		if err := rows.Scan(&timestamp, &item.Kind, &item.Detail); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		item.At = time.Unix(timestamp, 0).UTC()
+		events = append(events, item)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, item := range s.pending {
+		if !item.At.Before(since) {
+			events = append(events, item)
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool { return events[i].At.Before(events[j].At) })
+	if limit > 0 && len(events) > limit {
+		events = events[len(events)-limit:]
+	}
+	return events, nil
 }
 
 func rebuildQuarters(ctx context.Context, tx *sql.Tx, since time.Time) error {

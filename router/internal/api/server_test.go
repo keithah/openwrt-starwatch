@@ -1,14 +1,20 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+
 	"starwatch/internal/dish"
+	liveevent "starwatch/internal/event"
 	"starwatch/internal/history"
+	"starwatch/internal/outage"
 )
 
 type snapshotStub struct{ snapshot dish.Snapshot }
@@ -24,6 +30,14 @@ type spanStub struct{ result history.QueryResult }
 func (s spanStub) QuerySpan(string, time.Time, time.Duration, int) (history.QueryResult, error) {
 	return s.result, nil
 }
+
+type outageStub struct{ entries []outage.Entry }
+
+func (s outageStub) Query(time.Time, int) ([]outage.Entry, error) { return s.entries, nil }
+
+type eventStub struct{ events []history.Event }
+
+func (s eventStub) QueryEvents(time.Time, int) ([]history.Event, error) { return s.events, nil }
 
 func testHandler(t *testing.T, token string, capacity int) (http.Handler, *history.Store) {
 	t.Helper()
@@ -174,6 +188,125 @@ func TestHistoryReturnsSelectedPersistentTier(t *testing.T) {
 	if body.Tier != history.TierMinute || len(body.Points) != 1 || valueOf(body.Points[0].Min) != 1 || valueOf(body.Points[0].Max) != 5 {
 		t.Fatalf("body: %+v", body)
 	}
+}
+
+func TestOutagesAndEventsEndpointsApplySpan(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), Now: func() time.Time { return now },
+		Outages: outageStub{entries: []outage.Entry{{Source: outage.SourcePath, Cause: "probe_loss", Start: now.Add(-time.Minute), Duration: 30 * time.Second}}},
+		Events:  eventStub{events: []history.Event{{At: now, Kind: "alert_fired", Detail: `{}`}}},
+	})
+
+	outageResponse := request(handler, http.MethodGet, "/api/outages?span=3h", "secret")
+	if outageResponse.Code != http.StatusOK {
+		t.Fatalf("outages code=%d body=%s", outageResponse.Code, outageResponse.Body.String())
+	}
+	var outages []outage.Entry
+	if err := json.Unmarshal(outageResponse.Body.Bytes(), &outages); err != nil || len(outages) != 1 || outages[0].Source != outage.SourcePath {
+		t.Fatalf("outages=%#v err=%v", outages, err)
+	}
+	eventResponse := request(handler, http.MethodGet, "/api/events?span=7d", "secret")
+	if eventResponse.Code != http.StatusOK {
+		t.Fatalf("events code=%d body=%s", eventResponse.Code, eventResponse.Body.String())
+	}
+	var events []history.Event
+	if err := json.Unmarshal(eventResponse.Body.Bytes(), &events); err != nil || len(events) != 1 || events[0].Kind != "alert_fired" {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+}
+
+func TestWebSocketAuthCadenceAndAsyncEvents(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	bus := liveevent.NewBus()
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{snapshot: dish.Snapshot{Dish: &dish.Status{LatencyMS: 42}}},
+		History: history.NewStore(1), WAN: wanStub{snapshot: dish.WANStatus{Interface: "wan0"}}, Live: bus,
+		Now: func() time.Time { return now }, WSInterval: 10 * time.Millisecond,
+	})
+	defer handler.Close()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	wsURL := "ws" + server.URL[len("http"):] + "/api/ws"
+	if connection, response, err := websocket.Dial(context.Background(), wsURL, nil); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		if connection != nil {
+			connection.CloseNow()
+		}
+		t.Fatalf("unauthorized dial connection=%v response=%v err=%v", connection, response, err)
+	}
+	connection, _, err := websocket.Dial(context.Background(), wsURL+"?token=secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var frame struct {
+		T    int64          `json:"t"`
+		Dish *dish.Status   `json:"dish"`
+		WAN  dish.WANStatus `json:"wan"`
+	}
+	if err := wsjson.Read(ctx, connection, &frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame.T != now.Unix() || frame.Dish == nil || frame.Dish.LatencyMS != 42 || frame.WAN.Interface != "wan0" {
+		t.Fatalf("frame: %+v", frame)
+	}
+	bus.Publish(liveevent.Message{Kind: "alert_fired", At: now, Data: map[string]any{"alert": "path_degraded"}})
+	var async struct {
+		Event liveevent.Message `json:"event"`
+	}
+	if err := wsjson.Read(ctx, connection, &async); err != nil {
+		t.Fatal(err)
+	}
+	if async.Event.Kind != "alert_fired" {
+		t.Fatalf("async event: %+v", async)
+	}
+}
+
+func TestWebSocketDisconnectsWhenBoundedEventBufferOverflows(t *testing.T) {
+	bus := liveevent.NewBus()
+	writeStarted := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), Live: bus,
+		WSInterval: time.Hour, WSBuffer: 1, WSWriteTimeout: time.Second,
+		WSWrite: func(ctx context.Context, _ *websocket.Conn, _ any) error {
+			select {
+			case writeStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-unblock:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	server := httptest.NewServer(handler)
+	connection, _, err := websocket.Dial(context.Background(), "ws"+server.URL[len("http"):]+"/api/ws?token=secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	bus.Publish(liveevent.Message{Kind: "one"})
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("websocket did not begin event write")
+	}
+	bus.Publish(liveevent.Message{Kind: "two"})
+	bus.Publish(liveevent.Message{Kind: "three"})
+	close(unblock)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var value any
+	if err := wsjson.Read(ctx, connection, &value); err == nil || websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Fatalf("slow client read err=%v value=%#v", err, value)
+	}
+	handler.Close()
+	server.Close()
 }
 
 func valueOf(value *float32) float32 {

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"starwatch/internal/outage"
 )
 
 func openTestSQLite(t *testing.T, now time.Time) (*SQLiteStore, string) {
@@ -158,6 +160,54 @@ func TestSQLiteCorruptionMovesAsideAndRecreates(t *testing.T) {
 	var count int
 	if err := store.db.QueryRow("SELECT COUNT(*) FROM events WHERE kind='sqlite_recreated'").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("recovery event count=%d err=%v", count, err)
+	}
+}
+
+func TestSQLitePersistsAndQueriesClosedOutages(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	store, _ := openTestSQLite(t, now)
+	entry := outage.Entry{Source: outage.SourceDish, Cause: "OBSTRUCTED", Start: now.Add(-time.Minute), Duration: 30 * time.Second}
+	if err := store.SaveOutage(entry); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.QueryOutages(now.Add(-time.Hour), 100)
+	if err != nil || len(pending) != 1 || pending[0] != entry {
+		t.Fatalf("pending outages=%#v err=%v", pending, err)
+	}
+	if err := store.Flush(context.Background(), NewStore(1), now); err != nil {
+		t.Fatal(err)
+	}
+	// Re-saving a history-ring duplicate must not create another row.
+	if err := store.SaveOutage(entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(context.Background(), NewStore(1), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.QueryOutages(now.Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0] != entry {
+		t.Fatalf("outages: %#v", entries)
+	}
+}
+
+func TestSQLiteQueriesPersistedAndPendingEvents(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	store, _ := openTestSQLite(t, now)
+	store.AddEvent(Event{At: now.Add(-time.Minute), Kind: "alert_fired", Detail: `{"alert":"path_degraded"}`})
+	if err := store.Flush(context.Background(), NewStore(1), now); err != nil {
+		t.Fatal(err)
+	}
+	store.AddEvent(Event{At: now, Kind: "alert_cleared", Detail: `{"alert":"path_degraded"}`})
+
+	events, err := store.QueryEvents(now.Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Kind != "alert_fired" || events[1].Kind != "alert_cleared" {
+		t.Fatalf("events: %#v", events)
 	}
 }
 

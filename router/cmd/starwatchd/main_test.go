@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"starwatch/internal/alert"
 	"starwatch/internal/config"
 	"starwatch/internal/history"
 )
@@ -61,6 +62,17 @@ func TestSQLiteOptionsMapConfiguredRetention(t *testing.T) {
 		t.Fatal("sqlite options did not retain the daemon clock")
 	}
 	var _ history.SQLiteOptions = options
+}
+
+func TestAlertRulesMapConfiguredThresholdsWithoutChangingSeverity(t *testing.T) {
+	configured := config.AlertsConfig{Rules: map[string]config.AlertRuleConfig{
+		"path_degraded": {Enabled: true, Threshold: .25, Threshold2: 450, ClearHold: 3 * time.Minute},
+	}}
+	rules := alertRules(configured)
+	path := rules["path_degraded"]
+	if !path.Enabled || path.Threshold != .25 || path.Threshold2 != 450 || path.ClearHold != 3*time.Minute || path.Severity != alert.SeverityWarning {
+		t.Fatalf("path rule: %+v", path)
+	}
 }
 
 func TestRunConfigServesAndStopsOnCancellation(t *testing.T) {

@@ -4,6 +4,7 @@ go 1.22
 
 require (
 	github.com/clarkzjw/starlink-grpc-golang v0.0.0
+	github.com/coder/websocket v1.8.13
 	golang.org/x/net v0.32.0
 	google.golang.org/grpc v1.70.0
 	modernc.org/sqlite v1.34.5
