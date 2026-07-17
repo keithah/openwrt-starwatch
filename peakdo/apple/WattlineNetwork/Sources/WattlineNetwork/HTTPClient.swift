@@ -34,8 +34,15 @@ public final class HTTPClient: RouterHTTPClient, @unchecked Sendable {
         request.httpBody = body
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw NetworkError.decode("Non-HTTP response") }
+        if http.statusCode == 401 {
+            throw NetworkError.unauthorized
+        }
         guard (200..<300).contains(http.statusCode) else {
-            throw NetworkError.httpStatus(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NetworkError.httpStatus(http.statusCode, body.replacingOccurrences(
+                of: token,
+                with: "[REDACTED]"
+            ))
         }
         return (data, http)
     }

@@ -30,6 +30,41 @@ final class HTTPAndSSEClientTests: XCTestCase {
         catch { XCTAssertEqual(error as? NetworkError, .httpStatus(503, "down")) }
     }
 
+    func testHTTPClientMapsUnauthorizedWithoutExposingToken() async {
+        URLProtocolFixture.response = .init(
+            status: 401,
+            body: Data("invalid secret-token".utf8)
+        )
+        let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        do {
+            _ = try await client.get("/api/v1/status", token: "secret-token")
+            XCTFail("expected unauthorized")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .unauthorized)
+            XCTAssertFalse(String(describing: error).contains("secret-token"))
+        }
+    }
+
+    func testHTTPClientRedactsTokenFromHTTPErrorBody() async {
+        URLProtocolFixture.response = .init(
+            status: 503,
+            body: Data("request rejected for secret-token".utf8)
+        )
+        let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        do {
+            _ = try await client.get("/api/v1/status", token: "secret-token")
+            XCTFail("expected HTTP error")
+        } catch {
+            XCTAssertEqual(
+                error as? NetworkError,
+                .httpStatus(503, "request rejected for [REDACTED]")
+            )
+            XCTAssertFalse(String(describing: error).contains("secret-token"))
+        }
+    }
+
     func testHTTPClientRejectsInvalidURL() async {
         let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())
         do { _ = try await client.get("://bad", token: "secret"); XCTFail("expected error") }
@@ -37,7 +72,7 @@ final class HTTPAndSSEClientTests: XCTestCase {
     }
 
     func testSSEClientParsesRawDataFramesAndBlankLines() async throws {
-        let wire = "data: {\"n\":1}\n\ndata: second\n\ndata: third\n"
+        let wire = "data: {\"n\":1}\n\ndata: second\n\ndata: third\n\n"
         URLProtocolFixture.response = .init(status: 200, body: Data(wire.utf8), contentType: "text/event-stream")
         let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
         var values: [Data] = []
@@ -68,11 +103,72 @@ final class HTTPAndSSEClientTests: XCTestCase {
         XCTAssertEqual(values, [Data(#"{"name":"café ⚡"}"#.utf8)])
     }
 
-    func testSSEClientRejectsMalformedRawFrame() async {
-        URLProtocolFixture.response = .init(status: 200, body: Data("event: unsupported\n\n".utf8), contentType: "text/event-stream")
+    func testSSEClientPreservesInvalidUTF8InDataForStrictJSONRejection() async throws {
+        var invalidJSON = Data(#"{"connected":true,"bad":""#.utf8)
+        invalidJSON.append(0xFF)
+        invalidJSON.append(contentsOf: Data(#""}"#.utf8))
+        var wire = Data("data: ".utf8)
+        wire.append(invalidJSON)
+        wire.append(contentsOf: Data("\n\n".utf8))
+        URLProtocolFixture.response = .init(
+            status: 200,
+            body: wire,
+            contentType: "text/event-stream"
+        )
         let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
-        do { for try await _ in client.events(path: "/events", token: "token") {}; XCTFail("expected error") }
-        catch { XCTAssertEqual(error as? NetworkError, .decode("Malformed SSE frame")) }
+
+        var values: [Data] = []
+        for try await value in client.events(path: "/events", token: "token") {
+            values.append(value)
+        }
+
+        XCTAssertEqual(values, [invalidJSON])
+        XCTAssertNil(String(data: invalidJSON, encoding: .utf8))
+    }
+
+    func testSSEClientIgnoresStandardAndUnknownNonDataFields() async throws {
+        let wire = "event: telemetry\nid: 7\nretry: 1000\nfuture-field: yes\ndata: accepted\n\n"
+        URLProtocolFixture.response = .init(status: 200, body: Data(wire.utf8), contentType: "text/event-stream")
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        var values: [Data] = []
+        for try await value in client.events(path: "/events", token: "token") {
+            values.append(value)
+        }
+
+        XCTAssertEqual(values, [Data("accepted".utf8)])
+    }
+
+    func testSSEClientAcceptsBareDataAsEmptyPayload() async throws {
+        URLProtocolFixture.response = .init(
+            status: 200,
+            body: Data("data\n\n".utf8),
+            contentType: "text/event-stream"
+        )
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        var values: [Data] = []
+        for try await value in client.events(path: "/events", token: "token") {
+            values.append(value)
+        }
+
+        XCTAssertEqual(values, [Data()])
+    }
+
+    func testSSEClientDiscardsUnterminatedEventAtEOF() async throws {
+        URLProtocolFixture.response = .init(
+            status: 200,
+            body: Data("data: truncated".utf8),
+            contentType: "text/event-stream"
+        )
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        var values: [Data] = []
+        for try await value in client.events(path: "/events", token: "token") {
+            values.append(value)
+        }
+
+        XCTAssertTrue(values.isEmpty)
     }
 
     func testSSEClientClosesWithoutExtraEvents() async throws {
@@ -108,6 +204,23 @@ final class HTTPAndSSEClientTests: XCTestCase {
         let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
         do { for try await _ in client.events(path: "/events", token: "token") {}; XCTFail("expected error") }
         catch { XCTAssertEqual(error as? NetworkError, .httpStatus(503, "")) }
+    }
+
+    func testSSEClientMapsUnauthorizedWithoutExposingToken() async {
+        URLProtocolFixture.response = .init(
+            status: 401,
+            body: Data("invalid secret-token".utf8),
+            contentType: "text/event-stream"
+        )
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        do {
+            for try await _ in client.events(path: "/events", token: "secret-token") {}
+            XCTFail("expected unauthorized")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .unauthorized)
+            XCTAssertFalse(String(describing: error).contains("secret-token"))
+        }
     }
 
     func testSSEClientRejectsInvalidPath() async {

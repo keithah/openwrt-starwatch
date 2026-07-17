@@ -8,26 +8,40 @@ public protocol RouterEventStream: Sendable {
 }
 
 struct SSEFrameParser {
-    private(set) var dataLines: [String] = []
-    mutating func consume(_ line: String) throws -> Data? {
+    private(set) var dataLines: [Data] = []
+
+    mutating func consume(_ line: [UInt8]) throws -> Data? {
         if line.isEmpty {
             guard !dataLines.isEmpty else { return nil }
             defer { dataLines.removeAll(keepingCapacity: true) }
-            return Data(dataLines.joined(separator: "\n").utf8)
+            var payload = Data()
+            for (index, dataLine) in dataLines.enumerated() {
+                if index > 0 { payload.append(0x0A) }
+                payload.append(dataLine)
+            }
+            return payload
         }
-        if line.hasPrefix("data:") {
-            var value = String(line.dropFirst(5))
-            if value.first == " " { value.removeFirst() }
-            dataLines.append(value)
+
+        if line.first == 0x3A { return nil }
+        let colon = line.firstIndex(of: 0x3A)
+        let field = line[..<(colon ?? line.endIndex)]
+        guard field.elementsEqual("data".utf8) else {
+            // Field names and ignored values may contain malformed UTF-8;
+            // they are intentionally never decoded.
             return nil
         }
-        if line.hasPrefix(":") { return nil }
-        throw NetworkError.decode("Malformed SSE frame")
-    }
-    mutating func finish() -> Data? {
-        guard !dataLines.isEmpty else { return nil }
-        defer { dataLines.removeAll(keepingCapacity: true) }
-        return Data(dataLines.joined(separator: "\n").utf8)
+
+        guard let colon else {
+            dataLines.append(Data())
+            return nil
+        }
+
+        var valueStart = line.index(after: colon)
+        if valueStart < line.endIndex, line[valueStart] == 0x20 {
+            valueStart = line.index(after: valueStart)
+        }
+        dataLines.append(Data(line[valueStart...]))
+        return nil
     }
 }
 
@@ -54,23 +68,22 @@ public final class SSEClient: RouterEventStream, @unchecked Sendable {
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     let (bytes, response) = try await self.session.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else { throw NetworkError.decode("Non-HTTP response") }
+                    if http.statusCode == 401 { throw NetworkError.unauthorized }
                     guard (200..<300).contains(http.statusCode) else { throw NetworkError.httpStatus(http.statusCode, "") }
                     var parser = SSEFrameParser()
                     var line: [UInt8] = []
                     for try await byte in bytes {
                         if byte == 0x0A {
                             if line.last == 0x0D { line.removeLast() }
-                            if let data = try parser.consume(String(decoding: line, as: UTF8.self)) { continuation.yield(data) }
+                            if let data = try parser.consume(line) { continuation.yield(data) }
                             line.removeAll(keepingCapacity: true)
                         } else {
                             line.append(byte)
                         }
                     }
-                    if !line.isEmpty {
-                        if line.last == 0x0D { line.removeLast() }
-                        if let data = try parser.consume(String(decoding: line, as: UTF8.self)) { continuation.yield(data) }
-                    }
-                    if let data = parser.finish() { continuation.yield(data) }
+                    // EOF does not terminate an SSE event. Any remaining line
+                    // or accumulated data belongs to a truncated payload and
+                    // is deliberately discarded.
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
