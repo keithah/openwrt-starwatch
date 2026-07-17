@@ -12,12 +12,37 @@ import (
 
 func TestRouterEndpointRequiresTopologyBAndReachability(t *testing.T) {
 	for _, snapshot := range []dish.Snapshot{
+		{},
 		{Topology: dish.TopologyWANOnly},
 		{Topology: dish.TopologyFull, StarlinkRouter: &dish.StarlinkRouter{Reachable: false}},
 	} {
 		handler := NewServer(Deps{Token: "secret", Snapshot: snapshotStub{snapshot: snapshot}, History: history.NewStore(1)})
 		if got := request(handler, http.MethodGet, "/api/router", "secret"); got.Code != http.StatusServiceUnavailable {
 			t.Fatalf("snapshot=%+v code=%d body=%s", snapshot, got.Code, got.Body.String())
+		}
+	}
+}
+
+func TestRouterEndpointReturnsWarmingResponse(t *testing.T) {
+	handler := NewServer(Deps{Token: "secret", Snapshot: snapshotStub{snapshot: dish.Snapshot{Topology: dish.TopologyFull}}, History: history.NewStore(1)})
+	response := request(handler, http.MethodGet, "/api/router", "secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	var body dish.StarlinkRouter
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Reachable {
+		t.Fatalf("reachable=%t", body.Reachable)
+	}
+	for name, availability := range map[string]dish.Availability{
+		"radio_stats": body.Availability.RadioStats,
+		"diagnostics": body.Availability.Diagnostics,
+		"wifi_config": body.Availability.WifiConfig,
+	} {
+		if availability.Available || availability.Reason != "router telemetry warming up" {
+			t.Fatalf("%s availability=%+v", name, availability)
 		}
 	}
 }

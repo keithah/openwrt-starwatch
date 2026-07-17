@@ -224,10 +224,10 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	warnEmptyToken(cfg.Token, log.Printf)
 	apiDeps := api.Deps{
 		Token: cfg.Token, Snapshot: combinedSnapshot{dish: poller, router: routerPoller}, History: reader, WAN: wanMonitor,
-		Outages: timeline, Events: persistent, Live: liveEvents, Now: deps.now,
+		Outages: timeline, Events: persistent, Live: liveEvents, AuditEvents: persistent, AuditLive: liveEvents, Now: deps.now,
 		Controls: controller, Obstruction: poller, Speedtest: speedtests, MapInterval: cfg.PollMap,
-		FailoverAssist: mwanManager,
-		AlertDelivery:  dispatcher,
+		FailoverAssist: mwanManager, AlertDelivery: dispatcher,
+		RouterMutations: dish.NewRouterMutationController(dish.RouterMutationOptions{ResolveGateway: resolveGateway}),
 	}
 	if settings != nil {
 		apiDeps.Settings = settings

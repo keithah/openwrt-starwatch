@@ -472,9 +472,8 @@ All router mutations:
    before every write, Starwatch rereads router configuration and compares its
    `incarnation` with the supplied revision; a mismatch returns `409` without
    writing. Because the displayed revision can be up to 60 seconds old and no
-   atomic compare-and-swap is known, this is a best-effort concurrency guard
-   unless on-device testing proves `wifi_set_config` enforces `incarnation`
-   server-side.
+   atomic compare-and-swap is known, this is a best-effort concurrency guard:
+   the targeted RPC is not known to enforce `incarnation` server-side.
 3. A mutation that uses `wifi_set_config` sets only the exact paired `apply_*`
    flag for the requested setting. Scalar writes contain only their requested
    value. Aggregate flags such as
@@ -575,35 +574,33 @@ configuration untouched.
 
 ```json
 {
-  "access": "block",
-  "confirmation": "BLOCK CLIENT"
+  "config_revision": "incarnation:42",
+  "confirmation": "RENAME CLIENT",
+  "given_name": "Work Mac"
 }
 ```
 
-Each request performs exactly one operation: `given_name`, or `access` set to
-`block` or `unblock`. Blocking and unblocking require `BLOCK CLIENT` and
-`UNBLOCK CLIENT`; renaming requires `RENAME CLIENT`. The path MAC is normalized
-to lowercase colon notation and must match a client from the latest router
-snapshot.
+Phase 4 accepts **rename only**. `config_revision`, the exact confirmation
+`RENAME CLIENT`, and a non-empty `given_name` are required. The path MAC is
+normalized to lowercase colon notation and must match a client from the latest
+router snapshot. `blocked` and Wi-Fi/radio fields are rejected with `422`; client
+blocking is deferred to Phase 5 and Wi-Fi/radio writes to Phase 6.
 
-Both rename and access changes use the targeted
-`WifiSetClientGivenName` request (request oneof field 3017) carrying the current
-`ClientConfig` form. Before writing, Starwatch rereads the addressed client and
-preserves its unrelated fields. It does not use the deprecated `ClientName`
-payload, `ApplyClientNames`, or the atomic `ApplyClientConfigs` collection. The
-feature ships only after on-device verification confirms the router honors
-`ClientConfig.GivenName` and `WeeklyBlockSchedules`; a firmware that honors only
-the deprecated naming path is reported unsupported rather than silently using
-it.
+Rename uses the targeted `WifiSetClientGivenName` request (request oneof field
+3017) carrying the current `ClientConfig` form. Before writing, Starwatch
+rereads the addressed client and preserves `mac_address`, `client_id`, `group_id`,
+and `weekly_block_schedules`. It does not use the deprecated `ClientName`
+payload, `ApplyClientNames`, or the atomic `ApplyClientConfigs` collection. A
+firmware that does not implement the targeted naming RPC returns `422` rather
+than silently using a deprecated or collection-replacement path.
 
-There is no block setter: `WifiClient.Blocked` is read-only status. To block,
-Starwatch preserves all user schedules and adds or replaces exactly one marked
-`WeeklyBlockSchedule` with `group_id` `starwatch:block:v1` and the all-week
-half-open range `[0,10080)` minutes. To unblock, it removes only that marked
-schedule and leaves every other schedule byte-for-byte unchanged. If the marker
-is absent, unblock returns `409` rather than deleting a schedule Starwatch does
-not own. Readback must confirm the targeted name or schedule change before
-`202`; unsupported schedule behavior returns `422`, not a false success.
+Starwatch rereads both configuration and clients after the RPC and returns `202`
+only when both confirm the requested name. A failed confirmation returns `502`.
+The incarnation comparison immediately before the write minimizes, but cannot
+eliminate, the TOCTOU window because the target RPC is not known to perform an
+atomic server-side incarnation check. Successful readback-confirmed renames
+append and publish a `router_control` audit event containing only
+`action`, normalized `mac`, `given_name`, `result`, and `client_id`.
 
 ## Explicitly excluded router writes
 

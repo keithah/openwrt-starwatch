@@ -45,6 +45,17 @@ type EventSubscriber interface {
 	Subscribe(capacity int) (<-chan event.Message, func())
 }
 
+// EventWriter and EventPublisher are deliberately split from the read-only
+// event interfaces above so mutation handlers can audit successful actions
+// without broadening the dependencies used by GET endpoints.
+type EventWriter interface {
+	AddEvent(history.Event)
+}
+
+type EventPublisher interface {
+	Publish(event.Message)
+}
+
 type ControlProvider interface {
 	Execute(context.Context, dish.ControlParams) (dish.ControlResult, error)
 }
@@ -71,27 +82,34 @@ type SettingsProvider interface {
 	RegenerateToken() (string, error)
 }
 
+type RouterMutationProvider interface {
+	RenameClient(context.Context, string, string, string) (uint32, error)
+}
+
 type Deps struct {
-	Token          string
-	TokenProvider  func() string
-	Snapshot       SnapshotProvider
-	History        history.SpanReader
-	WAN            WANProvider
-	Outages        OutageProvider
-	Events         EventProvider
-	Live           EventSubscriber
-	Controls       ControlProvider
-	Obstruction    ObstructionProvider
-	Speedtest      SpeedtestProvider
-	MapInterval    time.Duration
-	FailoverAssist FailoverAssistProvider
-	Settings       SettingsProvider
-	AlertDelivery  alert.Delivery
-	Now            func() time.Time
-	WSInterval     time.Duration
-	WSBuffer       int
-	WSWriteTimeout time.Duration
-	WSWrite        func(context.Context, *websocket.Conn, any) error
+	Token           string
+	TokenProvider   func() string
+	Snapshot        SnapshotProvider
+	History         history.SpanReader
+	WAN             WANProvider
+	Outages         OutageProvider
+	Events          EventProvider
+	Live            EventSubscriber
+	AuditEvents     EventWriter
+	AuditLive       EventPublisher
+	Controls        ControlProvider
+	Obstruction     ObstructionProvider
+	Speedtest       SpeedtestProvider
+	MapInterval     time.Duration
+	FailoverAssist  FailoverAssistProvider
+	Settings        SettingsProvider
+	AlertDelivery   alert.Delivery
+	RouterMutations RouterMutationProvider
+	Now             func() time.Time
+	WSInterval      time.Duration
+	WSBuffer        int
+	WSWriteTimeout  time.Duration
+	WSWrite         func(context.Context, *websocket.Conn, any) error
 }
 
 type server struct {
@@ -132,6 +150,7 @@ func NewServer(deps Deps) *server {
 	mux.HandleFunc("GET /api/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/diagnostics", s.auth(s.diagnostics))
 	mux.HandleFunc("GET /api/router", s.auth(s.router))
+	mux.HandleFunc("PATCH /api/router/clients/{mac}", s.auth(s.routerClientPatch))
 	mux.HandleFunc("GET /api/history", s.auth(s.history))
 	mux.HandleFunc("GET /api/wan", s.auth(s.wan))
 	mux.HandleFunc("GET /api/outages", s.auth(s.outages))
