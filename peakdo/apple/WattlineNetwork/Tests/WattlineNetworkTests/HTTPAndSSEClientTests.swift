@@ -46,6 +46,28 @@ final class HTTPAndSSEClientTests: XCTestCase {
         XCTAssertEqual(URLProtocolFixture.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer token")
     }
 
+    func testSSEClientDecodesUTF8WhenMultibyteCharactersSpanChunks() async throws {
+        URLProtocolFixture.response = .init(
+            status: 200,
+            body: Data(),
+            chunks: [
+                Data("data: {\"name\":\"caf".utf8),
+                Data([0xC3]),
+                Data([0xA9, 0x20, 0xE2]),
+                Data([0x9A, 0xA1, 0x22, 0x7D, 0x0A, 0x0A])
+            ],
+            contentType: "text/event-stream"
+        )
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        var values: [Data] = []
+        for try await value in client.events(path: "/events", token: "token") {
+            values.append(value)
+        }
+
+        XCTAssertEqual(values, [Data(#"{"name":"café ⚡"}"#.utf8)])
+    }
+
     func testSSEClientRejectsMalformedRawFrame() async {
         URLProtocolFixture.response = .init(status: 200, body: Data("event: unsupported\n\n".utf8), contentType: "text/event-stream")
         let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())

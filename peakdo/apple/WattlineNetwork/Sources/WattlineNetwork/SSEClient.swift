@@ -56,19 +56,19 @@ public final class SSEClient: RouterEventStream, @unchecked Sendable {
                     guard let http = response as? HTTPURLResponse else { throw NetworkError.decode("Non-HTTP response") }
                     guard (200..<300).contains(http.statusCode) else { throw NetworkError.httpStatus(http.statusCode, "") }
                     var parser = SSEFrameParser()
-                    var line = ""
+                    var line: [UInt8] = []
                     for try await byte in bytes {
                         if byte == 0x0A {
-                            if line.last == "\r" { line.removeLast() }
-                            if let data = try parser.consume(line) { continuation.yield(data) }
+                            if line.last == 0x0D { line.removeLast() }
+                            if let data = try parser.consume(String(decoding: line, as: UTF8.self)) { continuation.yield(data) }
                             line.removeAll(keepingCapacity: true)
                         } else {
-                            line.append(Character(UnicodeScalar(byte)))
+                            line.append(byte)
                         }
                     }
                     if !line.isEmpty {
-                        if line.last == "\r" { line.removeLast() }
-                        if let data = try parser.consume(line) { continuation.yield(data) }
+                        if line.last == 0x0D { line.removeLast() }
+                        if let data = try parser.consume(String(decoding: line, as: UTF8.self)) { continuation.yield(data) }
                     }
                     if let data = parser.finish() { continuation.yield(data) }
                     continuation.finish()
