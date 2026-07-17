@@ -11,10 +11,10 @@ final class RouterTransportConnectionTests: XCTestCase {
         scheme: "http",
         host: "wattline-router.local",
         port: 8080,
-        token: "test-token",
         certificateFingerprint: nil,
         allowsInsecureWAN: false
     )
+    private let credentials = TransientRouterCredentialProvider(token: "test-token")
     private let origin = RouterTimestampOrigin(
         wallClock: Date(timeIntervalSince1970: 1_752_739_200),
         deviceTimestamp: .seconds(40)
@@ -30,6 +30,78 @@ final class RouterTransportConnectionTests: XCTestCase {
         XCTAssertEqual(first.peripheralID, endpoint.peripheralID)
         XCTAssertEqual(second.peripheralID, endpoint.peripheralID)
         XCTAssertNotEqual(first.sessionID, second.sessionID)
+    }
+
+    func testEndpointIdentityNormalizesEquivalentAuthorityAndSeparatesDistinctEndpoints() {
+        let equivalent = RouterEndpoint(
+            scheme: "HTTP",
+            host: "WATTLINE-ROUTER.LOCAL.",
+            port: 8080,
+            certificateFingerprint: "fingerprint",
+            allowsInsecureWAN: true
+        )
+        let normalized = RouterEndpoint(
+            scheme: "http",
+            host: "wattline-router.local",
+            port: 8080,
+            certificateFingerprint: nil,
+            allowsInsecureWAN: false
+        )
+        let distinct = [
+            RouterEndpoint(
+                scheme: "https",
+                host: "wattline-router.local",
+                port: 8080,
+                certificateFingerprint: nil,
+                allowsInsecureWAN: false
+            ),
+            RouterEndpoint(
+                scheme: "http",
+                host: "other-router.local",
+                port: 8080,
+                certificateFingerprint: nil,
+                allowsInsecureWAN: false
+            ),
+            RouterEndpoint(
+                scheme: "http",
+                host: "wattline-router.local",
+                port: 8081,
+                certificateFingerprint: nil,
+                allowsInsecureWAN: false
+            ),
+        ]
+
+        XCTAssertEqual(equivalent.peripheralID, normalized.peripheralID)
+        XCTAssertEqual(Set(distinct.map(\.peripheralID)).count, distinct.count)
+        XCTAssertFalse(distinct.map(\.peripheralID).contains(normalized.peripheralID))
+    }
+
+    func testCredentialsAreInjectedTransientlyAndDescriptionsAreRedacted() async throws {
+        let server = FakeRouterServer()
+        server.setResponse(data: statusData(), for: "/api/v1/status")
+        let provider = RecordingCredentialProvider(token: "test-token")
+        let credential = RouterCredential(token: "test-token")
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: provider,
+            client: server,
+            events: server,
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        addTeardownBlock { await transport.disconnect() }
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStreamCount(1)
+
+        let requestedEndpoints = await provider.requestedEndpoints
+        XCTAssertEqual(requestedEndpoints, [endpoint, endpoint])
+        XCTAssertEqual(server.requests.map(\.authorization), ["Bearer test-token", "Bearer test-token"])
+        XCTAssertFalse(String(describing: endpoint).contains("test-token"))
+        XCTAssertFalse(String(reflecting: endpoint).contains("test-token"))
+        XCTAssertFalse(String(describing: credential).contains("test-token"))
+        XCTAssertFalse(String(reflecting: credential).contains("test-token"))
     }
 
     func testConnectAuthenticatesStatusThenEmitsHandshakeAndConnected() async throws {
@@ -63,6 +135,7 @@ final class RouterTransportConnectionTests: XCTestCase {
         )
         let transport = RouterTransport(
             endpoint: endpoint,
+            credentials: credentials,
             client: client,
             events: FakeRouterServer(),
             clock: TestRouterClock(now: .zero, origin: origin),
@@ -78,6 +151,28 @@ final class RouterTransportConnectionTests: XCTestCase {
                 error as? NetworkError,
                 .httpStatus(503, "router echoed [REDACTED]")
             )
+            XCTAssertFalse(String(describing: error).contains("test-token"))
+        }
+    }
+
+    func testCredentialProviderErrorsCannotExposeSecretMaterial() async {
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: ThrowingCredentialProvider(
+                error: NetworkError.decode("credential lookup leaked test-token")
+            ),
+            client: FakeRouterServer(),
+            events: FakeRouterServer(),
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+
+        do {
+            try await transport.connect(to: endpoint.peripheralID, scope: scope)
+            XCTFail("expected credential failure")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .unauthorized)
             XCTAssertFalse(String(describing: error).contains("test-token"))
         }
     }
@@ -117,14 +212,13 @@ final class RouterTransportConnectionTests: XCTestCase {
         invalidSnapshot.append(0xFF)
         invalidSnapshot.append(contentsOf: Data(#"","battery":{"enabled":true,"status":1,"full":false,"max_wh":99.5,"wh":73.25,"level":99,"volts":20.8,"amps":2.5,"watts":52.0,"remain_min":87},"connected":true}"#.utf8))
         XCTAssertTrue(server.pushPayload(invalidSnapshot))
-        let values = try await recorder.waitForCount(4)
+        let values = try await recorder.waitForCount(3)
 
         XCTAssertEqual(values[2], .reconnecting(scope))
-        guard case let .disconnected(emittedScope, failure) = values[3] else {
-            return XCTFail("expected invalid JSON to mark telemetry stale")
-        }
-        XCTAssertEqual(emittedScope, scope)
-        XCTAssertTrue(failure?.message.contains("decode") == true)
+        XCTAssertFalse(values.contains { event in
+            if case .battery = event { return true }
+            return false
+        })
         await transport.disconnect()
     }
 
@@ -146,12 +240,12 @@ final class RouterTransportConnectionTests: XCTestCase {
         _ = try await recorder.waitForCount(4)
 
         XCTAssertTrue(server.fail(NetworkError.streamEnded))
-        let lost = try await recorder.waitForCount(6)
+        let lost = try await recorder.waitForCount(5)
         XCTAssertEqual(lost[4], .reconnecting(scope))
-        XCTAssertEqual(
-            lost[5],
-            .disconnected(scope, TransportFailure(message: "streamEnded"))
-        )
+        XCTAssertFalse(lost.contains { event in
+            if case .disconnected = event { return true }
+            return false
+        })
 
         await clock.waitForSleepCount(1)
         let firstSleepDurations = await clock.sleepDurations
@@ -160,12 +254,89 @@ final class RouterTransportConnectionTests: XCTestCase {
         try await server.waitForEventStreamCount(2)
         XCTAssertTrue(server.pushPayload(snapshotData(level: 41)))
 
-        let reconnected = try await recorder.waitForCount(8)
-        XCTAssertEqual(reconnected[6], .connected(scope))
-        guard case let .battery(battery, _) = reconnected[7] else {
+        let reconnected = try await recorder.waitForCount(7)
+        XCTAssertEqual(reconnected[5], .connected(scope))
+        guard case let .battery(battery, _) = reconnected[6] else {
             return XCTFail("expected telemetry after stream reconnect")
         }
         XCTAssertEqual(battery.level, 41)
+        await transport.disconnect()
+    }
+
+    func testRecoverableStreamLossDoesNotRetireScopeInDeviceSession() async throws {
+        let server = FakeRouterServer()
+        server.setResponse(data: statusData(), for: "/api/v1/status")
+        let clock = TestRouterClock(now: .seconds(50), origin: origin)
+        let transport = makeTransport(
+            server: server,
+            clock: clock,
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        addTeardownBlock { await transport.disconnect() }
+        let session = DeviceSession(
+            transport: transport,
+            clock: TestRouterClock(now: .seconds(50), origin: origin)
+        )
+        let states = DeviceStateRecorder(stream: session.states)
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        await session.start()
+
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStreamCount(1)
+        XCTAssertTrue(server.pushPayload(snapshotData(level: 40)))
+        try await states.waitUntil { $0.connection == .live && $0.battery?.level == 40 }
+
+        XCTAssertTrue(server.fail(NetworkError.streamEnded))
+        try await states.waitUntil { $0.connection == .reconnecting }
+        await clock.waitForSleepCount(1)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertFalse(states.values.contains { $0.connection == .disconnected })
+
+        await clock.advance(by: .seconds(1))
+        try await server.waitForEventStreamCount(2)
+        XCTAssertTrue(server.pushPayload(Data(#"{"connected":true}"#.utf8)))
+        try await states.waitUntil { $0.connection == .loading }
+        XCTAssertFalse(states.values.contains { $0.connection == .disconnected })
+
+        XCTAssertTrue(server.pushPayload(snapshotData(level: 41)))
+        try await states.waitUntil { $0.connection == .live && $0.battery?.level == 41 }
+        await transport.disconnect()
+        try await states.waitUntil { $0.connection == .disconnected }
+    }
+
+    func testConnectedFalseSnapshotReconnectsBeforeLaterTelemetryRestoresLive() async throws {
+        let server = FakeRouterServer()
+        server.setResponse(data: statusData(), for: "/api/v1/status")
+        let clock = TestRouterClock(now: .seconds(50), origin: origin)
+        let transport = makeTransport(
+            server: server,
+            clock: clock,
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        addTeardownBlock { await transport.disconnect() }
+        let recorder = DeviceEventRecorder(stream: transport.events)
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStreamCount(1)
+        XCTAssertTrue(server.pushPayload(Data(#"{"connected":false}"#.utf8)))
+        let loss = try await recorder.waitForCount(3)
+        XCTAssertEqual(loss[2], .reconnecting(scope))
+        XCTAssertFalse(loss.contains { event in
+            if case .disconnected = event { return true }
+            return false
+        })
+
+        await clock.waitForSleepCount(1)
+        await clock.advance(by: .seconds(1))
+        try await server.waitForEventStreamCount(2)
+        XCTAssertTrue(server.pushPayload(snapshotData(level: 42)))
+        let restored = try await recorder.waitForCount(5)
+        XCTAssertEqual(restored[3], .connected(scope))
+        guard case let .battery(battery, _) = restored[4] else {
+            return XCTFail("expected telemetry after connected=false reconnect")
+        }
+        XCTAssertEqual(battery.level, 42)
         await transport.disconnect()
     }
 
@@ -201,11 +372,13 @@ final class RouterTransportConnectionTests: XCTestCase {
         let clock = TestRouterClock(now: .seconds(70), origin: origin)
         let transport = RouterTransport(
             endpoint: endpoint,
+            credentials: credentials,
             client: client,
             events: streams,
             clock: clock,
             backoff: RouterReconnectBackoff(delays: [.seconds(1)])
         )
+        addTeardownBlock { await transport.disconnect() }
         let recorder = DeviceEventRecorder(stream: transport.events)
         let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
 
@@ -249,11 +422,13 @@ final class RouterTransportConnectionTests: XCTestCase {
         let streams = LeakyEventStream()
         let transport = RouterTransport(
             endpoint: endpoint,
+            credentials: credentials,
             client: client,
             events: streams,
             clock: TestRouterClock(now: .zero, origin: origin),
             backoff: RouterReconnectBackoff(delays: [.seconds(1)])
         )
+        addTeardownBlock { await transport.disconnect() }
         let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
         try await transport.connect(to: endpoint.peripheralID, scope: firstScope)
         await streams.waitForStreamCount(1)
@@ -271,8 +446,117 @@ final class RouterTransportConnectionTests: XCTestCase {
         XCTAssertFalse(streams.pushPayload(snapshotData(level: 55), to: 0))
 
         await client.releaseGatedRequest()
-        try await replacement.value
+        await assertCancellation(of: replacement)
         XCTAssertEqual(streams.streamCount, 1)
+    }
+
+    func testDisconnectCancelsInFlightStatusAndConnectThrowsCancellation() async {
+        let client = CancellationObservingStatusClient(data: statusData())
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: FakeRouterServer(),
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        let endpointID = endpoint.peripheralID
+        let connection = Task {
+            try await transport.connect(to: endpointID, scope: scope)
+        }
+        await client.waitForRequestCount(1)
+
+        await transport.disconnect()
+
+        await assertCancellation(of: connection)
+        await client.waitForCancellationCount(1)
+    }
+
+    func testCallerCancellationCancelsInFlightStatusAndRemainsCancellation() async {
+        let client = CancellationObservingStatusClient(data: statusData())
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: FakeRouterServer(),
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        addTeardownBlock { await transport.disconnect() }
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        let endpointID = endpoint.peripheralID
+        let connection = Task {
+            try await transport.connect(to: endpointID, scope: scope)
+        }
+        await client.waitForRequestCount(1)
+
+        connection.cancel()
+
+        await assertCancellation(of: connection)
+        await client.waitForCancellationCount(1)
+    }
+
+    func testReplacementConnectCancelsSupersededStatusAndCompletesNewConnect() async throws {
+        let client = CancellationObservingStatusClient(data: statusData())
+        let server = FakeRouterServer()
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: server,
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        addTeardownBlock { await transport.disconnect() }
+        let endpointID = endpoint.peripheralID
+        let firstScope = await transport.makeConnectionScope(for: endpointID)
+        let firstConnection = Task {
+            try await transport.connect(to: endpointID, scope: firstScope)
+        }
+        await client.waitForRequestCount(1)
+
+        await client.allowRequestsAfterFirst()
+        let secondScope = await transport.makeConnectionScope(for: endpointID)
+        try await transport.connect(to: endpointID, scope: secondScope)
+
+        await assertCancellation(of: firstConnection)
+        await client.waitForCancellationCount(1)
+        try await server.waitForEventStreamCount(1)
+        await transport.disconnect()
+    }
+
+    func testConnectionDeallocationCancelsStreamAndFinishesOutput() async throws {
+        let server = FakeRouterServer()
+        server.setResponse(data: statusData(), for: "/api/v1/status")
+        let output = AsyncStream<DeviceEvent>.makeStream()
+        let completion = EventStreamCompletionProbe(stream: output.stream)
+        var connection: RouterConnection? = RouterConnection(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: server,
+            events: server,
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)]),
+            output: output.continuation
+        )
+        let weakConnection = WeakReference(connection)
+        let scope = await connection?.makeConnectionScope()
+
+        try await connection?.connect(
+            to: endpoint.peripheralID,
+            scope: try XCTUnwrap(scope)
+        )
+        try await server.waitForEventStreamCount(1)
+        connection = nil
+
+        let didDeallocate = await waitForCondition { weakConnection.value == nil }
+        if !didDeallocate {
+            await weakConnection.value?.disconnect()
+        }
+        XCTAssertTrue(didDeallocate, "stream task retained RouterConnection")
+        try await completion.waitForFinish()
+        XCTAssertFalse(server.pushPayload(snapshotData(level: 88)))
     }
 
     func testManualScanIsNoOpAndCommandsAreClearlyUnsupported() async throws {
@@ -295,6 +579,7 @@ final class RouterTransportConnectionTests: XCTestCase {
     ) -> RouterTransport {
         RouterTransport(
             endpoint: endpoint,
+            credentials: credentials,
             client: server,
             events: server,
             clock: clock ?? TestRouterClock(now: .seconds(50), origin: origin),
@@ -309,6 +594,28 @@ final class RouterTransportConnectionTests: XCTestCase {
     private func snapshotData(level: UInt8, updatedAt: String? = nil) -> Data {
         let timestamp = updatedAt.map { #", "updated_at":"\#($0)""# } ?? ""
         return Data(#"{"battery":{"enabled":true,"status":1,"full":false,"max_wh":99.5,"wh":73.25,"level":\#(level),"volts":20.8,"amps":2.5,"watts":52.0,"remain_min":87},"connected":true\#(timestamp)}"#.utf8)
+    }
+
+    private func assertCancellation(
+        of task: Task<Void, Error>,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            try await task.value
+            XCTFail("expected CancellationError", file: file, line: line)
+        } catch is CancellationError {
+        } catch {
+            XCTFail("expected CancellationError, received \(error)", file: file, line: line)
+        }
+    }
+
+    private func waitForCondition(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<20_000 {
+            if condition() { return true }
+            await Task.yield()
+        }
+        return false
     }
 }
 
@@ -382,7 +689,60 @@ private final class DeviceEventRecorder: @unchecked Sendable {
     }
 }
 
-private actor TestRouterClock: RouterConnectionClock {
+private final class DeviceStateRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [DeviceState] = []
+    private var collectionTask: Task<Void, Never>?
+
+    init(stream: AsyncStream<DeviceState>) {
+        collectionTask = Task { [weak self] in
+            for await state in stream {
+                self?.lock.withLock { self?.storedValues.append(state) }
+            }
+        }
+    }
+
+    deinit {
+        collectionTask?.cancel()
+    }
+
+    var values: [DeviceState] { lock.withLock { storedValues } }
+
+    func waitUntil(_ predicate: (DeviceState) -> Bool) async throws {
+        for _ in 0..<20_000 {
+            if values.contains(where: predicate) { return }
+            await Task.yield()
+        }
+        throw TestProbeError.timedOut("expected DeviceSession state")
+    }
+}
+
+private final class EventStreamCompletionProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didFinish = false
+    private var collectionTask: Task<Void, Never>?
+
+    init(stream: AsyncStream<DeviceEvent>) {
+        collectionTask = Task { [weak self] in
+            for await _ in stream {}
+            self?.lock.withLock { self?.didFinish = true }
+        }
+    }
+
+    deinit {
+        collectionTask?.cancel()
+    }
+
+    func waitForFinish() async throws {
+        for _ in 0..<20_000 {
+            if lock.withLock({ didFinish }) { return }
+            await Task.yield()
+        }
+        throw TestProbeError.timedOut("expected transport event stream to finish")
+    }
+}
+
+private actor TestRouterClock: RouterConnectionClock, DeviceClock {
     private(set) var now: DeviceTimestamp
     let origin: RouterTimestampOrigin
     private var sleeps: [Duration] = []
@@ -405,13 +765,87 @@ private actor TestRouterClock: RouterConnectionClock {
     }
 
     func waitForSleepCount(_ count: Int) async {
-        while sleeps.count < count { await Task.yield() }
+        for _ in 0..<20_000 {
+            if sleeps.count >= count { return }
+            await Task.yield()
+        }
     }
 
     func advance(by duration: Duration) {
         now += duration
         guard !sleepers.isEmpty else { return }
         sleepers.removeFirst().resume()
+    }
+}
+
+private actor CancellationObservingStatusClient: RouterHTTPClient {
+    private let data: Data
+    private var requestCount = 0
+    private var cancellationCount = 0
+    private var shouldBlock = true
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    func get(_ path: String, token: String) async throws -> (Data, HTTPURLResponse) {
+        try await request("GET", path, body: nil, token: token)
+    }
+
+    func request(
+        _ method: String,
+        _ path: String,
+        body: Data?,
+        token: String
+    ) async throws -> (Data, HTTPURLResponse) {
+        requestCount += 1
+        if shouldBlock {
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch is CancellationError {
+                cancellationCount += 1
+                throw CancellationError()
+            }
+        }
+        let response = HTTPURLResponse(
+            url: URL(string: "http://fake.local\(path)")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        return (data, response)
+    }
+
+    func allowRequestsAfterFirst() {
+        shouldBlock = false
+    }
+
+    func waitForRequestCount(_ expectedCount: Int) async {
+        for _ in 0..<20_000 {
+            if requestCount >= expectedCount { return }
+            await Task.yield()
+        }
+    }
+
+    func waitForCancellationCount(_ expectedCount: Int) async {
+        for _ in 0..<20_000 {
+            if cancellationCount >= expectedCount { return }
+            await Task.yield()
+        }
+    }
+}
+
+private actor RecordingCredentialProvider: RouterCredentialProvider {
+    private let token: String
+    private(set) var requestedEndpoints: [RouterEndpoint] = []
+
+    init(token: String) {
+        self.token = token
+    }
+
+    func credential(for endpoint: RouterEndpoint) async throws -> RouterCredential {
+        requestedEndpoints.append(endpoint)
+        return RouterCredential(token: token)
     }
 }
 
@@ -477,6 +911,22 @@ private struct ThrowingHTTPClient: RouterHTTPClient {
         token: String
     ) async throws -> (Data, HTTPURLResponse) {
         throw error
+    }
+}
+
+private struct ThrowingCredentialProvider: RouterCredentialProvider {
+    let error: NetworkError
+
+    func credential(for endpoint: RouterEndpoint) async throws -> RouterCredential {
+        throw error
+    }
+}
+
+private final class WeakReference<Value: AnyObject>: @unchecked Sendable {
+    weak var value: Value?
+
+    init(_ value: Value?) {
+        self.value = value
     }
 }
 

@@ -1,11 +1,10 @@
 import Foundation
 import WattlineCore
 
-public struct RouterEndpoint: Equatable, Sendable, CustomStringConvertible {
+public struct RouterEndpoint: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let scheme: String
     public let host: String
     public let port: Int
-    public let token: String
     public let certificateFingerprint: String?
     public let allowsInsecureWAN: Bool
 
@@ -13,26 +12,38 @@ public struct RouterEndpoint: Equatable, Sendable, CustomStringConvertible {
         scheme: String,
         host: String,
         port: Int,
-        token: String,
         certificateFingerprint: String?,
         allowsInsecureWAN: Bool
     ) {
         self.scheme = scheme
         self.host = host
         self.port = port
-        self.token = token
         self.certificateFingerprint = certificateFingerprint
         self.allowsInsecureWAN = allowsInsecureWAN
     }
 
     public var peripheralID: UUID {
-        Self.stableUUID(for: "\(scheme.lowercased())://\(host.lowercased()):\(port)")
+        Self.stableUUID(for: "\(normalizedScheme)://\(normalizedHost):\(port)")
     }
 
     public var description: String {
         "RouterEndpoint(scheme: \(scheme), host: \(host), port: \(port), "
-            + "token: [REDACTED], certificateFingerprint: \(certificateFingerprint ?? "nil"), "
+            + "certificateFingerprint: \(certificateFingerprint ?? "nil"), "
             + "allowsInsecureWAN: \(allowsInsecureWAN))"
+    }
+
+    public var debugDescription: String { description }
+
+    private var normalizedScheme: String {
+        scheme.lowercased()
+    }
+
+    private var normalizedHost: String {
+        let lowercaseHost = host.lowercased()
+        guard lowercaseHost.count > 1, lowercaseHost.last == "." else {
+            return lowercaseHost
+        }
+        return String(lowercaseHost.dropLast())
     }
 
     private static func stableUUID(for value: String) -> UUID {
@@ -55,6 +66,42 @@ public struct RouterEndpoint: Equatable, Sendable, CustomStringConvertible {
             bytes[12], bytes[13], bytes[14], bytes[15]
         ))
     }
+}
+
+/// An in-memory bearer credential whose textual representations never reveal its value.
+/// Persistence is deliberately left to the credential provider implementation added in Task 7.
+public struct RouterCredential: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let token: String
+
+    public init(token: String) {
+        self.token = token
+    }
+
+    public var description: String { "RouterCredential([REDACTED])" }
+    public var debugDescription: String { description }
+}
+
+public protocol RouterCredentialProvider: Sendable {
+    func credential(for endpoint: RouterEndpoint) async throws -> RouterCredential
+}
+
+/// A transient provider for callers that already hold a token in memory.
+/// It performs no persistence and can be replaced by Task 7's Keychain-backed provider.
+public struct TransientRouterCredentialProvider: RouterCredentialProvider,
+    CustomStringConvertible, CustomDebugStringConvertible
+{
+    private let credential: RouterCredential
+
+    public init(token: String) {
+        credential = RouterCredential(token: token)
+    }
+
+    public func credential(for endpoint: RouterEndpoint) async throws -> RouterCredential {
+        credential
+    }
+
+    public var description: String { "TransientRouterCredentialProvider([REDACTED])" }
+    public var debugDescription: String { description }
 }
 
 public protocol RouterConnectionClock: Sendable {
@@ -104,6 +151,7 @@ public actor RouterTransport: DeviceTransport {
 
     public init(
         endpoint: RouterEndpoint,
+        credentials: any RouterCredentialProvider,
         client: any RouterHTTPClient,
         events eventSource: any RouterEventStream,
         clock: any RouterConnectionClock,
@@ -113,6 +161,7 @@ public actor RouterTransport: DeviceTransport {
         events = pair.stream
         connection = RouterConnection(
             endpoint: endpoint,
+            credentials: credentials,
             client: client,
             events: eventSource,
             clock: clock,
