@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineNetworkTests.build/primary.swiftdeps"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/Tests/WattlineNetworkTests/PackageBoundaryTests.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineNetworkTests.build/PackageBoundaryTests.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineNetworkTests.build/PackageBoundaryTests.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineNetworkTests.build/PackageBoundaryTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineNetworkTests.build/PackageBoundaryTests.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineNetworkTests.build/PackageBoundaryTests.dia"
+  }
+}

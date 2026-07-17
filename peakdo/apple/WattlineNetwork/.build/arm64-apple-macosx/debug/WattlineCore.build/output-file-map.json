@@ -1,0 +1,180 @@
+{
+  "": {
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/primary.swiftdeps"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/BLE/BLETransport.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BLETransport.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BLETransport.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BLETransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BLETransport.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BLETransport.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/BLE/BluetoothDelegateBridge.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BluetoothDelegateBridge.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BluetoothDelegateBridge.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BluetoothDelegateBridge~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BluetoothDelegateBridge.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/BluetoothDelegateBridge.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/BLE/GATTUUID.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/GATTUUID.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/GATTUUID.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/GATTUUID~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/GATTUUID.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/GATTUUID.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/Binary.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Binary.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Binary.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Binary~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Binary.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Binary.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/CommandCodec.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CommandCodec.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CommandCodec.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CommandCodec~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CommandCodec.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CommandCodec.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/CurrentTimeCodec.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CurrentTimeCodec.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CurrentTimeCodec.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CurrentTimeCodec~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CurrentTimeCodec.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/CurrentTimeCodec.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/HandshakeCodec.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/HandshakeCodec.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/HandshakeCodec.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/HandshakeCodec~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/HandshakeCodec.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/HandshakeCodec.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/SFloat.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SFloat.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SFloat.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SFloat~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SFloat.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SFloat.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Codec/TelemetryCodec.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/TelemetryCodec.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/TelemetryCodec.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/TelemetryCodec~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/TelemetryCodec.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/TelemetryCodec.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Device/Capabilities.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Capabilities.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Capabilities.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Capabilities~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Capabilities.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Capabilities.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Device/DeviceController.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceController.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceController.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceController~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceController.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceController.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Device/DeviceModels.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceModels.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceModels.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceModels.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceModels.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Device/DeviceSession.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceSession.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceSession.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceSession~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceSession.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceSession.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Device/DiscoveryPolicy.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DiscoveryPolicy.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DiscoveryPolicy.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DiscoveryPolicy~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DiscoveryPolicy.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DiscoveryPolicy.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Device/Handshake.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Handshake.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Handshake.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Handshake~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Handshake.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/Handshake.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Device/MutationReconciler.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/MutationReconciler.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/MutationReconciler.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/MutationReconciler~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/MutationReconciler.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/MutationReconciler.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Snapshot/SharedDeviceSnapshot.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedDeviceSnapshot.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedDeviceSnapshot.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedDeviceSnapshot~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedDeviceSnapshot.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedDeviceSnapshot.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Snapshot/SharedSnapshotStore.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedSnapshotStore.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedSnapshotStore.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedSnapshotStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedSnapshotStore.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SharedSnapshotStore.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Snapshot/SnapshotPolicies.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SnapshotPolicies.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SnapshotPolicies.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SnapshotPolicies~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SnapshotPolicies.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SnapshotPolicies.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/SystemSurfaces/LiveActivityPolicy.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LiveActivityPolicy.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LiveActivityPolicy.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LiveActivityPolicy~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LiveActivityPolicy.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LiveActivityPolicy.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/SystemSurfaces/LowBatteryPolicy.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LowBatteryPolicy.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LowBatteryPolicy.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LowBatteryPolicy~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LowBatteryPolicy.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/LowBatteryPolicy.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Transport/DemoTransport.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DemoTransport.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DemoTransport.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DemoTransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DemoTransport.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DemoTransport.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Transport/DeviceTransport.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceTransport.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceTransport.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceTransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceTransport.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/DeviceTransport.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Transport/ReplayTransport.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/ReplayTransport.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/ReplayTransport.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/ReplayTransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/ReplayTransport.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/ReplayTransport.dia"
+  },
+  "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineCore/Sources/WattlineCore/Transport/SerializedTransactions.swift": {
+    "dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SerializedTransactions.d",
+    "object": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SerializedTransactions.swift.o",
+    "swiftmodule": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SerializedTransactions~partial.swiftmodule",
+    "swift-dependencies": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SerializedTransactions.swiftdeps",
+    "diagnostics": "/Users/keith/.codex/worktrees/wattline-phase-2/peakdo/apple/WattlineNetwork/.build/arm64-apple-macosx/debug/WattlineCore.build/SerializedTransactions.dia"
+  }
+}
