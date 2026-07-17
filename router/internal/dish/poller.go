@@ -22,6 +22,12 @@ type PollerOptions struct {
 	RPCTimeout       time.Duration
 	Now              func() time.Time
 	LocationEnabled  bool
+	RouteEnsurer     DishRouteEnsurer
+	RouteError       func(error)
+}
+
+type DishRouteEnsurer interface {
+	Ensure(context.Context) error
 }
 
 type Poller struct {
@@ -92,6 +98,7 @@ func (p *Poller) Snapshot() Snapshot {
 }
 
 func (p *Poller) Run(ctx context.Context) {
+	p.ensureDishRoute(ctx)
 	if p.discover(ctx) {
 		p.backfill(ctx)
 		p.pollStatus(ctx)
@@ -138,6 +145,9 @@ func (p *Poller) Run(ctx context.Context) {
 		case interval := <-p.mapInterval:
 			mapTicker.Reset(interval)
 		case <-retryTicker.C:
+			if p.topology() == TopologyWANOnly {
+				p.ensureDishRoute(ctx)
+			}
 			if p.topology() == TopologyWANOnly && p.discover(ctx) {
 				p.backfill(ctx)
 				p.pollStatus(ctx)
@@ -146,6 +156,15 @@ func (p *Poller) Run(ctx context.Context) {
 				_, _ = p.RefreshObstructionMap(ctx)
 			}
 		}
+	}
+}
+
+func (p *Poller) ensureDishRoute(ctx context.Context) {
+	if p.options.RouteEnsurer == nil {
+		return
+	}
+	if err := p.options.RouteEnsurer.Ensure(ctx); err != nil && p.options.RouteError != nil {
+		p.options.RouteError(err)
 	}
 }
 

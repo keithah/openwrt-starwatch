@@ -49,14 +49,23 @@ type Location struct {
 }
 
 type StarlinkRouter struct {
-	Reachable       bool       `json:"reachable"`
-	HardwareVersion string     `json:"hardware_version"`
-	SoftwareVersion string     `json:"software_version"`
-	ClientCount     int        `json:"client_count"`
-	UptimeSeconds   uint64     `json:"uptime_seconds"`
-	PingLatencyMS   *float32   `json:"-"`
-	PingDropRate    *float32   `json:"-"`
-	LastPingSuccess *time.Time `json:"-"`
+	Reachable       bool               `json:"reachable"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	ConfigRevision  string             `json:"config_revision"`
+	Device          RouterDevice       `json:"device"`
+	Ping            RouterPing         `json:"ping"`
+	Networks        []RouterNetwork    `json:"networks"`
+	Clients         []RouterClient     `json:"clients"`
+	Radios          []RouterRadio      `json:"radios"`
+	Interfaces      []RouterInterface  `json:"interfaces"`
+	Availability    RouterAvailability `json:"availability"`
+	HardwareVersion string             `json:"hardware_version"`
+	SoftwareVersion string             `json:"software_version"`
+	ClientCount     int                `json:"client_count"`
+	UptimeSeconds   uint64             `json:"uptime_seconds"`
+	PingLatencyMS   *float32           `json:"-"`
+	PingDropRate    *float32           `json:"-"`
+	LastPingSuccess *time.Time         `json:"-"`
 }
 
 type ObstructionMap struct {

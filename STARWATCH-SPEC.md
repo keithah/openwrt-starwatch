@@ -33,7 +33,7 @@ No Starlink account, no cloud API, no telemetry leaves the router. Everything wo
 
 - **No Starlink cloud/account API.** Billing, service plans, data quotas, remote (off-LAN) dishes, fleet management — out of scope permanently for this tool.
 - **No channel bonding / VPN.** We borrow Speedify's *UX*, not its product. Starwatch never routes traffic.
-- **No automatic routing changes.** The mwan3 assist is an explicit user action; Starwatch never rewrites routing/firewall config on its own.
+- **No general automatic routing changes.** The one narrow exception is the self-healing, VPN-bypassing `192.168.100.1/32` dish-management host route. Starwatch may maintain only that exact route (and users may disable it with `manage_dish_route=0`); it never rewrites default/general routing or firewall config. The mwan3 assist remains an explicit user action.
 - **No factory reset button.** The API offers it; we deliberately don't expose it.
 - **No general rules engine.** Fixed alert catalog with thresholds (§7). Condition→action rules (wattline-style) are a v1.x candidate (§14).
 - **Curated Starlink-router Wi-Fi management only.** Topology B may expose ordinary Wi-Fi settings and client controls through guarded, audited, readback-confirmed writes. Factory, regulatory, mesh-trust, bypass/routing, firewall, DHCP, aviation, calibration, and debug surfaces remain excluded; see `API.md`.

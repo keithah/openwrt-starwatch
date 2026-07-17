@@ -48,6 +48,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LocationEnabled {
 		t.Fatal("location must default off")
 	}
+	if !cfg.ManageDishRoute {
+		t.Fatal("manage_dish_route must default on")
+	}
 	if !reflect.DeepEqual(cfg.ProbeHosts, []string{"1.1.1.1", "8.8.8.8"}) {
 		t.Fatalf("probe hosts: %#v", cfg.ProbeHosts)
 	}
@@ -68,6 +71,16 @@ func TestLoadDefaults(t *testing.T) {
 		cfg.Alerts.Rules["path_degraded"].Threshold != .2 || cfg.Alerts.Rules["path_degraded"].Threshold2 != 300 ||
 		cfg.Alerts.Rules["path_degraded"].ClearHold != 5*time.Minute || cfg.Alerts.Rules["obstruction_high"].Threshold != .02 {
 		t.Fatalf("alert defaults: %#v", cfg.Alerts.Rules)
+	}
+}
+
+func TestLoadManageDishRouteGate(t *testing.T) {
+	cfg, err := Load(configFile(t, "config starwatch 'main'\n\toption manage_dish_route '0'\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ManageDishRoute {
+		t.Fatal("manage_dish_route=0 must disable route management")
 	}
 }
 

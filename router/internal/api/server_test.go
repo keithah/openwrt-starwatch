@@ -127,6 +127,14 @@ func TestStaticServingIsUnauthenticatedAndIframeSafe(t *testing.T) {
 	if index.Code != http.StatusOK || !bytes.Contains(index.Body.Bytes(), []byte(`data-starwatch-app`)) {
 		t.Fatalf("index code=%d body=%s", index.Code, index.Body.String())
 	}
+	app := request(handler, http.MethodGet, "/app.js", "")
+	if app.Code != http.StatusOK || !bytes.Contains(app.Body.Bytes(), []byte("Customize dashboard")) || !bytes.Contains(app.Body.Bytes(), []byte("starwatch.dashboard.cards.v1")) {
+		t.Fatalf("app code=%d missing dashboard drawer assets", app.Code)
+	}
+	logic := request(handler, http.MethodGet, "/logic.js", "")
+	if logic.Code != http.StatusOK || !bytes.Contains(logic.Body.Bytes(), []byte("normalizeCardPreferences")) {
+		t.Fatalf("logic code=%d missing card preference logic", logic.Code)
+	}
 	if got := index.Header().Get("X-Frame-Options"); got != "" {
 		t.Fatalf("X-Frame-Options=%q", got)
 	}

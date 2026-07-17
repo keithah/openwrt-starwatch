@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"os"
 	"strconv"
@@ -20,9 +19,13 @@ import (
 )
 
 type RouterAPI interface {
-	GetDeviceInfo(context.Context) (*device.DeviceInfo, error)
 	WifiGetClients(context.Context) (*device.WifiGetClientsResponse, error)
 	WifiGetStatus(context.Context) (*device.WifiGetStatusResponse, error)
+	WifiGetHistory(context.Context) (*device.WifiGetHistoryResponse, error)
+	WifiGetConfig(context.Context) (*device.WifiGetConfigResponse, error)
+	GetRadioStats(context.Context) (*device.GetRadioStatsResponse, error)
+	GetDiagnostics(context.Context) (*device.WifiGetDiagnosticsResponse, error)
+	GetNetworkInterfaces(context.Context) (*device.GetNetworkInterfacesResponse, error)
 	Close() error
 }
 
@@ -41,6 +44,7 @@ type RouterPoller struct {
 	options  RouterPollerOptions
 	mu       sync.RWMutex
 	snapshot *StarlinkRouter
+	failures map[string]int
 }
 
 func NewRouterPoller(options RouterPollerOptions) *RouterPoller {
@@ -59,7 +63,7 @@ func NewRouterPoller(options RouterPollerOptions) *RouterPoller {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &RouterPoller{options: options}
+	return &RouterPoller{options: options, failures: make(map[string]int)}
 }
 
 func (p *RouterPoller) Run(ctx context.Context) {
@@ -96,46 +100,125 @@ func (p *RouterPoller) Poll(parent context.Context) {
 		return
 	}
 	defer client.Close()
-	info, err := client.GetDeviceInfo(ctx)
-	if err != nil {
-		p.failed()
-		return
-	}
-	clients, err := client.WifiGetClients(ctx)
-	if err != nil {
-		p.failed()
-		return
-	}
-	status, err := client.WifiGetStatus(ctx)
-	if err != nil {
-		p.failed()
-		return
-	}
-	latency, dropRate := status.GetPingLatencyMs(), status.GetPingDropRate()
-	now := p.options.Now()
+	clients, clientsErr := client.WifiGetClients(ctx)
+	status, statusErr := client.WifiGetStatus(ctx)
+	history, historyErr := client.WifiGetHistory(ctx)
+	config, configErr := client.WifiGetConfig(ctx)
+	radios, radiosErr := client.GetRadioStats(ctx)
+	diagnostics, diagnosticsErr := client.GetDiagnostics(ctx)
+	interfaces, interfacesErr := client.GetNetworkInterfaces(ctx)
+	now := p.options.Now().UTC()
+	mapped := mapRouterResponses(routerResponses{status: status, history: history, clients: clients, config: config, radios: radios, diagnostics: diagnostics, interfaces: interfaces}, now)
 	p.mu.Lock()
-	var lastSuccess *time.Time
-	if p.snapshot != nil && p.snapshot.LastPingSuccess != nil {
-		value := *p.snapshot.LastPingSuccess
-		lastSuccess = &value
+	defer p.mu.Unlock()
+	if p.snapshot == nil {
+		p.snapshot = &StarlinkRouter{}
 	}
-	if !math.IsNaN(float64(dropRate)) && !math.IsInf(float64(dropRate), 0) && dropRate < 1 {
-		lastSuccess = &now
+	current := cloneRouter(p.snapshot)
+	if p.record("status", statusErr) {
+		current.Reachable = false
+	} else if statusErr == nil {
+		current.Reachable = true
+		current.UpdatedAt = now
+		current.Device.UptimeSeconds = mapped.Device.UptimeSeconds
+		current.Device.WANIPv4 = mapped.Device.WANIPv4
+		current.Device.NoWANLink = mapped.Device.NoWANLink
+		current.UptimeSeconds = mapped.UptimeSeconds
+		current.PingLatencyMS = mapped.PingLatencyMS
+		current.PingDropRate = mapped.PingDropRate
 	}
-	p.snapshot = &StarlinkRouter{
-		Reachable: true, HardwareVersion: info.GetHardwareVersion(), SoftwareVersion: info.GetSoftwareVersion(),
-		ClientCount: len(clients.GetClients()), UptimeSeconds: status.GetDeviceState().GetUptimeS(),
-		PingLatencyMS: &latency, PingDropRate: &dropRate, LastPingSuccess: lastSuccess,
+	if statusErr == nil {
+		current.Device.ID = mapped.Device.ID
+		current.Device.HardwareVersion = mapped.Device.HardwareVersion
+		current.Device.SoftwareVersion = mapped.Device.SoftwareVersion
+		current.HardwareVersion = mapped.HardwareVersion
+		current.SoftwareVersion = mapped.SoftwareVersion
 	}
-	p.mu.Unlock()
+	if clientsErr == nil {
+		p.record("clients", nil)
+		current.Clients = mapped.Clients
+		current.ClientCount = mapped.ClientCount
+	} else {
+		p.record("clients", clientsErr)
+	}
+	if historyErr == nil && statusErr == nil {
+		p.record("history", nil)
+		current.Ping = mapped.Ping
+	} else if historyErr != nil {
+		p.record("history", historyErr)
+	}
+	if configErr == nil {
+		p.record("wifi_config", nil)
+		current.ConfigRevision = mapped.ConfigRevision
+		current.Networks = mapped.Networks
+		current.Availability.WifiConfig = available()
+	} else if p.record("wifi_config", configErr) {
+		current.Availability.WifiConfig = Availability{Reason: "wifi config unavailable after three consecutive failures"}
+	}
+	if diagnosticsErr == nil {
+		p.record("diagnostics", nil)
+		if configErr == nil {
+			current.Networks = mapped.Networks
+		}
+		current.Availability.Diagnostics = available()
+	} else if p.record("diagnostics", diagnosticsErr) {
+		current.Availability.Diagnostics = Availability{Reason: "router diagnostics unavailable after three consecutive failures"}
+	}
+	if radiosErr == nil {
+		p.record("radio_stats", nil)
+		if configErr == nil {
+			current.Radios = mapped.Radios
+		}
+		current.Availability.RadioStats = available()
+	} else if p.record("radio_stats", radiosErr) {
+		current.Availability.RadioStats = Availability{Reason: "radio stats unavailable after three consecutive failures"}
+	}
+	if interfacesErr == nil {
+		p.record("interfaces", nil)
+		current.Interfaces = mapped.Interfaces
+	} else {
+		p.record("interfaces", interfacesErr)
+	}
+	if current.PingDropRate != nil && finite32(*current.PingDropRate) && *current.PingDropRate < 1 {
+		value := now
+		current.LastPingSuccess = &value
+	}
+	p.snapshot = current
+}
+
+func (p *RouterPoller) record(field string, err error) bool {
+	if err == nil {
+		p.failures[field] = 0
+		return false
+	}
+	p.failures[field]++
+	return p.failures[field] >= 3
 }
 
 func (p *RouterPoller) failed() {
 	p.mu.Lock()
+	statusFailed := p.record("status", fmt.Errorf("router unavailable"))
+	wifiConfigFailed := p.record("wifi_config", fmt.Errorf("router unavailable"))
+	diagnosticsFailed := p.record("diagnostics", fmt.Errorf("router unavailable"))
+	radioStatsFailed := p.record("radio_stats", fmt.Errorf("router unavailable"))
+	p.record("clients", fmt.Errorf("router unavailable"))
+	p.record("history", fmt.Errorf("router unavailable"))
+	p.record("interfaces", fmt.Errorf("router unavailable"))
 	if p.snapshot != nil {
-		value := *p.snapshot
-		value.Reachable = false
-		p.snapshot = &value
+		value := cloneRouter(p.snapshot)
+		if statusFailed {
+			value.Reachable = false
+		}
+		if wifiConfigFailed {
+			value.Availability.WifiConfig = Availability{Reason: "wifi config unavailable after three consecutive failures"}
+		}
+		if diagnosticsFailed {
+			value.Availability.Diagnostics = Availability{Reason: "router diagnostics unavailable after three consecutive failures"}
+		}
+		if radioStatsFailed {
+			value.Availability.RadioStats = Availability{Reason: "radio stats unavailable after three consecutive failures"}
+		}
+		p.snapshot = value
 	}
 	p.mu.Unlock()
 }
@@ -146,11 +229,10 @@ func (p *RouterPoller) Snapshot() *StarlinkRouter {
 	if p.snapshot == nil {
 		return nil
 	}
-	value := *p.snapshot
-	return &value
+	return cloneRouter(p.snapshot)
 }
 
-type RouterClient struct {
+type routerGRPCClient struct {
 	connection *grpc.ClientConn
 	device     device.DeviceClient
 }
@@ -163,23 +245,12 @@ func DialRouter(ctx context.Context, address string) (RouterAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RouterClient{connection: connection, device: device.NewDeviceClient(connection)}, nil
+	return &routerGRPCClient{connection: connection, device: device.NewDeviceClient(connection)}, nil
 }
 
-func (c *RouterClient) Close() error { return c.connection.Close() }
+func (c *routerGRPCClient) Close() error { return c.connection.Close() }
 
-func (c *RouterClient) GetDeviceInfo(ctx context.Context) (*device.DeviceInfo, error) {
-	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_GetDeviceInfo{GetDeviceInfo: &device.GetDeviceInfoRequest{}}})
-	if err != nil {
-		return nil, err
-	}
-	if info := response.GetGetDeviceInfo().GetDeviceInfo(); info != nil {
-		return info, nil
-	}
-	return nil, fmt.Errorf("get_device_info: router response missing")
-}
-
-func (c *RouterClient) WifiGetClients(ctx context.Context) (*device.WifiGetClientsResponse, error) {
+func (c *routerGRPCClient) WifiGetClients(ctx context.Context) (*device.WifiGetClientsResponse, error) {
 	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_WifiGetClients{WifiGetClients: &device.WifiGetClientsRequest{}}})
 	if err != nil {
 		return nil, err
@@ -190,7 +261,7 @@ func (c *RouterClient) WifiGetClients(ctx context.Context) (*device.WifiGetClien
 	return nil, fmt.Errorf("wifi_get_clients: router response missing")
 }
 
-func (c *RouterClient) WifiGetStatus(ctx context.Context) (*device.WifiGetStatusResponse, error) {
+func (c *routerGRPCClient) WifiGetStatus(ctx context.Context) (*device.WifiGetStatusResponse, error) {
 	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_GetStatus{GetStatus: &device.GetStatusRequest{}}})
 	if err != nil {
 		return nil, err
@@ -199,6 +270,61 @@ func (c *RouterClient) WifiGetStatus(ctx context.Context) (*device.WifiGetStatus
 		return status, nil
 	}
 	return nil, fmt.Errorf("wifi_get_status: router response missing")
+}
+
+func (c *routerGRPCClient) WifiGetHistory(ctx context.Context) (*device.WifiGetHistoryResponse, error) {
+	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_GetHistory{GetHistory: &device.GetHistoryRequest{}}})
+	if err != nil {
+		return nil, err
+	}
+	if history := response.GetWifiGetHistory(); history != nil {
+		return history, nil
+	}
+	return nil, fmt.Errorf("wifi_get_history: router response missing")
+}
+
+func (c *routerGRPCClient) WifiGetConfig(ctx context.Context) (*device.WifiGetConfigResponse, error) {
+	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_WifiGetConfig{WifiGetConfig: &device.WifiGetConfigRequest{}}})
+	if err != nil {
+		return nil, err
+	}
+	if config := response.GetWifiGetConfig(); config != nil {
+		return config, nil
+	}
+	return nil, fmt.Errorf("wifi_get_config: router response missing")
+}
+
+func (c *routerGRPCClient) GetRadioStats(ctx context.Context) (*device.GetRadioStatsResponse, error) {
+	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_GetRadioStats{GetRadioStats: &device.GetRadioStatsRequest{}}})
+	if err != nil {
+		return nil, err
+	}
+	if stats := response.GetGetRadioStats(); stats != nil {
+		return stats, nil
+	}
+	return nil, fmt.Errorf("get_radio_stats: router response missing")
+}
+
+func (c *routerGRPCClient) GetDiagnostics(ctx context.Context) (*device.WifiGetDiagnosticsResponse, error) {
+	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_GetDiagnostics{GetDiagnostics: &device.GetDiagnosticsRequest{}}})
+	if err != nil {
+		return nil, err
+	}
+	if diagnostics := response.GetWifiGetDiagnostics(); diagnostics != nil {
+		return diagnostics, nil
+	}
+	return nil, fmt.Errorf("get_diagnostics: router response missing")
+}
+
+func (c *routerGRPCClient) GetNetworkInterfaces(ctx context.Context) (*device.GetNetworkInterfacesResponse, error) {
+	response, err := c.device.Handle(ctx, &device.Request{Request: &device.Request_GetNetworkInterfaces{GetNetworkInterfaces: &device.GetNetworkInterfacesRequest{}}})
+	if err != nil {
+		return nil, err
+	}
+	if interfaces := response.GetGetNetworkInterfaces(); interfaces != nil {
+		return interfaces, nil
+	}
+	return nil, fmt.Errorf("get_network_interfaces: router response missing")
 }
 
 func systemGateway(context.Context) (string, error) {

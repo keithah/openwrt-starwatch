@@ -22,6 +22,7 @@ type Config struct {
 	ProbeHosts      []string
 	ProbeInterval   time.Duration
 	LocationEnabled bool
+	ManageDishRoute bool
 	History         HistoryConfig
 	Alerts          AlertsConfig
 	Battery         BatteryConfig
@@ -62,7 +63,8 @@ func defaults() *Config {
 	return &Config{
 		Listen: "0.0.0.0", Port: 9633, DishAddr: "192.168.100.1:9200",
 		PollStatus: time.Second, PollMap: 15 * time.Minute,
-		ProbeHosts: []string{"1.1.1.1", "8.8.8.8"}, ProbeInterval: 2 * time.Second,
+		ManageDishRoute: true,
+		ProbeHosts:      []string{"1.1.1.1", "8.8.8.8"}, ProbeInterval: 2 * time.Second,
 		History: HistoryConfig{RAMHours: 3, MinuteDays: 7, QuarterDays: 30,
 			DBPath: "/etc/starwatch/history.db", FlushInterval: 5 * time.Minute},
 		Alerts:  defaultAlerts(),
@@ -119,6 +121,9 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 		if err := parseBool(section, "location_enabled", &cfg.LocationEnabled); err != nil {
+			return nil, err
+		}
+		if err := parseBool(section, "manage_dish_route", &cfg.ManageDishRoute); err != nil {
 			return nil, err
 		}
 	}

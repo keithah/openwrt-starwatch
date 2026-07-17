@@ -131,6 +131,7 @@ func NewServer(deps Deps) *server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/diagnostics", s.auth(s.diagnostics))
+	mux.HandleFunc("GET /api/router", s.auth(s.router))
 	mux.HandleFunc("GET /api/history", s.auth(s.history))
 	mux.HandleFunc("GET /api/wan", s.auth(s.wan))
 	mux.HandleFunc("GET /api/outages", s.auth(s.outages))

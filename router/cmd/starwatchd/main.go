@@ -18,6 +18,7 @@ import (
 	"starwatch/internal/api"
 	"starwatch/internal/config"
 	"starwatch/internal/dish"
+	"starwatch/internal/dishroute"
 	"starwatch/internal/event"
 	"starwatch/internal/history"
 	"starwatch/internal/mwan"
@@ -26,13 +27,14 @@ import (
 )
 
 type runtimeDeps struct {
-	listen         func(network, address string) (net.Listener, error)
-	now            func() time.Time
-	configPath     string
-	mwanRunner     mwan.Runner
-	glManaged      func(context.Context) bool
-	resolveGateway func(context.Context) (string, error)
-	wanDiscoverer  wan.Discoverer
+	listen          func(network, address string) (net.Listener, error)
+	now             func() time.Time
+	configPath      string
+	mwanRunner      mwan.Runner
+	glManaged       func(context.Context) bool
+	resolveGateway  func(context.Context) (string, error)
+	wanDiscoverer   wan.Discoverer
+	dishRouteRunner dishroute.Runner
 }
 
 func main() {
@@ -71,19 +73,6 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 
 	store := history.NewStore(cfg.History.RAMHours * 60 * 60)
 	liveEvents := event.NewBus()
-	poller := dish.NewPoller(client, store, dish.PollerOptions{StatusInterval: cfg.PollStatus, MapInterval: cfg.PollMap, LocationEnabled: cfg.LocationEnabled, Now: deps.now})
-	pollerDone := make(chan struct{})
-	go func() {
-		poller.Run(runCtx)
-		close(pollerDone)
-	}()
-	resolveGateway := deps.resolveGateway
-	if resolveGateway == nil && deps.configPath == "" {
-		resolveGateway = func(context.Context) (string, error) { return "", fmt.Errorf("router discovery disabled") }
-	}
-	routerPoller := dish.NewRouterPoller(dish.RouterPollerOptions{Topology: poller, ResolveGateway: resolveGateway, Now: deps.now})
-	routerDone := make(chan struct{})
-	go func() { routerPoller.Run(runCtx); close(routerDone) }()
 	reader := history.SpanReader(store)
 	persistent, recovered, sqliteErr := history.OpenSQLite(cfg.History.DBPath, sqliteOptions(cfg, deps.now))
 	var flushDone chan struct{}
@@ -111,6 +100,29 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 			}
 		}()
 	}
+	routeOptions := dishroute.Options{
+		Enabled: cfg.ManageDishRoute, Runner: deps.dishRouteRunner, Now: deps.now, Live: liveEvents, Logf: log.Printf,
+	}
+	if persistent != nil {
+		routeOptions.Events = persistent
+	}
+	routeManager := dishroute.NewManager(routeOptions)
+	poller := dish.NewPoller(client, store, dish.PollerOptions{
+		StatusInterval: cfg.PollStatus, MapInterval: cfg.PollMap, LocationEnabled: cfg.LocationEnabled, Now: deps.now,
+		RouteEnsurer: routeManager, RouteError: func(err error) { log.Printf("starwatchd: ensure dish route: %v", err) },
+	})
+	pollerDone := make(chan struct{})
+	go func() {
+		poller.Run(runCtx)
+		close(pollerDone)
+	}()
+	resolveGateway := deps.resolveGateway
+	if resolveGateway == nil && deps.configPath == "" {
+		resolveGateway = func(context.Context) (string, error) { return "", fmt.Errorf("router discovery disabled") }
+	}
+	routerPoller := dish.NewRouterPoller(dish.RouterPollerOptions{Topology: poller, ResolveGateway: resolveGateway, Now: deps.now})
+	routerDone := make(chan struct{})
+	go func() { routerPoller.Run(runCtx); close(routerDone) }()
 	timeline := outage.NewTimeline(outage.Options{Now: deps.now, Persistence: persistent, Events: liveEvents})
 	mwanOptions := mwan.Options{Runner: deps.mwanRunner, GLManaged: deps.glManaged}
 	if mwanOptions.Runner == nil && deps.configPath == "" {

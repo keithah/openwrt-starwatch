@@ -9,9 +9,12 @@ ARCH := aarch64_cortex-a53
 OUT := out
 BIN := $(OUT)/starwatchd-bin
 
-.PHONY: all clean bin ipk-starwatchd ipk-luci ipk-glapp feed
+.PHONY: all clean test bin ipk-starwatchd ipk-luci ipk-glapp feed
 
 all: ipk-starwatchd ipk-luci ipk-glapp
+
+test:
+	sh tests/uci-defaults-route-test.sh
 
 # feed: build all ipks + an opkg index (Packages/Packages.gz) so a router can
 # `opkg update && opkg upgrade` from a hosted feed instead of manual reinstall.

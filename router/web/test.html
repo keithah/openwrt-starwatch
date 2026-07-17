@@ -8,6 +8,7 @@
 import {
   deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
   friendlyModel, hasMotors, assembleSeries, outageBarLayout,
+  normalizeCardPreferences, visibleCardOrder,
 } from './logic.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 
@@ -56,6 +57,17 @@ try {
   chartHost.remove();
   const shortOutage = outageBarLayout({start: '2026-01-30T23:59:15Z', duration: 45e9}, Date.parse('2026-01-31T00:00:00Z'), 30 * 86400);
   assert('short outage bars retain minimum visibility', shortOutage.widthPercent >= .4);
+  const cards = [
+    {id: 'live', available: true}, {id: 'power', available: true},
+    {id: 'router', available: true}, {id: 'alignment', available: false},
+  ];
+  const savedCards = {order: ['power', 'old-card', 'live'], hidden: {power: true, old-card: true}};
+  const preferences = normalizeCardPreferences(cards, savedCards);
+  assert('saved card order is retained and new cards append', preferences.order.join(',') === 'power,live,router,alignment');
+  assert('unknown card ids are pruned', !preferences.order.includes('old-card') && !('old-card' in preferences.hidden));
+  assert('hidden card preferences are retained', preferences.hidden.power === true);
+  assert('data absence wins over card visibility preferences', visibleCardOrder(cards, preferences).join(',') === 'live,router');
+  assert('reset restores default ordered visible cards', visibleCardOrder(cards, normalizeCardPreferences(cards, null)).join(',') === 'live,power,router');
   document.querySelector('#results').textContent = `${results.join('\n')}\n\n${results.length} assertions passed.`;
   document.body.dataset.result = 'pass';
 } catch (error) {

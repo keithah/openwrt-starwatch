@@ -7,44 +7,42 @@ if [ -z "$tok" ]; then
 	uci commit starwatch
 fi
 
-# Topology B must route through the Starlink router gateway. Without the
-# gateway, a link-scope route can escape through the wrong interface on a
-# multi-WAN router. Topology A (bypass/direct DHCP) has no gateway and keeps
-# the link-scope form.
-wan_gateway=""
-if [ -r /lib/functions/network.sh ]; then
-	. /lib/functions/network.sh
-	if command -v network_get_gateway >/dev/null 2>&1; then
-		network_get_gateway wan_gateway wan 2>/dev/null || true
-	fi
-fi
-if [ -z "$wan_gateway" ] && command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
-	wan_gateway="$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.route[@.target="0.0.0.0"].nexthop' | head -n 1)"
-fi
-
-# Reconcile the route created by an older Starwatch package so an opkg upgrade
-# gains (or removes) the gateway without creating a second section.
-if [ "$(uci -q get network.starwatch_dish)" = "route" ]; then
-	current_gateway="$(uci -q get network.starwatch_dish.gateway)"
-	route_changed=0
-	if [ -n "$wan_gateway" ] && [ "$current_gateway" != "$wan_gateway" ]; then
-		uci set network.starwatch_dish.gateway="$wan_gateway"
-		route_changed=1
-	elif [ -z "$wan_gateway" ] && [ -n "$current_gateway" ]; then
-		uci -q delete network.starwatch_dish.gateway
-		route_changed=1
-	fi
-	if [ "$route_changed" -eq 1 ]; then
-		uci commit network
-		/etc/init.d/network reload >/dev/null 2>&1 || true
-	fi
-	exit 0
-fi
-
 # Add the dish host route only when neither another UCI section nor the live
-# kernel table already contains one.
+# kernel table already contains one. The daemon reconciles this exact /32 at
+# runtime; the first-boot entry only makes the dish reachable before startup.
 uci_route=0
-if uci -q show network | grep -Eq "\.target='192\.168\.100\.1(/32)?'$"; then
+if uci -q show network | awk '
+	function ipv4(value, octets) {
+		if (split(value, octets, ".") != 4) return -1
+		return (((octets[1] * 256) + octets[2]) * 256 + octets[3]) * 256 + octets[4]
+	}
+	function prefix_from_mask(value, mask, bit, prefix) {
+		mask = ipv4(value); if (mask < 0) return -1
+		prefix = 0
+		for (bit = 31; bit >= 0; bit--) {
+			if (int(mask / (2 ^ bit)) % 2) prefix++
+			else break
+		}
+		return prefix
+	}
+	{
+		key = $1; sub(/=.*/, "", key); split(key, parts, ".")
+		value = $0; sub(/^[^=]*='"'"'/, "", value); sub(/'"'"'$/, "", value)
+		if (parts[1] == "network" && parts[3] == "target") target[parts[2]] = value
+		if (parts[1] == "network" && parts[3] == "netmask") netmask[parts[2]] = value
+	}
+	END {
+		needle = ipv4("192.168.100.1")
+		for (section in target) {
+			split(target[section], route, "/"); prefix = route[2]
+			if (prefix == "") prefix = netmask[section] == "" ? 32 : prefix_from_mask(netmask[section])
+			if (prefix < 0 || prefix > 32 || ipv4(route[1]) < 0) continue
+			block = 2 ^ (32 - prefix)
+			if (int(ipv4(route[1]) / block) == int(needle / block)) found=1
+		}
+		exit !found
+	}
+'; then
 	uci_route=1
 fi
 kernel_route=0
@@ -65,16 +63,82 @@ if ip -4 route show table all 2>/dev/null | awk '
 '; then
 	kernel_route=1
 fi
-if [ "$uci_route" -eq 0 ] && [ "$kernel_route" -eq 0 ]; then
-	uci -q batch <<'EOF'
+if [ "$uci_route" -eq 1 ] || [ "$kernel_route" -eq 1 ]; then
+	exit 0
+fi
+
+# Never derive the dish gateway from the system default route: Speedify and
+# other VPN/multi-WAN managers may make a tunnel (for example connectify0 with
+# gateway 192.0.0.1) the default. Instead, accept only a gateway inside the
+# physical WAN device's connected IPv4 subnet.
+if ! command -v ubus >/dev/null 2>&1 || ! command -v jsonfilter >/dev/null 2>&1; then
+	exit 0
+fi
+wan_status="$(ubus call network.interface.wan status 2>/dev/null)"
+wan_device="$(printf '%s' "$wan_status" | jsonfilter -e '@.device' | head -n 1)"
+if [ -z "$wan_device" ]; then
+	wan_device="$(printf '%s' "$wan_status" | jsonfilter -e '@.l3_device' | head -n 1)"
+fi
+wan_address="$(printf '%s' "$wan_status" | jsonfilter -e '@["ipv4-address"][0].address' | head -n 1)"
+wan_mask="$(printf '%s' "$wan_status" | jsonfilter -e '@["ipv4-address"][0].mask' | head -n 1)"
+if [ -z "$wan_device" ] || [ -z "$wan_address" ] || [ -z "$wan_mask" ]; then
+	exit 0
+fi
+
+on_link() {
+	awk -v address="$wan_address" -v mask="$wan_mask" -v candidate="$1" '
+		function ipv4(value, octets) {
+			if (split(value, octets, ".") != 4) return -1
+			return (((octets[1] * 256) + octets[2]) * 256 + octets[3]) * 256 + octets[4]
+		}
+		BEGIN {
+			a = ipv4(address); c = ipv4(candidate)
+			if (a < 0 || c < 0 || mask < 0 || mask > 32) exit 1
+			block = 2 ^ (32 - mask)
+			exit int(a / block) != int(c / block)
+		}'
+}
+
+wan_gateway=""
+reported_gateway=0
+gateway_candidates="$(printf '%s' "$wan_status" | jsonfilter -e '@.route[@.target="0.0.0.0"].nexthop')"
+for candidate in $gateway_candidates; do
+	[ -n "$candidate" ] || continue
+	reported_gateway=1
+	if on_link "$candidate"; then
+		wan_gateway="$candidate"
+		break
+	fi
+done
+
+# If the reported gateway was a VPN/tunnel address, the well-known Starlink
+# router is a valid fallback only when the kernel proves it is directly
+# reachable on the physical WAN device (same dev, no intermediate "via").
+if [ -z "$wan_gateway" ]; then
+	starlink_path="$(ip -4 route get 192.168.1.1 2>/dev/null || true)"
+	if printf '%s\n' "$starlink_path" | awk -v dev="$wan_device" '
+		{ for (i = 1; i <= NF; i++) { if ($i == "via") exit 1; if ($i == "dev" && $(i+1) == dev) found=1 } }
+		END { exit !found }
+	'; then
+		wan_gateway="192.168.1.1"
+	fi
+fi
+
+# An interface-only route is honest only for gateway-less bypass/direct-DHCP.
+# If ubus reported an off-link gateway and no direct Starlink-router fallback,
+# leave route creation to the daemon rather than installing a misleading path.
+if [ -z "$wan_gateway" ] && [ "$reported_gateway" -eq 1 ]; then
+	exit 0
+fi
+
+uci -q batch <<'EOF'
 set network.starwatch_dish='route'
 set network.starwatch_dish.interface='wan'
 set network.starwatch_dish.target='192.168.100.1/32'
 EOF
-	if [ -n "$wan_gateway" ]; then
-		uci set network.starwatch_dish.gateway="$wan_gateway"
-	fi
-	uci commit network
-	/etc/init.d/network reload >/dev/null 2>&1 || true
+if [ -n "$wan_gateway" ]; then
+	uci set network.starwatch_dish.gateway="$wan_gateway"
 fi
+uci commit network
+/etc/init.d/network reload >/dev/null 2>&1 || true
 exit 0

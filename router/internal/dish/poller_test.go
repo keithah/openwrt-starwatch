@@ -269,6 +269,51 @@ func TestPollerWANOnlyRetriesDiscovery(t *testing.T) {
 	}
 }
 
+type countingRouteEnsurer struct{ calls atomic.Int32 }
+
+func (e *countingRouteEnsurer) Ensure(context.Context) error {
+	e.calls.Add(1)
+	return nil
+}
+
+func TestPollerEnsuresDishRouteAtStartup(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		return cannedResponse(request)
+	}}
+	poller, _ := testPoller(t, fake)
+	ensurer := &countingRouteEnsurer{}
+	poller.options.RouteEnsurer = ensurer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { poller.Run(ctx); close(done) }()
+	waitFor(t, func() bool { return poller.Snapshot().Topology == TopologyFull })
+	cancel()
+	<-done
+	if got := ensurer.calls.Load(); got != 1 {
+		t.Fatalf("route ensure calls=%d want=1", got)
+	}
+}
+
+func TestPollerReassertsDishRouteBeforeWANOnlyRetry(t *testing.T) {
+	var infoCalls atomic.Int32
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		if _, ok := request.GetRequest().(*device.Request_GetDeviceInfo); ok && infoCalls.Add(1) <= 1 {
+			return nil, status.Error(codes.Unavailable, "no route")
+		}
+		return cannedResponse(request)
+	}}
+	poller, _ := testPoller(t, fake)
+	ensurer := &countingRouteEnsurer{}
+	poller.options.RouteEnsurer = ensurer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go poller.Run(ctx)
+	waitFor(t, func() bool { return poller.Snapshot().Topology == TopologyFull })
+	if got := ensurer.calls.Load(); got < 2 {
+		t.Fatalf("route ensure calls=%d, want startup and retry", got)
+	}
+}
+
 func TestRecoveryBackfillKeepsHistoryStrictlyIncreasing(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	statusFails := false

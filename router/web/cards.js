@@ -34,7 +34,7 @@ class Plot extends Component {
   render() { return html`<div class="plot" ref=${node => { this.base = node; }}>${!this.props.aligned?.timestamps?.length && html`<div class="empty">History is collecting…</div>`}</div>`; }
 }
 
-export function StatusHeader({snapshot = {}, connection}) {
+export function StatusHeader({snapshot = {}, connection, onCustomize}) {
   const state = deriveState(snapshot);
   const dish = snapshot.dish || {};
   const wan = snapshot.wan || {};
@@ -48,7 +48,7 @@ export function StatusHeader({snapshot = {}, connection}) {
       <${Metric} label="Up" value=${formatRate(dish.uplink_throughput_bps ?? wan.router_up_bps)} availability=${statusAvailability}/>
       <${Metric} label="Latency" value=${number(dish.latency_ms)} unit="ms" availability=${statusAvailability}/>
     </div>
-    <div class="badges"><span class="badge">${snapshot.topology || 'unknown'}</span><span class=${`badge connection-${connection}`}>${connection}</span></div>
+    <div class="badges"><span class="badge">${snapshot.topology || 'unknown'}</span><span class=${`badge connection-${connection}`}>${connection}</span><button class="header-customize" type="button" onClick=${onCustomize} aria-label="Customize dashboard cards" title="Customize dashboard cards">⚙<span aria-hidden="true">Customize</span></button></div>
   </header>`;
 }
 
@@ -155,7 +155,13 @@ export function AlertsCard({snapshot, events=[]}) {
 }
 
 export function HardwareCard({snapshot}) {
-  const info=snapshot.device_info; if (!info) return null; const router=snapshot.starlink_router;
+  const info=snapshot.device_info; if (!info) return null;
   const av=snapshot.field_availability?.device_info; const show=value=>availabilityValue(value,av).available?value:'—';
-  return html`<${Card} title="Hardware" eyebrow="Terminal identity"><dl class="details"><dt>Model</dt><dd title=${av?.reason||''}>${show(friendlyModel(info.hardware_version))}</dd><dt>Hardware</dt><dd>${show(info.hardware_version)}</dd><dt>Firmware</dt><dd>${show(info.software_version)}</dd><dt>Dish ID</dt><dd>${show(info.id)}</dd><dt>Country</dt><dd>${show(info.country_code)}</dd><dt>Mobility</dt><dd>${show(snapshot.dish?.mobility_class)}</dd></dl>${router&&html`<div class="router-card"><h3>Starlink router</h3><div class="metric-grid"><${Metric} label="Reachable" value=${router.reachable?'yes':'no'}/><${Metric} label="Clients" value=${router.client_count}/><${Metric} label="Uptime" value=${formatDuration(router.uptime_seconds)}/></div><p>${router.hardware_version} · ${router.software_version}</p></div>`}</${Card}>`;
+  return html`<${Card} title="Hardware" eyebrow="Terminal identity"><dl class="details"><dt>Model</dt><dd title=${av?.reason||''}>${show(friendlyModel(info.hardware_version))}</dd><dt>Hardware</dt><dd>${show(info.hardware_version)}</dd><dt>Firmware</dt><dd>${show(info.software_version)}</dd><dt>Dish ID</dt><dd>${show(info.id)}</dd><dt>Country</dt><dd>${show(info.country_code)}</dd><dt>Mobility</dt><dd>${show(snapshot.dish?.mobility_class)}</dd></dl></${Card}>`;
+}
+
+export function StarlinkRouterCard({router}) {
+  if (!router) return null;
+  const device = router.device || router;
+  return html`<${Card} title="Starlink router" eyebrow="Topology B · local read model"><div class="metric-grid"><${Metric} label="Hardware" value=${device.hardware_version}/><${Metric} label="Firmware" value=${device.software_version}/><${Metric} label="Clients" value=${router.clients?.length ?? router.client_count}/><${Metric} label="Uptime" value=${formatDuration(device.uptime_seconds ?? router.uptime_seconds)}/></div>${router.ping&&html`<div class="router-card"><div class="metric-grid"><${Metric} label="Latency" value=${number(router.ping.latency_mean_ms)} unit="ms"/><${Metric} label="Loss" value=${percent(router.ping.drop_rate)}/></div></div>`}</${Card}>`;
 }

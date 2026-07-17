@@ -381,11 +381,11 @@ The payload is a typed, local JSON model; protobuf messages are never embedded.
     "drop_rate": 0,
     "drop_rate_5m": 0,
     "drop_rate_1h": 0.001,
-    "seconds_since_last_success": 0
+    "seconds_since_last_success": 0,
+    "derived": true
   },
   "networks": [
     {
-      "id": "opaque-server-id",
       "domain": "lan",
       "ipv4": "192.168.1.1/24",
       "ipv6": [],
@@ -394,7 +394,6 @@ The payload is a typed, local JSON model; protobuf messages are never embedded.
       "clients_5ghz": 1,
       "basic_service_sets": [
         {
-          "id": "opaque-bss-id",
           "ssid": "Starlink",
           "bssid": "00:11:22:33:44:55",
           "band": "RF_5GHZ",
@@ -434,7 +433,7 @@ The payload is a typed, local JSON model; protobuf messages are never embedded.
       "channel": 149,
       "channel_width_mhz": 80,
       "disabled": false,
-      "tx_power_percent": 100,
+      "tx_power_level": "TX_POWER_LEVEL_100",
       "rx_bytes": 1234,
       "tx_bytes": 5678,
       "temperature_c": 51.2,
@@ -452,6 +451,13 @@ The payload is a typed, local JSON model; protobuf messages are never embedded.
 
 Full client MAC addresses are intentionally returned to authenticated local
 administrators. The UI does not transmit them elsewhere.
+
+`domain` is the network identifier. The BSS identifiers are `bssid`, `ssid`,
+and `band`; `bssid` may be an empty string in config-only readback and is never
+synthesized, so it is not a reliable write key.
+Router ping fields are derived from router status and history. A ping success is
+a finite sample with `drop_rate < 1`; the one-hour fields are omitted and their
+availability is false when the router history buffer does not cover one hour.
 
 Router status, clients, ping metrics, diagnostics, configuration, and radio
 statistics are polled every 60 seconds. Each subfield follows the existing

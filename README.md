@@ -77,7 +77,11 @@ so upgrades immediately use the new binary. The defaults script generates a
 token when empty. It adds `network.starwatch_dish`, a `/32` route through the
 logical `wan` interface, only when neither UCI nor the live kernel table already
 contains a dish host route. Behind a Starlink router it includes the WAN
-gateway; bypass/direct-DHCP setups without a gateway use a link-scope route.
+gateway only when that gateway is on the physical WAN subnet, so a
+Speedify/VPN default route cannot capture dish management traffic.
+Bypass/direct-DHCP setups without a gateway use a link-scope route. The daemon
+reasserts this exact `/32` at startup and during discovery retries; set
+`manage_dish_route` to `0` if another service owns the route.
 
 GL.iNet 4.x ships the LuCI libraries without a theme. Install Bootstrap before
 the LuCI launcher with `opkg install luci-theme-bootstrap`. The GL admin-panel
@@ -123,6 +127,7 @@ config starwatch 'main'
     option port '9633'
     option token ''
     option dish_addr '192.168.100.1:9200'
+    option manage_dish_route '1'
     option poll_status '1'
     option poll_map '900'
     option wan_iface ''
