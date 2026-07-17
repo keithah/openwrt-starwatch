@@ -49,7 +49,6 @@ final class FakeRouterServer: RouterHTTPClient, RouterEventStream, @unchecked Se
     func events(path: String, token: String) -> AsyncThrowingStream<Data, Error> {
         let (configured, previous) = lock.withLock {
             storedRequests.append(Request(method: "GET", path: path, body: nil, authorization: "Bearer \(token)"))
-            storedEventStreamCount += 1
             return (responsesByPath[path] ?? defaultResponse, eventContinuation)
         }
         return AsyncThrowingStream { continuation in
@@ -63,7 +62,10 @@ final class FakeRouterServer: RouterHTTPClient, RouterEventStream, @unchecked Se
                     ))
                 return
             }
-            lock.withLock { eventContinuation = continuation }
+            lock.withLock {
+                eventContinuation = continuation
+                storedEventStreamCount += 1
+            }
         }
     }
 
