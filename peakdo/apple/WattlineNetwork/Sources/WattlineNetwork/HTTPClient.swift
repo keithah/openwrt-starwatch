@@ -24,7 +24,7 @@ public final class HTTPClient: RouterHTTPClient, @unchecked Sendable {
     }
 
     public func request(_ method: String, _ path: String, body: Data?, token: String) async throws -> (Data, HTTPURLResponse) {
-        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
+        guard path.hasPrefix("/"), let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw NetworkError.invalidURL
         }
         var request = URLRequest(url: url)

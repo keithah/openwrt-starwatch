@@ -42,13 +42,7 @@ final class FakeRouterServer: RouterHTTPClient, RouterEventStream, @unchecked Se
 
     func push(_ data: Data) { lock.withLock { eventContinuation?.yield(data) } }
     func pushFrame(_ frame: String) {
-        var parser = SSEFrameParser()
-        do {
-            for line in frame.split(separator: "\n", omittingEmptySubsequences: false) {
-                if let data = try parser.consume(String(line)) { push(data) }
-            }
-            if let data = parser.finish() { push(data) }
-        } catch { fail(error) }
+        push(Data(frame.utf8))
     }
     func close() { lock.withLock { eventContinuation?.finish(); eventContinuation = nil } }
     func fail(_ error: Error) { lock.withLock { eventContinuation?.finish(throwing: error); eventContinuation = nil } }
