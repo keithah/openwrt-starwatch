@@ -60,13 +60,53 @@ final class HTTPAndSSEClientTests: XCTestCase {
         for try await _ in client.events(path: "/events", token: "token") { count += 1 }
         XCTAssertEqual(count, 0)
     }
+
+    func testSSEClientYieldsFramesBeforeConnectionFinishes() async throws {
+        URLProtocolFixture.response = .init(
+            status: 200,
+            body: Data(),
+            chunks: [Data("data: first\n\n".utf8), Data("data: second\n\n".utf8)],
+            finishDelayNanoseconds: 300_000_000,
+            contentType: "text/event-stream"
+        )
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+        var iterator = client.events(path: "/events", token: "token").makeAsyncIterator()
+        let first = try await iterator.next()
+        XCTAssertFalse(URLProtocolFixture.didFinishLoading)
+        let second = try await iterator.next()
+        XCTAssertFalse(URLProtocolFixture.didFinishLoading)
+        XCTAssertEqual(first, Data("first".utf8))
+        XCTAssertEqual(second, Data("second".utf8))
+        let end = try await iterator.next()
+        XCTAssertNil(end)
+    }
+
+    func testSSEClientRejectsNon2xxStatus() async {
+        URLProtocolFixture.response = .init(status: 503, body: Data("down".utf8), contentType: "text/event-stream")
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+        do { for try await _ in client.events(path: "/events", token: "token") {}; XCTFail("expected error") }
+        catch { XCTAssertEqual(error as? NetworkError, .httpStatus(503, "")) }
+    }
+
+    func testSSEClientRejectsInvalidPath() async {
+        let client = SSEClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+        do { for try await _ in client.events(path: "events", token: "token") {}; XCTFail("expected error") }
+        catch { XCTAssertEqual(error as? NetworkError, .invalidURL) }
+    }
 }
 
 final class URLProtocolFixture: URLProtocol {
-    struct Response { let status: Int; let body: Data; var contentType = "application/json" }
+    struct Response {
+        let status: Int
+        let body: Data
+        var chunks: [Data] = []
+        var finishDelayNanoseconds: UInt64 = 0
+        var contentType = "application/json"
+    }
     nonisolated(unsafe) static var response = Response(status: 200, body: Data())
     nonisolated(unsafe) static var lastRequest: URLRequest?
-    static func reset() { response = Response(status: 200, body: Data()); lastRequest = nil }
+    nonisolated(unsafe) static var didFinishLoading = false
+    static func reset() { response = Response(status: 200, body: Data()); lastRequest = nil; didFinishLoading = false }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -74,8 +114,18 @@ final class URLProtocolFixture: URLProtocol {
         let response = Self.response
         let http = HTTPURLResponse(url: request.url!, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": response.contentType])!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: response.body)
-        client?.urlProtocolDidFinishLoading(self)
+        let chunks = response.chunks.isEmpty ? [response.body] : response.chunks
+        for chunk in chunks where !chunk.isEmpty { client?.urlProtocol(self, didLoad: chunk) }
+        if response.finishDelayNanoseconds == 0 {
+            Self.didFinishLoading = true
+            client?.urlProtocolDidFinishLoading(self)
+        } else {
+            DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(response.finishDelayNanoseconds))) { [weak self] in
+                guard let self else { return }
+                Self.didFinishLoading = true
+                self.client?.urlProtocolDidFinishLoading(self)
+            }
+        }
     }
     override func stopLoading() {}
 }

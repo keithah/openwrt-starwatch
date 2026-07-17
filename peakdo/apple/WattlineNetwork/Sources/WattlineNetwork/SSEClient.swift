@@ -52,14 +52,23 @@ public final class SSEClient: RouterEventStream, @unchecked Sendable {
                     request.httpMethod = "GET"
                     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                    let (body, response) = try await self.session.data(for: request)
+                    let (bytes, response) = try await self.session.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else { throw NetworkError.decode("Non-HTTP response") }
                     guard (200..<300).contains(http.statusCode) else { throw NetworkError.httpStatus(http.statusCode, "") }
                     var parser = SSEFrameParser()
-                    let wire = String(decoding: body, as: UTF8.self)
-                    for line in wire.split(separator: "\n", omittingEmptySubsequences: false) {
-                        let line = line.last == "\r" ? line.dropLast() : line[...]
-                        if let data = try parser.consume(String(line)) { continuation.yield(data) }
+                    var line = ""
+                    for try await byte in bytes {
+                        if byte == 0x0A {
+                            if line.last == "\r" { line.removeLast() }
+                            if let data = try parser.consume(line) { continuation.yield(data) }
+                            line.removeAll(keepingCapacity: true)
+                        } else {
+                            line.append(Character(UnicodeScalar(byte)))
+                        }
+                    }
+                    if !line.isEmpty {
+                        if line.last == "\r" { line.removeLast() }
+                        if let data = try parser.consume(line) { continuation.yield(data) }
                     }
                     if let data = parser.finish() { continuation.yield(data) }
                     continuation.finish()

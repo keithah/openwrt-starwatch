@@ -52,3 +52,38 @@ Exact GREEN output:
 Executed 6 tests, with 0 failures
 Test Suite 'Selected tests' passed
 ```
+
+## Streaming re-review fix RED/GREEN evidence
+
+### RED (buffered `data(for:)` implementation)
+
+Command:
+
+```text
+swift test --filter HTTPAndSSEClientTests/testSSEClientYieldsFramesBeforeConnectionFinishes
+```
+
+Exact output:
+
+```text
+XCTAssertFalse failed (2 assertions)
+Test Case 'testSSEClientYieldsFramesBeforeConnectionFinishes' failed
+Executed 1 test, with 1 failure
+```
+
+### GREEN (streaming `bytes(for:)` implementation)
+
+Command:
+
+```text
+swift test
+```
+
+Exact output:
+
+```text
+Executed 11 tests, with 0 failures
+Test Suite 'All tests' passed
+```
+
+The URLProtocol fixture now delivers two SSE chunks before delayed completion; the test asserts both events arrive while `didFinishLoading` remains false. SSE invalid-path and non-2xx tests are also covered.
