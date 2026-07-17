@@ -366,69 +366,164 @@ final class RouterTransportConnectionTests: XCTestCase {
         await transport.disconnect()
     }
 
-    func testOlderStreamPayloadIsQuarantinedAfterNewConnectGenerationStarts() async throws {
+    func testSuccessfulReplacementRetiresEstablishedScopeBeforeCommittingNewScopeInDeviceSession() async throws {
         let client = GatedStatusClient(data: statusData())
         let streams = LeakyEventStream()
-        let clock = TestRouterClock(now: .seconds(70), origin: origin)
-        let transport = RouterTransport(
-            endpoint: endpoint,
-            credentials: credentials,
-            client: client,
-            events: streams,
-            clock: clock,
-            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
-        )
+        let transport = replacementTransport(client: client, streams: streams)
         addTeardownBlock { await transport.disconnect() }
-        let recorder = DeviceEventRecorder(stream: transport.events)
+        let session = DeviceSession(transport: transport, clock: sessionClock())
+        let states = DeviceStateRecorder(stream: session.states)
         let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        await session.start()
 
-        try await transport.connect(to: endpoint.peripheralID, scope: firstScope)
-        await streams.waitForStreamCount(1)
-        let firstPushAccepted = streams.pushPayload(snapshotData(level: 11), to: 0)
-        XCTAssertTrue(firstPushAccepted)
-        _ = try await recorder.waitForCount(4)
+        try await establish(
+            transport: transport,
+            streams: streams,
+            scope: firstScope,
+            level: 11,
+            states: states
+        )
 
         await client.gateNextStatusRequest()
         let secondScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
         let endpointID = endpoint.peripheralID
-        let secondConnect = Task {
+        let replacement = Task {
             try await transport.connect(to: endpointID, scope: secondScope)
         }
         await client.waitForGatedRequest()
 
-        let stalePushAccepted = streams.pushPayload(snapshotData(level: 22), to: 0)
-        XCTAssertTrue(stalePushAccepted)
-        for _ in 0..<100 { await Task.yield() }
-        let countAfterStalePush = recorder.count
-        XCTAssertEqual(countAfterStalePush, 4)
+        XCTAssertFalse(streams.pushPayload(snapshotData(level: 22), to: 0))
+        try await states.waitUntil { $0.connection == .disconnected }
 
         await client.releaseGatedRequest()
-        try await secondConnect.value
+        try await replacement.value
         await streams.waitForStreamCount(2)
-        let currentPushAccepted = streams.pushPayload(snapshotData(level: 33), to: 1)
-        XCTAssertTrue(currentPushAccepted)
-        let values = try await recorder.waitForCount(8)
+        XCTAssertTrue(streams.pushPayload(snapshotData(level: 33), to: 1))
+        try await states.waitUntil { $0.connection == .live && $0.battery?.level == 33 }
 
-        let levels = values.compactMap { event -> UInt8? in
-            guard case let .battery(battery, _) = event else { return nil }
-            return battery.level
-        }
-        XCTAssertEqual(levels, [11, 33])
         await transport.disconnect()
+        try await waitUntil(session: session) {
+            $0.connection == .disconnected && $0.battery?.level == 33
+        }
     }
 
-    func testDisconnectDuringReplacementStatusFetchCancelsPreviousStream() async throws {
+    func testFailedReplacementLeavesDeviceSessionDisconnectedWithoutNewScopeLifecycle() async throws {
         let client = GatedStatusClient(data: statusData())
         let streams = LeakyEventStream()
-        let transport = RouterTransport(
-            endpoint: endpoint,
-            credentials: credentials,
-            client: client,
-            events: streams,
-            clock: TestRouterClock(now: .zero, origin: origin),
-            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
-        )
+        let transport = replacementTransport(client: client, streams: streams)
         addTeardownBlock { await transport.disconnect() }
+        let session = DeviceSession(transport: transport, clock: sessionClock())
+        let states = DeviceStateRecorder(stream: session.states)
+        let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        await session.start()
+
+        try await establish(
+            transport: transport,
+            streams: streams,
+            scope: firstScope,
+            level: 44,
+            states: states
+        )
+
+        await client.gateNextStatusRequest()
+        await client.failNextStatusRequest(with: .timeout)
+        let secondScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        let endpointID = endpoint.peripheralID
+        let replacement = Task {
+            try await transport.connect(to: endpointID, scope: secondScope)
+        }
+        await client.waitForGatedRequest()
+
+        try await states.waitUntil { $0.connection == .disconnected }
+        await client.releaseGatedRequest()
+
+        do {
+            try await replacement.value
+            XCTFail("expected replacement status failure")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .timeout)
+        }
+        let finalState = await session.state
+        XCTAssertEqual(finalState.connection, .disconnected)
+    }
+
+    func testCallerCancelledReplacementLeavesDeviceSessionDisconnectedWithoutNewScopeLifecycle() async throws {
+        let client = GatedStatusClient(data: statusData())
+        let streams = LeakyEventStream()
+        let transport = replacementTransport(client: client, streams: streams)
+        addTeardownBlock { await transport.disconnect() }
+        let session = DeviceSession(transport: transport, clock: sessionClock())
+        let states = DeviceStateRecorder(stream: session.states)
+        let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        await session.start()
+
+        try await establish(
+            transport: transport,
+            streams: streams,
+            scope: firstScope,
+            level: 45,
+            states: states
+        )
+
+        await client.gateNextStatusRequest()
+        let secondScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        let endpointID = endpoint.peripheralID
+        let replacement = Task {
+            try await transport.connect(to: endpointID, scope: secondScope)
+        }
+        await client.waitForGatedRequest()
+
+        try await states.waitUntil { $0.connection == .disconnected }
+        replacement.cancel()
+        await client.releaseGatedRequest()
+
+        await assertCancellation(of: replacement)
+        let finalState = await session.state
+        XCTAssertEqual(finalState.connection, .disconnected)
+    }
+
+    func testExplicitDisconnectWhileReplacementPendingRetiresOnlyEstablishedScopeInDeviceSession() async throws {
+        let client = GatedStatusClient(data: statusData())
+        let streams = LeakyEventStream()
+        let transport = replacementTransport(client: client, streams: streams)
+        addTeardownBlock { await transport.disconnect() }
+        let session = DeviceSession(transport: transport, clock: sessionClock())
+        let states = DeviceStateRecorder(stream: session.states)
+        let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        await session.start()
+
+        try await establish(
+            transport: transport,
+            streams: streams,
+            scope: firstScope,
+            level: 46,
+            states: states
+        )
+
+        await client.gateNextStatusRequest()
+        let secondScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        let endpointID = endpoint.peripheralID
+        let replacement = Task {
+            try await transport.connect(to: endpointID, scope: secondScope)
+        }
+        await client.waitForGatedRequest()
+
+        try await states.waitUntil { $0.connection == .disconnected }
+        await transport.disconnect()
+
+        await client.releaseGatedRequest()
+        await assertCancellation(of: replacement)
+        XCTAssertEqual(streams.streamCount, 1)
+        let finalState = await session.state
+        XCTAssertEqual(finalState.connection, .disconnected)
+    }
+
+    func testExplicitDisconnectWhileReplacementPendingEmitsOnlyEstablishedScopeTerminalEvent() async throws {
+        let client = GatedStatusClient(data: statusData())
+        let streams = LeakyEventStream()
+        let transport = replacementTransport(client: client, streams: streams)
+        addTeardownBlock { await transport.disconnect() }
+        let recorder = DeviceEventRecorder(stream: transport.events)
         let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
         try await transport.connect(to: endpoint.peripheralID, scope: firstScope)
         await streams.waitForStreamCount(1)
@@ -440,14 +535,50 @@ final class RouterTransportConnectionTests: XCTestCase {
             try await transport.connect(to: endpointID, scope: secondScope)
         }
         await client.waitForGatedRequest()
+        _ = try await recorder.waitForCount(3)
 
         await transport.disconnect()
-        for _ in 0..<100 { await Task.yield() }
-        XCTAssertFalse(streams.pushPayload(snapshotData(level: 55), to: 0))
-
         await client.releaseGatedRequest()
         await assertCancellation(of: replacement)
-        XCTAssertEqual(streams.streamCount, 1)
+        for _ in 0..<100 { await Task.yield() }
+
+        let disconnectedScopes = recorder.snapshot.compactMap { event -> DeviceConnectionScope? in
+            guard case let .disconnected(scope, _) = event else { return nil }
+            return scope
+        }
+        XCTAssertEqual(disconnectedScopes, [firstScope])
+    }
+
+    func testCallerCancellationAfterStatusAwaitDoesNotCommitLifecycle() async throws {
+        let server = FakeRouterServer()
+        server.setResponse(data: statusData(), for: "/api/v1/status")
+        let output = AsyncStream<DeviceEvent>.makeStream()
+        let recorder = DeviceEventRecorder(stream: output.stream)
+        let gate = PostStatusAwaitGate()
+        let connection = RouterConnection(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: server,
+            events: server,
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)]),
+            output: output.continuation,
+            afterStatusAwait: { await gate.wait() }
+        )
+        let scope = await connection.makeConnectionScope()
+        let endpointID = endpoint.peripheralID
+        let connect = Task {
+            try await connection.connect(to: endpointID, scope: scope)
+        }
+        await gate.waitUntilEntered()
+
+        connect.cancel()
+        await gate.release()
+
+        await assertCancellation(of: connect)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(recorder.count, 0)
+        XCTAssertEqual(server.eventStreamCount, 0)
     }
 
     func testDisconnectCancelsInFlightStatusAndConnectThrowsCancellation() async {
@@ -587,6 +718,48 @@ final class RouterTransportConnectionTests: XCTestCase {
         )
     }
 
+    private func replacementTransport(
+        client: GatedStatusClient,
+        streams: LeakyEventStream
+    ) -> RouterTransport {
+        RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: streams,
+            clock: TestRouterClock(now: .seconds(70), origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+    }
+
+    private func sessionClock() -> TestRouterClock {
+        TestRouterClock(now: .seconds(70), origin: origin)
+    }
+
+    private func establish(
+        transport: RouterTransport,
+        streams: LeakyEventStream,
+        scope: DeviceConnectionScope,
+        level: UInt8,
+        states: DeviceStateRecorder
+    ) async throws {
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        await streams.waitForStreamCount(1)
+        XCTAssertTrue(streams.pushPayload(snapshotData(level: level), to: 0))
+        try await states.waitUntil { $0.connection == .live && $0.battery?.level == level }
+    }
+
+    private func waitUntil(
+        session: DeviceSession,
+        predicate: (DeviceState) -> Bool
+    ) async throws {
+        for _ in 0..<20_000 {
+            if predicate(await session.state) { return }
+            await Task.yield()
+        }
+        throw TestProbeError.timedOut("expected current DeviceSession state")
+    }
+
     private func statusData() -> Data {
         Data(#"{"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"2.1","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":770,"features":16496}}"#.utf8)
     }
@@ -674,6 +847,7 @@ private final class DeviceEventRecorder: @unchecked Sendable {
     }
 
     var count: Int { lock.withLock { values.count } }
+    var snapshot: [DeviceEvent] { lock.withLock { values } }
 
     func waitForCount(_ expectedCount: Int) async throws -> [DeviceEvent] {
         for _ in 0..<20_000 {
@@ -854,6 +1028,7 @@ private actor GatedStatusClient: RouterHTTPClient {
     private var shouldGate = false
     private var gatedRequestStarted = false
     private var gateContinuation: CheckedContinuation<Void, Never>?
+    private var nextError: NetworkError?
 
     init(data: Data) {
         self.data = data
@@ -874,6 +1049,10 @@ private actor GatedStatusClient: RouterHTTPClient {
             gatedRequestStarted = true
             await withCheckedContinuation { gateContinuation = $0 }
         }
+        if let nextError {
+            self.nextError = nil
+            throw nextError
+        }
         let response = HTTPURLResponse(
             url: URL(string: "http://fake.local\(path)")!,
             statusCode: 200,
@@ -885,6 +1064,11 @@ private actor GatedStatusClient: RouterHTTPClient {
 
     func gateNextStatusRequest() {
         shouldGate = true
+        gatedRequestStarted = false
+    }
+
+    func failNextStatusRequest(with error: NetworkError) {
+        nextError = error
     }
 
     func waitForGatedRequest() async {
@@ -894,6 +1078,25 @@ private actor GatedStatusClient: RouterHTTPClient {
     func releaseGatedRequest() {
         gateContinuation?.resume()
         gateContinuation = nil
+    }
+}
+
+private actor PostStatusAwaitGate {
+    private var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilEntered() async {
+        while !entered { await Task.yield() }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

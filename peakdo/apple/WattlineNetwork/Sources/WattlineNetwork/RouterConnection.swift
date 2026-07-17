@@ -21,9 +21,12 @@ actor RouterConnection {
     private let clock: any RouterConnectionClock
     private let backoff: RouterReconnectBackoff
     private let output: AsyncStream<DeviceEvent>.Continuation
+    private let afterStatusAwait: @Sendable () async -> Void
 
     private var generation: UInt64 = 0
-    private var activeScope: DeviceConnectionScope?
+    private var pendingScope: DeviceConnectionScope?
+    private var establishedGeneration: UInt64?
+    private var establishedScope: DeviceConnectionScope?
     private var statusTask: Task<StatusContext, Error>?
     private var streamTask: Task<Void, Never>?
 
@@ -34,7 +37,8 @@ actor RouterConnection {
         events: any RouterEventStream,
         clock: any RouterConnectionClock,
         backoff: RouterReconnectBackoff,
-        output: AsyncStream<DeviceEvent>.Continuation
+        output: AsyncStream<DeviceEvent>.Continuation,
+        afterStatusAwait: @escaping @Sendable () async -> Void = {}
     ) {
         self.endpoint = endpoint
         self.credentials = credentials
@@ -43,6 +47,7 @@ actor RouterConnection {
         self.clock = clock
         self.backoff = backoff
         self.output = output
+        self.afterStatusAwait = afterStatusAwait
     }
 
     deinit {
@@ -62,8 +67,10 @@ actor RouterConnection {
         generation &+= 1
         let requestedGeneration = generation
         statusTask?.cancel()
-        let previousStreamTask = streamTask
-        activeScope = scope
+        pendingScope = scope
+        if let establishedScope, establishedScope != scope {
+            retireEstablishedScope(establishedScope)
+        }
 
         let endpoint = endpoint
         let credentials = credentials
@@ -116,17 +123,24 @@ actor RouterConnection {
             } onCancel: {
                 task.cancel()
             }
+            try Task.checkCancellation()
+            await afterStatusAwait()
+            try Task.checkCancellation()
 
-            guard isCurrent(requestedGeneration, scope: scope) else {
+            guard isCurrentConnect(requestedGeneration, scope: scope) else {
                 throw CancellationError()
             }
             statusTask = nil
-            previousStreamTask?.cancel()
+            pendingScope = nil
+            streamTask?.cancel()
+            streamTask = nil
 
             let mapping = RouterMapping(
                 peripheralID: endpoint.peripheralID,
                 timestampOrigin: context.timestampOrigin
             )
+            establishedGeneration = requestedGeneration
+            establishedScope = scope
             output.yield(.handshakeCompleted(mapping.identity(context.status.device), scope: scope))
             output.yield(context.status.connected ? .connected(scope) : .reconnecting(scope))
             startEventLoop(
@@ -137,16 +151,14 @@ actor RouterConnection {
         } catch is CancellationError {
             cleanUpFailedConnect(
                 generation: requestedGeneration,
-                scope: scope,
-                previousStreamTask: previousStreamTask
+                scope: scope
             )
             throw CancellationError()
         } catch {
-            let wasSuperseded = !isCurrent(requestedGeneration, scope: scope)
+            let wasSuperseded = !isCurrentConnect(requestedGeneration, scope: scope)
             cleanUpFailedConnect(
                 generation: requestedGeneration,
-                scope: scope,
-                previousStreamTask: previousStreamTask
+                scope: scope
             )
             if wasSuperseded {
                 throw CancellationError()
@@ -159,23 +171,26 @@ actor RouterConnection {
         generation &+= 1
         statusTask?.cancel()
         statusTask = nil
-        streamTask?.cancel()
-        streamTask = nil
-        guard let scope = activeScope else { return }
-        activeScope = nil
-        output.yield(.disconnected(scope, nil))
+        pendingScope = nil
+        guard let establishedScope else { return }
+        retireEstablishedScope(establishedScope)
     }
 
     private func cleanUpFailedConnect(
         generation expectedGeneration: UInt64,
-        scope: DeviceConnectionScope,
-        previousStreamTask: Task<Void, Never>?
+        scope: DeviceConnectionScope
     ) {
-        guard isCurrent(expectedGeneration, scope: scope) else { return }
+        guard isCurrentConnect(expectedGeneration, scope: scope) else { return }
         statusTask = nil
-        previousStreamTask?.cancel()
+        pendingScope = nil
+    }
+
+    private func retireEstablishedScope(_ scope: DeviceConnectionScope) {
+        streamTask?.cancel()
         streamTask = nil
-        activeScope = nil
+        establishedGeneration = nil
+        establishedScope = nil
+        output.yield(.disconnected(scope, nil))
     }
 
     private func startEventLoop(
@@ -201,7 +216,7 @@ actor RouterConnection {
                 backoff: backoff,
                 output: output,
                 isCurrent: { [weak self] in
-                    await self?.isCurrent(expectedGeneration, scope: scope) == true
+                    await self?.isEstablished(expectedGeneration, scope: scope) == true
                 }
             )
         }
@@ -275,11 +290,18 @@ actor RouterConnection {
         }
     }
 
-    private func isCurrent(
+    private func isCurrentConnect(
         _ expectedGeneration: UInt64,
         scope: DeviceConnectionScope
     ) -> Bool {
-        generation == expectedGeneration && activeScope == scope
+        generation == expectedGeneration && pendingScope == scope
+    }
+
+    private func isEstablished(
+        _ expectedGeneration: UInt64,
+        scope: DeviceConnectionScope
+    ) -> Bool {
+        establishedGeneration == expectedGeneration && establishedScope == scope
     }
 
     private static func validate(
