@@ -132,8 +132,12 @@ func TestStaticServingIsUnauthenticatedAndIframeSafe(t *testing.T) {
 		t.Fatalf("app code=%d missing dashboard drawer assets", app.Code)
 	}
 	logic := request(handler, http.MethodGet, "/logic.js", "")
-	if logic.Code != http.StatusOK || !bytes.Contains(logic.Body.Bytes(), []byte("normalizeCardPreferences")) {
-		t.Fatalf("logic code=%d missing card preference logic", logic.Code)
+	if logic.Code != http.StatusOK || !bytes.Contains(logic.Body.Bytes(), []byte("normalizeCardPreferences")) || !bytes.Contains(logic.Body.Bytes(), []byte("clientMutationPayload")) {
+		t.Fatalf("logic code=%d missing dashboard/client mutation logic", logic.Code)
+	}
+	cards := request(handler, http.MethodGet, "/cards.js", "")
+	if cards.Code != http.StatusOK || !bytes.Contains(cards.Body.Bytes(), []byte("Client management")) {
+		t.Fatalf("cards code=%d missing client-management card", cards.Code)
 	}
 	if got := index.Header().Get("X-Frame-Options"); got != "" {
 		t.Fatalf("X-Frame-Options=%q", got)

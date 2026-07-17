@@ -152,7 +152,7 @@ func TestRenameClientRejectsInvalidRequestsWithoutWrite(t *testing.T) {
 		{"wrong confirmation", renameMAC, `{"config_revision":"incarnation:7","confirmation":"BLOCK CLIENT","given_name":"Work Mac"}`, http.StatusBadRequest},
 		{"empty name", renameMAC, `{"config_revision":"incarnation:7","confirmation":"RENAME CLIENT","given_name":""}`, http.StatusBadRequest},
 		{"unknown field", renameMAC, `{"config_revision":"incarnation:7","confirmation":"RENAME CLIENT","given_name":"Work Mac","else":true}`, http.StatusBadRequest},
-		{"blocked deferred", renameMAC, `{"config_revision":"incarnation:7","confirmation":"RENAME CLIENT","given_name":"Work Mac","blocked":true}`, http.StatusUnprocessableEntity},
+		{"rename and block together", renameMAC, `{"config_revision":"incarnation:7","confirmation":"RENAME CLIENT","given_name":"Work Mac","blocked":true}`, http.StatusBadRequest},
 		{"wifi deferred", renameMAC, `{"config_revision":"incarnation:7","confirmation":"RENAME CLIENT","given_name":"Work Mac","ssid":"nope"}`, http.StatusUnprocessableEntity},
 		{"radio deferred", renameMAC, `{"config_revision":"incarnation:7","confirmation":"RENAME CLIENT","given_name":"Work Mac","disabled":true}`, http.StatusUnprocessableEntity},
 		{"unknown mac", "aa:bb:cc:dd:ee:00", `{"config_revision":"incarnation:7","confirmation":"RENAME CLIENT","given_name":"Work Mac"}`, http.StatusNotFound},
@@ -169,6 +169,151 @@ func TestRenameClientRejectsInvalidRequestsWithoutWrite(t *testing.T) {
 				t.Fatalf("unexpected writes=%d", len(fake.writes))
 			}
 		})
+	}
+}
+
+func TestBlockClientAddsOwnedAllWeekScheduleAndConfirms(t *testing.T) {
+	fake := newRenameRouterFake()
+	audit := &renameAuditSink{}
+	bus := liveevent.NewBus()
+	live, unsubscribe := bus.Subscribe(1)
+	defer unsubscribe()
+	fake.config.ClientConfigs[0].WeeklyBlockSchedules = []*device.WeeklyBlockSchedule{{GroupId: "family-rules", BlockRanges: []*device.WeeklyBlockSchedule_BlockRange{{StartMinutes: 120, EndMinutes: 180}}}}
+	handler := renameHandlerWithAudit(t, fake, audit, bus)
+	response := renameRequest(handler, renameMAC, `{"config_revision":"incarnation:7","confirmation":"BLOCK CLIENT","blocked":true}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(fake.writes) != 1 {
+		t.Fatalf("writes=%d", len(fake.writes))
+	}
+	config := fake.writes[0].GetClientConfig()
+	if config.GetGivenName() != "Old Mac" || len(config.GetWeeklyBlockSchedules()) != 2 {
+		t.Fatalf("write lost client config: %+v", config)
+	}
+	var owned *device.WeeklyBlockSchedule
+	for _, schedule := range config.GetWeeklyBlockSchedules() {
+		if schedule.GetGroupId() == "starwatch-block" {
+			owned = schedule
+		}
+	}
+	if owned == nil || len(owned.GetBlockRanges()) != 1 || owned.GetBlockRanges()[0].GetStartMinutes() != 0 || owned.GetBlockRanges()[0].GetEndMinutes() != 10080 {
+		t.Fatalf("owned schedule=%+v", owned)
+	}
+	if !fake.clients[0].GetBlocked() {
+		t.Fatal("live readback did not set Blocked")
+	}
+	if len(audit.events) != 1 || strings.Contains(audit.events[0].Detail, "super-secret-passphrase") || !strings.Contains(audit.events[0].Detail, `"action":"block_client"`) {
+		t.Fatalf("audit=%+v", audit.events)
+	}
+	assertJSONKeys(t, audit.events[0].Detail, "action", "mac", "result", "client_id")
+	select {
+	case message := <-live:
+		published, _ := json.Marshal(message.Data)
+		if message.Kind != "router_control" || strings.Contains(string(published), "super-secret-passphrase") || !strings.Contains(string(published), `"action":"block_client"`) {
+			t.Fatalf("live=%s", published)
+		}
+		assertJSONKeys(t, string(published), "action", "mac", "result", "client_id")
+	case <-time.After(time.Second):
+		t.Fatal("missing block audit publication")
+	}
+}
+
+func TestUnblockClientRemovesOnlyOwnedScheduleAndConfirms(t *testing.T) {
+	fake := newRenameRouterFake()
+	audit := &renameAuditSink{}
+	bus := liveevent.NewBus()
+	live, unsubscribe := bus.Subscribe(1)
+	defer unsubscribe()
+	fake.config.ClientConfigs[0].WeeklyBlockSchedules = []*device.WeeklyBlockSchedule{
+		{GroupId: "starwatch-block", BlockRanges: []*device.WeeklyBlockSchedule_BlockRange{{StartMinutes: 0, EndMinutes: 10080}}},
+		{GroupId: "family-rules", BlockRanges: []*device.WeeklyBlockSchedule_BlockRange{{StartMinutes: 120, EndMinutes: 180}}},
+	}
+	// The user schedule is not currently active, so the live signal is false.
+	fake.clients[0].Blocked = false
+	response := renameRequest(renameHandlerWithAudit(t, fake, audit, bus), renameMAC, `{"config_revision":"incarnation:7","confirmation":"UNBLOCK CLIENT","blocked":false}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(fake.writes) != 1 || len(fake.writes[0].GetClientConfig().GetWeeklyBlockSchedules()) != 1 || fake.writes[0].GetClientConfig().GetWeeklyBlockSchedules()[0].GetGroupId() != "family-rules" {
+		t.Fatalf("write=%+v", fake.writes)
+	}
+	if fake.clients[0].GetBlocked() {
+		t.Fatal("live readback still blocked")
+	}
+	if len(audit.events) != 1 {
+		t.Fatalf("audit=%+v", audit.events)
+	}
+	assertJSONKeys(t, audit.events[0].Detail, "action", "mac", "result", "client_id")
+	select {
+	case message := <-live:
+		published, _ := json.Marshal(message.Data)
+		assertJSONKeys(t, string(published), "action", "mac", "result", "client_id")
+	case <-time.After(time.Second):
+		t.Fatal("missing unblock audit publication")
+	}
+}
+
+func TestUnblockClientMissingConfigReadbackIsUnconfirmedWithoutAudit(t *testing.T) {
+	fake := newRenameRouterFake()
+	fake.config.ClientConfigs[0].WeeklyBlockSchedules = []*device.WeeklyBlockSchedule{{GroupId: "starwatch-block", BlockRanges: []*device.WeeklyBlockSchedule_BlockRange{{StartMinutes: 0, EndMinutes: 10080}}}}
+	fake.clients[0].Blocked = true
+	fake.dropConfigOnWrite = true
+	audit := &renameAuditSink{}
+	response := renameRequest(renameHandlerWithAudit(t, fake, audit, liveevent.NewBus()), renameMAC, `{"config_revision":"incarnation:7","confirmation":"UNBLOCK CLIENT","blocked":false}`)
+	if response.Code != http.StatusBadGateway || len(audit.events) != 0 {
+		t.Fatalf("code=%d audit=%+v body=%s", response.Code, audit.events, response.Body.String())
+	}
+}
+
+func TestUnblockClientRefusesUserManagedScheduleWithoutWrite(t *testing.T) {
+	fake := newRenameRouterFake()
+	fake.config.ClientConfigs[0].WeeklyBlockSchedules = []*device.WeeklyBlockSchedule{
+		{GroupId: "starwatch-block", BlockRanges: []*device.WeeklyBlockSchedule_BlockRange{{StartMinutes: 0, EndMinutes: 10080}}},
+		{GroupId: "family-rules", BlockRanges: []*device.WeeklyBlockSchedule_BlockRange{{StartMinutes: 0, EndMinutes: 10080}}},
+	}
+	fake.clients[0].Blocked = true
+	response := renameRequest(renameHandler(t, fake), renameMAC, `{"config_revision":"incarnation:7","confirmation":"UNBLOCK CLIENT","blocked":false}`)
+	if response.Code != http.StatusConflict || len(fake.writes) != 0 {
+		t.Fatalf("code=%d writes=%d body=%s", response.Code, len(fake.writes), response.Body.String())
+	}
+}
+
+func TestBlockClientValidationAndFailures(t *testing.T) {
+	tests := []struct {
+		name, body string
+		err        error
+		confirm    bool
+		code       int
+	}{
+		{"missing confirmation", `{"config_revision":"incarnation:7","blocked":true}`, nil, true, http.StatusBadRequest},
+		{"missing revision", `{"confirmation":"BLOCK CLIENT","blocked":true}`, nil, true, http.StatusBadRequest},
+		{"wrong confirmation", `{"config_revision":"incarnation:7","confirmation":"UNBLOCK CLIENT","blocked":true}`, nil, true, http.StatusBadRequest},
+		{"unsupported", `{"config_revision":"incarnation:7","confirmation":"BLOCK CLIENT","blocked":true}`, status.Error(codes.Unimplemented, "no"), true, http.StatusUnprocessableEntity},
+		{"unavailable", `{"config_revision":"incarnation:7","confirmation":"BLOCK CLIENT","blocked":true}`, status.Error(codes.Unavailable, "no"), true, http.StatusUnprocessableEntity},
+		{"unconfirmed", `{"config_revision":"incarnation:7","confirmation":"BLOCK CLIENT","blocked":true}`, nil, false, http.StatusBadGateway},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRenameRouterFake()
+			fake.writeErr, fake.confirm = test.err, test.confirm
+			response := renameRequest(renameHandler(t, fake), renameMAC, test.body)
+			if response.Code != test.code {
+				t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+			}
+			if test.code == http.StatusBadRequest && len(fake.writes) != 0 {
+				t.Fatalf("unexpected writes=%d", len(fake.writes))
+			}
+		})
+	}
+}
+
+func TestBlockClientRejectsStaleRevisionWithoutWrite(t *testing.T) {
+	fake := newRenameRouterFake()
+	fake.config.Incarnation = 8
+	response := renameRequest(renameHandler(t, fake), renameMAC, `{"config_revision":"incarnation:7","confirmation":"BLOCK CLIENT","blocked":true}`)
+	if response.Code != http.StatusConflict || len(fake.writes) != 0 {
+		t.Fatalf("code=%d writes=%d body=%s", response.Code, len(fake.writes), response.Body.String())
 	}
 }
 
@@ -278,6 +423,7 @@ type renameRouterFake struct {
 	writeErr            error
 	confirm             bool
 	createConfigOnWrite bool
+	dropConfigOnWrite   bool
 }
 
 func newRenameRouterFake() *renameRouterFake {
@@ -312,24 +458,55 @@ func (f *renameRouterFake) Handle(_ context.Context, request *device.Request) (*
 			return nil, f.writeErr
 		}
 		if f.confirm {
+			requestConfig := typed.WifiSetClientGivenName.GetClientConfig()
 			if f.createConfigOnWrite {
-				f.config.ClientConfigs = append(f.config.ClientConfigs, &device.ClientConfig{MacAddress: typed.WifiSetClientGivenName.GetClientConfig().GetMacAddress(), GivenName: typed.WifiSetClientGivenName.GetClientConfig().GetGivenName()})
+				f.config.ClientConfigs = append(f.config.ClientConfigs, proto.Clone(requestConfig).(*device.ClientConfig))
 			}
 			for _, config := range f.config.ClientConfigs {
-				if config.GetMacAddress() == typed.WifiSetClientGivenName.GetClientConfig().GetMacAddress() {
-					config.GivenName = typed.WifiSetClientGivenName.GetClientConfig().GetGivenName()
+				if config.GetMacAddress() == requestConfig.GetMacAddress() {
+					config.GivenName = requestConfig.GetGivenName()
+					config.WeeklyBlockSchedules = proto.Clone(requestConfig).(*device.ClientConfig).GetWeeklyBlockSchedules()
 				}
 			}
 			for _, client := range f.clients {
-				if client.GetMacAddress() == typed.WifiSetClientGivenName.GetClientConfig().GetMacAddress() {
-					client.GivenName = typed.WifiSetClientGivenName.GetClientConfig().GetGivenName()
+				if client.GetMacAddress() == requestConfig.GetMacAddress() {
+					client.GivenName = requestConfig.GetGivenName()
+					client.Blocked = hasStarwatchBlock(requestConfig.GetWeeklyBlockSchedules())
 				}
+			}
+			if f.dropConfigOnWrite {
+				f.config.ClientConfigs = nil
 			}
 		}
 		return &device.Response{}, nil
 	default:
 		return nil, status.Errorf(codes.Unimplemented, "unexpected request %T", request.GetRequest())
 	}
+}
+
+func assertJSONKeys(t *testing.T, encoded string, want ...string) {
+	t.Helper()
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(encoded), &value); err != nil {
+		t.Fatalf("decode JSON %q: %v", encoded, err)
+	}
+	if len(value) != len(want) {
+		t.Fatalf("keys=%v want=%v", value, want)
+	}
+	for _, key := range want {
+		if _, ok := value[key]; !ok {
+			t.Fatalf("keys=%v missing %q", value, key)
+		}
+	}
+}
+
+func hasStarwatchBlock(schedules []*device.WeeklyBlockSchedule) bool {
+	for _, schedule := range schedules {
+		if schedule.GetGroupId() == "starwatch-block" {
+			return true
+		}
+	}
+	return false
 }
 
 func startRenameRouter(t *testing.T, fake *renameRouterFake) string {

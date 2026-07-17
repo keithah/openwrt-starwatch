@@ -19,8 +19,12 @@ import (
 var (
 	ErrRouterRevisionStale    = errors.New("router config revision is stale")
 	ErrRouterNameUnsupported  = errors.New("client naming is not supported by this router firmware")
+	ErrRouterBlockUnsupported = errors.New("client blocking is not supported by this router firmware")
+	ErrRouterUserManagedBlock = errors.New("client has a user-managed block schedule")
 	ErrRouterWriteUnconfirmed = errors.New("router write not confirmed by readback")
 )
+
+const starwatchBlockGroupID = "starwatch-block"
 
 // RouterMutationClient is deliberately limited to the reads and targeted
 // client-name RPC used by the first router write phase.
@@ -117,6 +121,147 @@ func (c *RouterMutationController) RenameClient(parent context.Context, mac, rev
 	// targeted rename. The live readback is authoritative for the confirmed
 	// audit identity, so return it rather than the fallback's zero value.
 	return clientID, nil
+}
+
+// SetClientBlocked changes only Starwatch's schedule in the addressed client's
+// ClientConfig. WeeklyBlockSchedule has no day field, so its single all-week
+// range uses minutes-of-week [0, 10080). As with RenameClient, incarnation is
+// checked immediately before this targeted RPC, but is only a best-effort
+// TOCTOU guard because the router does not document server-side enforcement.
+func (c *RouterMutationController) SetClientBlocked(parent context.Context, mac, revision string, blocked bool) (uint32, error) {
+	ctx, cancel := context.WithTimeout(parent, c.options.Timeout)
+	defer cancel()
+	target, err := c.options.ResolveGateway(ctx)
+	if err != nil || target == "" {
+		if err == nil {
+			err = errors.New("empty router gateway")
+		}
+		return 0, fmt.Errorf("resolve Starlink router: %w", err)
+	}
+	if _, _, splitErr := net.SplitHostPort(target); splitErr != nil {
+		target = net.JoinHostPort(target, "9000")
+	}
+	client, err := c.options.Dial(ctx, target)
+	if err != nil {
+		return 0, fmt.Errorf("dial Starlink router: %w", err)
+	}
+	defer client.Close()
+
+	config, err := client.WifiGetConfig(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read router config: %w", err)
+	}
+	wifiConfig := config.GetWifiConfig()
+	if wifiConfig == nil || fmt.Sprintf("incarnation:%d", wifiConfig.GetIncarnation()) != revision {
+		return 0, ErrRouterRevisionStale
+	}
+
+	requestConfig := &device.ClientConfig{MacAddress: mac}
+	found := false
+	for _, candidate := range wifiConfig.GetClientConfigs() {
+		if normalizeRouterMAC(candidate.GetMacAddress()) == mac {
+			requestConfig, found = proto.Clone(candidate).(*device.ClientConfig), true
+			break
+		}
+	}
+	if !found && !blocked {
+		// No stored schedule means the requested unblock is already reflected in
+		// config; live readback below still prevents a false accepted response.
+		requestConfig = &device.ClientConfig{MacAddress: mac}
+	}
+	if blocked {
+		// Replace only our own marker so an older/duplicated Starwatch entry is
+		// canonicalized without touching any user-created schedule.
+		requestConfig.WeeklyBlockSchedules = append(removeStarwatchSchedules(requestConfig.GetWeeklyBlockSchedules()), starwatchAllWeekSchedule())
+	} else {
+		// A non-Starwatch schedule combined with the live Blocked signal means
+		// we cannot attribute the block to our schedule. Leave that user-owned
+		// policy intact instead of reporting a misleading unblock success.
+		currentClients, clientsErr := client.WifiGetClients(ctx)
+		if clientsErr != nil {
+			return requestConfig.GetClientId(), fmt.Errorf("read router clients before unblock: %w", clientsErr)
+		}
+		_, liveBlocked := clientBlockedMatches(currentClients.GetClients(), mac, true)
+		if liveBlocked && hasNonStarwatchSchedule(requestConfig.GetWeeklyBlockSchedules()) {
+			return requestConfig.GetClientId(), ErrRouterUserManagedBlock
+		}
+		requestConfig.WeeklyBlockSchedules = removeStarwatchSchedules(requestConfig.GetWeeklyBlockSchedules())
+	}
+	if err := client.WifiSetClientGivenName(ctx, &device.WifiSetClientGivenNameRequest{ClientConfig: requestConfig}); err != nil {
+		if code := status.Code(err); code == codes.Unimplemented || code == codes.Unavailable {
+			return requestConfig.GetClientId(), fmt.Errorf("%w: %v", ErrRouterBlockUnsupported, err)
+		}
+		return requestConfig.GetClientId(), fmt.Errorf("set client block schedule: %w", err)
+	}
+
+	readConfig, err := client.WifiGetConfig(ctx)
+	if err != nil {
+		return requestConfig.GetClientId(), fmt.Errorf("read router config after block change: %w", err)
+	}
+	readClients, err := client.WifiGetClients(ctx)
+	if err != nil {
+		return requestConfig.GetClientId(), fmt.Errorf("read router clients after block change: %w", err)
+	}
+	clientID, liveMatches := clientBlockedMatches(readClients.GetClients(), mac, blocked)
+	if !configBlockMatches(readConfig.GetWifiConfig(), mac, blocked) || !liveMatches {
+		return requestConfig.GetClientId(), ErrRouterWriteUnconfirmed
+	}
+	return clientID, nil
+}
+
+func starwatchAllWeekSchedule() *device.WeeklyBlockSchedule {
+	return &device.WeeklyBlockSchedule{GroupId: starwatchBlockGroupID, BlockRanges: []*device.WeeklyBlockSchedule_BlockRange{{StartMinutes: 0, EndMinutes: 10080}}}
+}
+
+func hasNonStarwatchSchedule(schedules []*device.WeeklyBlockSchedule) bool {
+	for _, schedule := range schedules {
+		if schedule.GetGroupId() != starwatchBlockGroupID {
+			return true
+		}
+	}
+	return false
+}
+
+func removeStarwatchSchedules(schedules []*device.WeeklyBlockSchedule) []*device.WeeklyBlockSchedule {
+	kept := make([]*device.WeeklyBlockSchedule, 0, len(schedules))
+	for _, schedule := range schedules {
+		if schedule.GetGroupId() != starwatchBlockGroupID {
+			kept = append(kept, schedule)
+		}
+	}
+	return kept
+}
+
+func configBlockMatches(config *device.WifiConfig, mac string, blocked bool) bool {
+	for _, candidate := range config.GetClientConfigs() {
+		if normalizeRouterMAC(candidate.GetMacAddress()) == mac {
+			starwatchSchedules := 0
+			for _, schedule := range candidate.GetWeeklyBlockSchedules() {
+				if schedule.GetGroupId() == starwatchBlockGroupID {
+					starwatchSchedules++
+					if len(schedule.GetBlockRanges()) != 1 || schedule.GetBlockRanges()[0].GetStartMinutes() != 0 || schedule.GetBlockRanges()[0].GetEndMinutes() != 10080 {
+						return false
+					}
+				}
+			}
+			if blocked {
+				return starwatchSchedules == 1
+			}
+			return starwatchSchedules == 0
+		}
+	}
+	// A targeted write is not confirmed if the addressed ClientConfig vanished
+	// from readback, even for an unblock where no Starwatch schedule remains.
+	return false
+}
+
+func clientBlockedMatches(clients []*device.WifiClient, mac string, blocked bool) (uint32, bool) {
+	for _, client := range clients {
+		if normalizeRouterMAC(client.GetMacAddress()) == mac {
+			return client.GetClientId(), client.GetBlocked() == blocked
+		}
+	}
+	return 0, false
 }
 
 func configNameMatches(config *device.WifiConfig, mac, givenName string) bool {

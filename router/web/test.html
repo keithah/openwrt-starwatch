@@ -8,9 +8,13 @@
 import {
   deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
   friendlyModel, hasMotors, assembleSeries, outageBarLayout,
-  normalizeCardPreferences, visibleCardOrder,
+  normalizeCardPreferences, visibleCardOrder, clientMutationPayload,
+  clientMutationShouldRetry,
 } from './logic.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
+import {APIError} from './api.js';
+import {h, render} from './vendor/preact.module.js';
+import {ClientManagement} from './cards.js';
 
 const results = [];
 const assert = (name, condition) => {
@@ -61,13 +65,69 @@ try {
     {id: 'live', available: true}, {id: 'power', available: true},
     {id: 'router', available: true}, {id: 'alignment', available: false},
   ];
-  const savedCards = {order: ['power', 'old-card', 'live'], hidden: {power: true, old-card: true}};
+  const savedCards = {order: ['power', 'old-card', 'live'], hidden: {power: true, 'old-card': true}};
   const preferences = normalizeCardPreferences(cards, savedCards);
   assert('saved card order is retained and new cards append', preferences.order.join(',') === 'power,live,router,alignment');
   assert('unknown card ids are pruned', !preferences.order.includes('old-card') && !('old-card' in preferences.hidden));
   assert('hidden card preferences are retained', preferences.hidden.power === true);
   assert('data absence wins over card visibility preferences', visibleCardOrder(cards, preferences).join(',') === 'live,router');
   assert('reset restores default ordered visible cards', visibleCardOrder(cards, normalizeCardPreferences(cards, null)).join(',') === 'live,power,router');
+  const renamePayload = clientMutationPayload({configRevision: 'incarnation:19', givenName: 'Work Mac'});
+  assert('rename payload carries the current revision and typed confirmation', renamePayload.config_revision === 'incarnation:19' && renamePayload.confirmation === 'RENAME CLIENT' && renamePayload.given_name === 'Work Mac');
+  const blockPayload = clientMutationPayload({configRevision: 'incarnation:20', blocked: true});
+  assert('block payload carries typed confirmation and boolean state', blockPayload.config_revision === 'incarnation:20' && blockPayload.confirmation === 'BLOCK CLIENT' && blockPayload.blocked === true);
+  const unblockPayload = clientMutationPayload({configRevision: 'incarnation:21', blocked: false});
+  assert('unblock payload carries typed confirmation and boolean state', unblockPayload.confirmation === 'UNBLOCK CLIENT' && unblockPayload.blocked === false);
+  assert('only a stale revision requests refresh and retry', clientMutationShouldRetry({status: 409}) === true && clientMutationShouldRetry({status: 422}) === false);
+  const clientHost = document.createElement('div');
+  document.body.append(clientHost);
+  render(h(ClientManagement, {router: null, onMutate: async () => {}}), clientHost);
+  assert('client management card is omitted without router data', !clientHost.querySelector('.client-management-card'));
+  const routerFixture = {config_revision: 'incarnation:44', clients: [{
+    mac: 'aa:bb:cc:dd:ee:ff', name: 'Fixture client', given_name: '', ipv4: '192.168.1.7',
+    interface_name: 'wlan0', mode: '802.11ac', active: true, blocked: false,
+    signal_dbm: -52, snr_db: 31, associated_seconds: 120, rx: {rate_mbps: 200}, tx: {rate_mbps: 100},
+  }]};
+  render(h(ClientManagement, {router: routerFixture, onMutate: async () => {}}), clientHost);
+  const managementText = clientHost.textContent.toLowerCase();
+  assert('client management renders no password input or credential text', !clientHost.querySelector('input[type="password"]') && !managementText.includes('passphrase') && !managementText.includes('credential'));
+  const blockTrigger = [...clientHost.querySelectorAll('button')].find(button => button.textContent === 'Block');
+  blockTrigger.focus();
+  blockTrigger.click();
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  const dialog = document.querySelector('.client-confirm');
+  const confirmationInput = dialog.querySelector('input');
+  const dialogButtons = [...dialog.querySelectorAll('button')];
+  assert('block dialog moves focus to the typed confirmation input', document.activeElement === confirmationInput);
+  confirmationInput.focus();
+  dialog.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', shiftKey: true, bubbles: true}));
+  assert('shift-tab wraps from dialog input to the last dialog control', document.activeElement === dialogButtons.at(-1));
+  dialog.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true}));
+  assert('tab wraps from the last dialog control to the confirmation input', document.activeElement === confirmationInput);
+  dialogButtons[0].click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const liveError = document.querySelector('.client-confirm [role="status"][aria-live="polite"]');
+  assert('typed-confirmation error is announced inside the dialog', !!liveError && liveError.textContent.includes('BLOCK CLIENT'));
+  document.querySelector('.client-confirm').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const restoredBlockTrigger = clientHost.querySelector('[data-client-block]');
+  assert('escape closes the dialog and restores the invoking trigger', !document.querySelector('.client-confirm') && document.activeElement === restoredBlockTrigger);
+  render(null, clientHost);
+  const unsupportedReason = 'user-managed block schedule exists';
+  render(h(ClientManagement, {router: routerFixture, onMutate: async () => { throw new APIError(unsupportedReason, 422); }}), clientHost);
+  clientHost.querySelector('[data-client-block]').click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const unsupportedDialog = document.querySelector('.client-confirm');
+  const unsupportedInput = unsupportedDialog.querySelector('input');
+  unsupportedInput.value = 'BLOCK CLIENT';
+  unsupportedInput.dispatchEvent(new Event('input', {bubbles: true}));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  unsupportedDialog.querySelector('button').click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const unsupportedStatus = document.querySelector('.client-confirm [role="status"][aria-live="polite"]');
+  assert('422 firmware or user-managed reason is shown verbatim in-dialog', unsupportedStatus?.textContent === unsupportedReason);
+  render(null, clientHost);
+  clientHost.remove();
   document.querySelector('#results').textContent = `${results.join('\n')}\n\n${results.length} assertions passed.`;
   document.body.dataset.result = 'pass';
 } catch (error) {

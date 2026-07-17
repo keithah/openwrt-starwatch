@@ -1,9 +1,9 @@
 import {Component, h, render} from './vendor/preact.module.js';
 import htm from './vendor/htm.module.js';
 import {APIError, apiFetch, bootstrapToken, getHistory, LiveClient, storeToken} from './api.js';
-import {StatusHeader, GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCard, ControlsCard, SpeedCard, AlertsCard, HardwareCard, StarlinkRouterCard} from './cards.js';
+import {StatusHeader, GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCard, ControlsCard, SpeedCard, AlertsCard, HardwareCard, StarlinkRouterCard, ClientManagementCard} from './cards.js';
 import {TokenView, SettingsView, EventsView} from './views.js';
-import {normalizeCardPreferences} from './logic.js';
+import {clientMutationPayload, clientMutationShouldRetry, normalizeCardPreferences} from './logic.js';
 
 const html = htm.bind(h);
 const graphSeries = {
@@ -112,6 +112,28 @@ class App extends Component {
   async loadPower(){try{this.setState({powerResponses:[await getHistory(this.state.token,'power_w','24h')]});}catch(_){}}
   async loadMap(snapshot=this.state.snapshot){if(!snapshot.dish_reachable)return;try{this.setState({grid:await this.request('/api/obstruction-map')});}catch(_){}}
   async refreshEvents(){try{const [events,outages]=await Promise.all([this.request('/api/events?span=30d'),this.request('/api/outages?span=30d')]);this.setState({events,outages});}catch(_){}}
+  refreshRouter = async () => {
+    const router = await this.request('/api/router');
+    this.setState({router});
+    return router;
+  };
+  mutateRouterClient = async (client, mutation) => {
+    const router = this.state.router;
+    const payload = clientMutationPayload({configRevision: router?.config_revision, ...mutation});
+    try {
+      await this.request(`/api/router/clients/${encodeURIComponent(client.mac)}`, {method:'PATCH',body:JSON.stringify(payload)});
+      await this.refreshRouter();
+    } catch (error) {
+      // A 409 means the server rejected the old incarnation. Refresh before
+      // allowing an explicit retry; never silently replay a router write.
+      if (clientMutationShouldRetry(error)) {
+        try { await this.refreshRouter(); } catch (_) {}
+        error.retry = true;
+        error.message = `${error.message}. Router data was refreshed; review and retry.`;
+      }
+      throw error;
+    }
+  };
 
   control = async (action, params={}, confirmation='') => {
     if (confirmation==='typed'&&prompt('Type REBOOT to confirm. The dish will be offline 2–5 minutes.')!=='REBOOT')return;
@@ -155,6 +177,7 @@ class App extends Component {
     {id:'alerts',label:'Alerts',available:true,render:()=>html`<${AlertsCard} snapshot=${state.snapshot} events=${state.events}/>`},
     {id:'hardware',label:'Hardware',available:!!state.snapshot.device_info,render:()=>html`<${HardwareCard} snapshot=${state.snapshot}/>`},
     {id:'starlink-router',label:'Starlink router',available:!!state.router,render:()=>html`<${StarlinkRouterCard} router=${state.router}/>`},
+    {id:'client-management',label:'Client management',available:!!state.router,render:()=>html`<${ClientManagementCard} router=${state.router} onMutate=${this.mutateRouterClient}/>`},
   ]; }
   dashboard(state) { const cards=this.cardRegistry(state); const preferences=normalizeCardPreferences(cards,state.cardPreferences); const byID=new Map(cards.map(card=>[card.id,card])); return html`<main id="dashboard" class="dashboard"><nav class="quick-nav"><a href="#/events">Events</a><a href="#/settings">Settings</a></nav><div class="card-grid">${preferences.order.filter(id=>!preferences.hidden[id]).map(id=>byID.get(id)).filter(card=>card?.available).map(card=>card.render())}</div></main>`; }
 }

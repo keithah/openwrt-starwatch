@@ -143,3 +143,25 @@ export function visibleCardOrder(cards = [], preferences = {}) {
     .filter(card => card?.available && !preferences.hidden?.[card.id])
     .map(card => card.id);
 }
+
+// Router writes deliberately have one mutation per request. Keeping the
+// confirmation phrase here makes the UI payload observable and testable while
+// the server remains the authority for validation.
+export function clientMutationPayload({configRevision, givenName, blocked} = {}) {
+  const config_revision = String(configRevision || '');
+  if (typeof givenName === 'string') {
+    return {config_revision, confirmation: 'RENAME CLIENT', given_name: givenName};
+  }
+  if (typeof blocked === 'boolean') {
+    return {
+      config_revision,
+      confirmation: blocked ? 'BLOCK CLIENT' : 'UNBLOCK CLIENT',
+      blocked,
+    };
+  }
+  throw new Error('Select a client rename, block, or unblock action.');
+}
+
+export function clientMutationShouldRetry(error) {
+  return Number(error?.status) === 409;
+}

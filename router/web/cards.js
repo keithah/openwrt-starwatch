@@ -165,3 +165,74 @@ export function StarlinkRouterCard({router}) {
   const device = router.device || router;
   return html`<${Card} title="Starlink router" eyebrow="Topology B · local read model"><div class="metric-grid"><${Metric} label="Hardware" value=${device.hardware_version}/><${Metric} label="Firmware" value=${device.software_version}/><${Metric} label="Clients" value=${router.clients?.length ?? router.client_count}/><${Metric} label="Uptime" value=${formatDuration(device.uptime_seconds ?? router.uptime_seconds)}/></div>${router.ping&&html`<div class="router-card"><div class="metric-grid"><${Metric} label="Latency" value=${number(router.ping.latency_mean_ms)} unit="ms"/><${Metric} label="Loss" value=${percent(router.ping.drop_rate)}/></div></div>`}</${Card}>`;
 }
+
+export class ClientManagement extends Component {
+  state = {editing: null, givenName: '', pending: null, typedConfirmation: '', error: '', retry: null, busy: false};
+
+  startRename = client => this.setState({editing: client.mac, givenName: client.given_name || client.name || '', error: '', retry: null});
+  cancelRename = () => this.setState({editing: null, givenName: '', error: '', retry: null});
+  openBlock = (client, trigger) => { this.blockTrigger = trigger; this.blockMAC = client.mac; this.setState({pending: client, typedConfirmation: '', error: '', retry: null}); };
+  restoreBlockTrigger = () => {
+    const trigger = this.base?.querySelector(`[data-client-block="${this.blockMAC}"]`) || this.blockTrigger;
+    trigger?.focus();
+  };
+  closeBlock = () => this.setState({pending: null, typedConfirmation: '', error: '', retry: null}, () => setTimeout(this.restoreBlockTrigger, 0));
+  componentDidUpdate(_, previousState) {
+    if (!previousState.pending && this.state.pending) this.confirmInput?.focus();
+  }
+  dialogKeyDown = event => {
+    if (event.key === 'Escape') { event.preventDefault(); this.closeBlock(); return; }
+    if (event.key !== 'Tab') return;
+    const focusable = [...this.confirmDialog?.querySelectorAll('button:not([disabled]), input:not([disabled])') || []];
+    const first = focusable[0], last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  };
+
+  submit = async (client, mutation) => {
+    this.setState({busy: true, error: '', retry: null});
+    try {
+      await this.props.onMutate(client, mutation);
+      const restoreBlockTrigger = !!this.state.pending;
+      this.setState({editing: null, givenName: '', pending: null, typedConfirmation: ''}, () => { if (restoreBlockTrigger) this.restoreBlockTrigger(); });
+    } catch (error) {
+      this.setState({error: error.message || 'Client update failed.', retry: error.retry ? {client, mutation} : null});
+    } finally { this.setState({busy: false}); }
+  };
+
+  submitRename = client => {
+    const givenName = this.state.givenName.trim();
+    if (!givenName) { this.setState({error: 'Client name is required.'}); return; }
+    this.submit(client, {givenName});
+  };
+  submitBlock = client => {
+    const blocked = !client.blocked;
+    const expected = blocked ? 'BLOCK CLIENT' : 'UNBLOCK CLIENT';
+    if (this.state.typedConfirmation !== expected) { this.setState({error: `Type ${expected} to confirm.`}); return; }
+    this.submit(client, {blocked});
+  };
+
+  render({router}, state) {
+    if (!router) return null;
+    const clients = router.clients || [];
+    const revision = router.config_revision || 'unavailable';
+    const pending = state.pending;
+    return html`<${Card} title="Client management" eyebrow="Topology B · curated router writes" className="client-management-card">
+      <p class="card-note">Revision <code>${revision}</code>. Changes are confirmed by the router before they are shown here.</p>
+      ${state.error && html`<div class="control-banner disabled" role="status">${state.error}${state.retry && html` <button class="button subtle" type="button" disabled=${state.busy} onClick=${() => this.submit(state.retry.client, state.retry.mutation)}>Retry with refreshed revision</button>`}</div>`}
+      ${clients.length ? html`<div class="table-wrap client-table-wrap"><table class="client-table"><thead><tr><th>Client</th><th>Address</th><th>Interface / mode</th><th>Signal</th><th>Rates</th><th>State</th><th>Actions</th></tr></thead><tbody>${clients.map(client => {
+        const editing = state.editing === client.mac;
+        const label = client.given_name || client.name || 'Unnamed client';
+        const link = [client.interface_name || client.interface, client.mode].filter(Boolean).join(' · ') || '—';
+        return html`<tr key=${client.mac}><td><strong>${label}</strong>${editing ? html`<div class="client-rename"><label class="sr-only" for=${`rename-${client.mac}`}>New name for ${client.mac}</label><input id=${`rename-${client.mac}`} value=${state.givenName} maxlength="128" onInput=${event => this.setState({givenName: event.currentTarget.value})}/><button class="button primary" type="button" disabled=${state.busy} onClick=${() => this.submitRename(client)}>Save</button><button class="button subtle" type="button" disabled=${state.busy} onClick=${this.cancelRename}>Cancel</button></div>` : html`<small>${client.name && client.given_name ? client.name : ''}</small>`}</td><td><code>${client.mac}</code><small>${client.ipv4 || 'No IPv4'}</small></td><td>${link}</td><td>${number(client.signal_dbm, 0)} dBm<small>${number(client.snr_db, 0)} dB SNR</small></td><td>↓ ${number(client.rx?.rate_mbps)} Mb/s<small>↑ ${number(client.tx?.rate_mbps)} Mb/s</small></td><td><span class=${`chip ${client.blocked ? 'warning' : 'success'}`}>${client.blocked ? 'Blocked' : 'Allowed'}</span><small>${client.active ? 'Connected' : 'Inactive'} · ${formatDuration(client.associated_seconds)}</small></td><td><div class="client-actions"><button class="button subtle" type="button" disabled=${state.busy} onClick=${() => this.startRename(client)}>Rename</button><button data-client-block=${client.mac} class=${`button ${client.blocked ? 'subtle' : 'danger'}`} type="button" disabled=${state.busy} onClick=${event => this.openBlock(client, event.currentTarget)}>${client.blocked ? 'Unblock' : 'Block'}</button></div></td></tr>`;
+      })}</tbody></table></div>` : html`<div class="empty">No router clients reported yet.</div>`}
+      ${pending && (() => { const blocking = !pending.blocked; const expected = blocking ? 'BLOCK CLIENT' : 'UNBLOCK CLIENT'; return html`<div class="client-confirm-layer" role="presentation"><section class="client-confirm" role="dialog" aria-modal="true" aria-labelledby="client-confirm-title" onKeyDown=${this.dialogKeyDown} ref=${node => { this.confirmDialog = node; }}><span class="eyebrow">ROUTER CLIENT</span><h3 id="client-confirm-title">${blocking ? 'Block' : 'Unblock'} ${pending.given_name || pending.name || pending.mac}?</h3><p>Type <code>${expected}</code> to confirm. This uses revision <code>${revision}</code>.</p>${state.error && html`<div class="client-confirm-error" role="status" aria-live="polite">${state.error}</div>`}<label>Confirmation<input autocomplete="off" value=${state.typedConfirmation} onInput=${event => this.setState({typedConfirmation: event.currentTarget.value, error: ''})} aria-describedby="client-confirm-help" ref=${node => { this.confirmInput = node; }}/></label><small id="client-confirm-help">The phrase must match exactly.</small><div class="control-actions"><button class=${`button ${blocking ? 'danger' : 'primary'}`} type="button" disabled=${state.busy} onClick=${() => this.submitBlock(pending)}>${blocking ? 'Block client' : 'Unblock client'}</button><button class="button subtle" type="button" disabled=${state.busy} onClick=${this.closeBlock}>Cancel</button></div></section></div>`; })()}
+    </${Card}>`;
+  }
+}
+
+// The card is registered only after a successful topology-B router read.
+export function ClientManagementCard({router, onMutate}) {
+  if (!router) return null;
+  return html`<${ClientManagement} router=${router} onMutate=${onMutate}/>`;
+}

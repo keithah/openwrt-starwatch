@@ -84,6 +84,7 @@ type SettingsProvider interface {
 
 type RouterMutationProvider interface {
 	RenameClient(context.Context, string, string, string) (uint32, error)
+	SetClientBlocked(context.Context, string, string, bool) (uint32, error)
 }
 
 type Deps struct {

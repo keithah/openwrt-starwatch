@@ -580,11 +580,22 @@ configuration untouched.
 }
 ```
 
-Phase 4 accepts **rename only**. `config_revision`, the exact confirmation
-`RENAME CLIENT`, and a non-empty `given_name` are required. The path MAC is
-normalized to lowercase colon notation and must match a client from the latest
-router snapshot. `blocked` and Wi-Fi/radio fields are rejected with `422`; client
-blocking is deferred to Phase 5 and Wi-Fi/radio writes to Phase 6.
+Each request makes exactly one client mutation: rename or block state. The path
+MAC is normalized to lowercase colon notation and must match a client from the
+latest router snapshot. Wi-Fi/radio fields remain rejected with `422` until
+Phase 6.
+
+Rename requires the exact `RENAME CLIENT` confirmation and a non-empty
+`given_name`. Blocking requires `blocked:true` with exact `BLOCK CLIENT`;
+unblocking requires `blocked:false` with exact `UNBLOCK CLIENT`:
+
+```json
+{
+  "config_revision": "incarnation:42",
+  "confirmation": "BLOCK CLIENT",
+  "blocked": true
+}
+```
 
 Rename uses the targeted `WifiSetClientGivenName` request (request oneof field
 3017) carrying the current `ClientConfig` form. Before writing, Starwatch
@@ -594,13 +605,22 @@ payload, `ApplyClientNames`, or the atomic `ApplyClientConfigs` collection. A
 firmware that does not implement the targeted naming RPC returns `422` rather
 than silently using a deprecated or collection-replacement path.
 
+For blocking, Starwatch uses that same targeted RPC with a read-merged
+`ClientConfig`, never `ApplyClientConfigs`. It adds exactly one owned weekly
+schedule tagged `group_id:"starwatch-block"`, with its sole block range encoded
+as `start_minutes:0`, `end_minutes:10080` (minutes of week; the protobuf has no
+day field). Unblock removes only that tag and preserves user schedules. If the
+live client is blocked while a non-Starwatch schedule exists, Starwatch returns
+`409` rather than claiming it removed a user-managed block.
+
 Starwatch rereads both configuration and clients after the RPC and returns `202`
-only when both confirm the requested name. A failed confirmation returns `502`.
+only when config and live `WifiClient.Blocked`/name state confirm the requested
+mutation. A failed confirmation returns `502`.
 The incarnation comparison immediately before the write minimizes, but cannot
 eliminate, the TOCTOU window because the target RPC is not known to perform an
-atomic server-side incarnation check. Successful readback-confirmed renames
-append and publish a `router_control` audit event containing only
-`action`, normalized `mac`, `given_name`, `result`, and `client_id`.
+atomic server-side incarnation check. Successful readback-confirmed mutations
+append and publish a secret-free `router_control` audit event containing action,
+normalized MAC, result, and client ID (plus `given_name` for rename).
 
 ## Explicitly excluded router writes
 
