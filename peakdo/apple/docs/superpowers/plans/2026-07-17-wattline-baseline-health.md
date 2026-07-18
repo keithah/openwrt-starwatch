@@ -31,7 +31,7 @@
 - Produces: `TestProjectFiles.url(_:)` and `waitUntil(timeout:condition:)` for deterministic app-target tests.
 - Consumes: no production interface.
 
-- [ ] **Step 1: Preserve and extend the failing tests**
+- [x] **Step 1: Preserve and extend the failing tests**
 
 Replace relative file reads and fixed `Task.sleep` assertions with the following test support calls. Keep the existing entitlement, plist, Live Activity request/update, app-group, and no-network assertions intact.
 
@@ -81,7 +81,7 @@ actor AsyncGate {
 
 Use `String(contentsOf: TestProjectFiles.url("Wattline/Wattline.entitlements"))` and the equivalent Info.plist/project paths. In the Live Activity fan-out test, wait until the recorder contains two events and then assert the exact sequence remains `[.request, .update]`.
 
-- [ ] **Step 2: Run the focused tests and verify current RED**
+- [x] **Step 2: Run the focused tests and verify current RED**
 
 Run:
 
@@ -96,15 +96,15 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
 
 Expected before the edits: the relative entitlement/plist tests fail outside `peakdo/apple/Wattline`, and the fixed-delay Live Activity assertion is timing-sensitive. Expected after only adding the new assertions but before call-site edits: compile failures for missing `TestProjectFiles`/`waitUntil` use.
 
-- [ ] **Step 3: Implement the test infrastructure and qualify production types**
+- [x] **Step 3: Implement the test infrastructure and qualify production types**
 
 Add the two test-support files. Where `WattlineShared` sources are also test-target members, qualify the implementation under test as `Wattline.SnapshotCoordinator`, `Wattline.WidgetReloadAdapter`, and other duplicated names so tests cannot accidentally exercise a test-module copy.
 
-- [ ] **Step 4: Run focused tests GREEN**
+- [x] **Step 4: Run focused tests GREEN**
 
 Run the Step 2 command. Expected: all selected tests pass, with the Live Activity test still proving one request followed by one material update.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/Wattline/WattlineTests
@@ -122,7 +122,7 @@ git commit -m "test: make Wattline app tests deterministic"
 - Consumes: `DeviceOperationBroker.attach(_:)`, `markConnected(peripheralID:generation:)`, and `DeviceConnectionScope`.
 - Produces: the invariant `connectionStatus == .connected` implies the current broker context is attached and marked connected.
 
-- [ ] **Step 1: Write a failing ordering regression test**
+- [x] **Step 1: Write a failing ordering regression test**
 
 Add a controllable publication gate to an `AppModelReconnectTests` direct-connect fixture. Before releasing the gate, assert the model has not exposed connected presentation; after release, assert both presentation and broker state are connected.
 
@@ -144,7 +144,7 @@ XCTAssertTrue(await model.deviceOperationBroker.hasConnectedContext)
 
 Keep the existing bypass test proving a nonstandard ACK cannot change telemetry and the DC test proving pending state matches the requested target.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -158,7 +158,7 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
 
 Expected: the new gate test observes `.connected` before broker publication; the existing bypass/DC tests can time out because they act during the same readiness gap.
 
-- [ ] **Step 3: Reorder direct connection completion**
+- [x] **Step 3: Reorder direct connection completion**
 
 In `completeConnectionOperation(_:)`, keep the scope guards, but attach and mark the broker before calling `establishConnectedPresentation(scope:)`:
 
@@ -183,7 +183,7 @@ establishConnectedPresentation(scope: key.scope)
 
 Implement the repeated guards as a private `isCurrent(_ key: ConnectionOperationKey) -> Bool` using the existing generation, operation, selected-peripheral, active-scope, and retired-scope checks. Do not publish optimistic port or battery state.
 
-- [ ] **Step 4: Run focused and broker tests GREEN**
+- [x] **Step 4: Run focused and broker tests GREEN**
 
 Run the Step 2 command plus:
 
@@ -196,7 +196,7 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
 
 Expected: direct connection exposes `.connected` only after broker readiness; bypass remains pending until matching telemetry; DC confirmed telemetry remains unchanged while the requested mutation is pending.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/Wattline/Wattline/AppModel.swift \
@@ -215,7 +215,7 @@ git commit -m "fix: publish broker readiness before connected state"
 - Consumes: the connected/broker invariant from Task 2 and existing expected-disconnect restart flow.
 - Produces: deterministic coverage of disconnect-as-success, write-error-while-disconnecting, 15-second reconnect, 30-second retry, and stale-scope quarantine.
 
-- [ ] **Step 1: Make every restart assertion condition-based**
+- [x] **Step 1: Make every restart assertion condition-based**
 
 Have `makeConnectedModel` wait for both connected presentation and broker readiness. Replace helper functions that call `XCTFail` and return with throwing bounded waits so a timed-out readiness condition cannot let the test continue vacuously.
 
@@ -235,7 +235,7 @@ try await waitUntil {
 
 For asynchronous disconnect-after-write-error, retain the delayed scoped disconnect and assert `reconnectAttemptsForTesting == 0` before that exact disconnect is emitted. For stale-scope quarantine, assert the old scope differs from the recovered scope before emitting it.
 
-- [ ] **Step 2: Run the complete lifecycle class and verify RED/GREEN transition**
+- [x] **Step 2: Run the complete lifecycle class and verify RED/GREEN transition**
 
 Run:
 
@@ -248,7 +248,7 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
 
 Expected before Tasks 1–2: six named restart tests time out or operate before broker attachment. Expected after the fixture changes: every lifecycle case passes without increasing real-time sleep windows.
 
-- [ ] **Step 3: Apply a production change only for an observed lifecycle failure**
+- [x] **Step 3: Apply a production change only for an observed lifecycle failure**
 
 If the focused test still shows a real AppModel race, add a generation-keyed restart-disconnect signal that is resumed only by `.disconnected(scope, ...)` for the active scope. Its timeout uses the injected `DeviceClock`, removes the registry entry exactly once, and cannot be resumed by an old scope. Do not treat a write ACK as restart success.
 
@@ -261,7 +261,7 @@ private struct RestartDisconnectKey: Equatable {
 
 The regression test must fail when the scope comparison or generation comparison is removed. If the focused suite is green after Tasks 1–2, leave production restart code unchanged and commit only the non-vacuous fixture changes.
 
-- [ ] **Step 4: Run lifecycle, reconnect, and quirk suites GREEN**
+- [x] **Step 4: Run lifecycle, reconnect, and quirk suites GREEN**
 
 Run the Step 2 command, then:
 
@@ -273,7 +273,7 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
   -only-testing:WattlineTests/AppModelReconnectTests
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/Wattline/WattlineTests/SettingsLifecycleTests.swift peakdo/apple/Wattline/Wattline/AppModel.swift
@@ -332,4 +332,8 @@ git commit -m "test: verify Wattline completion baseline"
 
 Report the unique pre-fix failures, exact post-fix counts, simulator UUID/runtime, environment launch errors encountered, and any external-only checks. Stop for Milestone 2 approval.
 
-**Verification evidence (2026-07-18):** package suites: WattlineCore 156/156, WattlineUI 26/26, and WattlineNetwork 97/97. Full real `Wattline` XCTest (result bundle `/tmp/wattline-task4-full-portable.xcresult`) passed 148/148 with 0 failed/skipped; the real `WattlineWidgets` XCTest rerun passed 148/148 with 0 failed/skipped (`/tmp/wattline-task4-widgets.xcresult`). Destination: `Wattline-Tests` iPhone 17e, UUID `81744CE3-2DBE-4986-9B27-D61D1E10A63D`, iOS 26.5 / build 23F77. Core/UI networking audit had no matches. OTA/Timer audit had only six existing UI-test negative assertions/test names containing `Timers`; it had no `api.peakdo.ca`, `scheduledOnOff`, or `TimerRow` matches. `git diff --check` passed. The original timeout/UI blockers were fixed and reviewed in approved range `4021b5fb..2f720163` (including `925790f1` and `2f720163`); unused-clone/debugger-version diagnostics remain non-fatal simulator environment noise.
+**Final verification evidence (2026-07-18):** the complete effective milestone range is `18c38822..HEAD`. The named pre-fix REDs included missing deterministic test helpers and pending-fan-out completion; `testDirectConnectionPublishesBrokerReadinessBeforeConnectedPresentation`; `testReturnToScanWhileConnectedEventPublicationIsHeldCannotResurrectStateOrBrokerOwnership`; `testRestartReconnectOwnerAlonePresentsConnectedAfterBrokerReadiness`; `testRetryAfterRestartRecoveryTimeoutStartsFreshAttemptAndQuarantinesLateCompletion`; the six original restart-recovery failures recorded in Task 3; and the initial Settings/System-Surface UI reachability failures recorded in Task 4. Each behavioral assertion remains present.
+
+Fresh package commands at the final source head passed WattlineCore 156/156, WattlineUI 26/26, and WattlineNetwork 97/97. Focused final coverage passed AppModelReconnect 45/45, SettingsLifecycle 17/17, DeviceOperationBroker 16/16, and Core QuirkRegression 10/10. Full real `Wattline` XCTest passed 151/151 with 0 failed/skipped (`/tmp/wattline-baseline-final-clean-20260718.xcresult`); full real `WattlineWidgets` XCTest passed 151/151 with 0 failed/skipped (`/tmp/wattline-widgets-baseline-final-clean-20260718.xcresult`). Destination: `Wattline-Tests-2`, iPhone 17e, UUID `74C1DA4D-7190-4497-AAD5-9EB140B3A96A`, iOS Simulator 26.5 / build 23F77.
+
+The final Core/UI networking audit had no matches. The OTA/Timer audit had only six existing UI-test negative assertions/test names containing `Timers`; it had no `api.peakdo.ca`, `scheduledOnOff`, or `TimerRow` matches. `git diff --check` passed. During verification, Xcode intermittently stalled before XCTest injection while materializing workers, and one erased-simulator run timed out loading Accessibility; terminating the stale Wattline host and running non-parallel on the warmed fallback simulator produced both clean result bundles. Empty-build-number, supported-platform, and debugger-version diagnostics remained non-fatal environment noise. No external check is required to establish this simulator baseline; real BLE restart/shutdown and signed-device background behavior remain hardware/external exit checks for their later feature milestones and were not claimed here. Milestone 2 has not started.
