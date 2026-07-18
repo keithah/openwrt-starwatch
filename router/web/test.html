@@ -11,7 +11,7 @@ import {
   mergeLiveFrame, liveFrameValues,
   clientMutationPayload, clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry,
 } from './logic.js';
-import {dashboardSection, normalizeOverviewPreferences, visibleOverviewCards} from './dashboard-model.js';
+import {DISH_GRAPH_SERIES, dashboardSection, normalizeOverviewPreferences, starlinkConnected, visibleOverviewCards} from './dashboard-model.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 import {APIError} from './api.js';
 import {h, render} from './vendor/preact.module.js';
@@ -33,11 +33,16 @@ try {
   const disconnectedSnapshot = mergeLiveFrame({topology: 'full', dish_reachable: true, dish: {latency_ms: 42}}, disconnectedFrame);
   assert('WAN-only live frame clears stale dish state', disconnectedSnapshot.topology === 'wan-only' && disconnectedSnapshot.dish_reachable === false && disconnectedSnapshot.dish === null);
   const disconnectedValues = liveFrameValues(disconnectedFrame);
-  assert('WAN-only live frame appends router but not dish telemetry', disconnectedValues.latency_ms == null && disconnectedValues.dish_down_bps == null && disconnectedValues.router_down_bps === 1234);
+  assert('throughput history is dish gRPC only', DISH_GRAPH_SERIES.throughput.join(',') === 'dish_down_bps,dish_up_bps');
+  assert('latency history is dish gRPC only', DISH_GRAPH_SERIES.latency.join(',') === 'latency_ms');
+  assert('loss history is dish gRPC only', DISH_GRAPH_SERIES.loss.join(',') === 'drop_rate');
+  assert('power history is dish gRPC only', DISH_GRAPH_SERIES.power.join(',') === 'power_w');
+  assert('WAN-only frame yields no telemetry values', Object.values(disconnectedValues).every(value => value == null));
+  assert('strict reachability controls dashboard data', starlinkConnected({dish_reachable: true}) && !starlinkConnected({dish_reachable: false}) && !starlinkConnected({}));
   const telemetryHost = document.createElement('div');
   document.body.append(telemetryHost);
-  render(h(GraphCard, {tab: 'throughput', span: '15m', responses: [], dishReachable: false, topology: 'wan-only', onTab: () => {}, onSpan: () => {}}), telemetryHost);
-  assert('WAN-only telemetry card identifies absent Starlink source', telemetryHost.querySelector('h2')?.textContent === 'Telemetry' && telemetryHost.textContent.includes('No Starlink dish detected'));
+  render(h(GraphCard, {tab: 'throughput', span: '15m', responses: [], onTab: () => {}, onSpan: () => {}}), telemetryHost);
+  assert('telemetry card identifies dish gRPC as its only source', telemetryHost.querySelector('h2')?.textContent === 'Telemetry' && telemetryHost.textContent.includes('dish gRPC') && !telemetryHost.textContent.includes('Router-side'));
   render(null, telemetryHost);
   telemetryHost.remove();
   assert('zero remains available', availabilityValue(0, {available: true}).available === true);

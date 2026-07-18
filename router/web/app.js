@@ -5,13 +5,9 @@ import {GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCar
 import {TokenView, SettingsView, EventsView} from './views.js';
 import {clientMutationPayload, clientMutationShouldRetry, liveFrameValues, mergeLiveFrame, wifiMutationPayload, wifiMutationShouldRetry} from './logic.js';
 import {CustomizePanel, IconRail, loadOverviewPreferences, resetOverviewPreferences, saveOverviewPreferences, SectionHeader} from './dashboard.js';
-import {dashboardSection, normalizeOverviewPreferences, sectionDefinition, visibleOverviewCards} from './dashboard-model.js';
+import {DISH_GRAPH_SERIES, dashboardSection, normalizeOverviewPreferences, sectionDefinition, visibleOverviewCards} from './dashboard-model.js';
 
 const html = htm.bind(h);
-const graphSeries = {
-  throughput: ['dish_down_bps','dish_up_bps','router_down_bps','router_up_bps'],
-  latency: ['latency_ms','wan_probe_rtt_ms'], loss: ['drop_rate','wan_probe_loss'], power: ['power_w'],
-};
 
 class App extends Component {
   constructor() {
@@ -63,7 +59,7 @@ class App extends Component {
 
   async loadGraph(tab=this.state.tab,span=this.state.span) {
     this.graphAbort?.abort(); const controller=new AbortController(); this.graphAbort=controller; this.setState({graphLoading:true});
-    try { const graphResponses=await Promise.all(graphSeries[tab].map(series=>getHistory(this.state.token,series,span,controller.signal))); if(!controller.signal.aborted)this.setState({graphResponses,graphLoading:false}); }
+    try { const graphResponses=await Promise.all(DISH_GRAPH_SERIES[tab].map(series=>getHistory(this.state.token,series,span,controller.signal))); if(!controller.signal.aborted)this.setState({graphResponses,graphLoading:false}); }
     catch(error){if(error.name!=='AbortError')this.setState({graphLoading:false,notice:`History: ${error.message}`});}
   }
   setTab = tab => this.setState({tab},()=>this.loadGraph());

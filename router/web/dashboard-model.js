@@ -8,6 +8,17 @@ export const DASHBOARD_SECTIONS = [
   {id: 'settings', label: 'Settings', icon: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0-5v2m0 14v2m9-9h-2M5 12H3m15.36-6.36-1.42 1.42M7.05 16.95l-1.42 1.42m12.73 0-1.42-1.42M7.05 7.05 5.63 5.63', cards: []},
 ];
 
+export const DISH_GRAPH_SERIES = Object.freeze({
+  throughput: Object.freeze(['dish_down_bps', 'dish_up_bps']),
+  latency: Object.freeze(['latency_ms']),
+  loss: Object.freeze(['drop_rate']),
+  power: Object.freeze(['power_w']),
+});
+
+export function starlinkConnected(snapshot = {}) {
+  return snapshot.dish_reachable === true;
+}
+
 const byID = new Map(DASHBOARD_SECTIONS.map(section => [section.id, section]));
 const overviewIDs = new Set(byID.get('overview').cards);
 

@@ -30,12 +30,8 @@ export function liveFrameValues(frame = {}) {
   return {
     dish_down_bps: dish?.downlink_throughput_bps,
     dish_up_bps: dish?.uplink_throughput_bps,
-    router_down_bps: frame.wan?.router_down_bps,
-    router_up_bps: frame.wan?.router_up_bps,
     latency_ms: dish?.latency_ms,
     drop_rate: dish?.drop_rate,
-    wan_probe_rtt_ms: frame.wan?.probe_rtt_30s_ms,
-    wan_probe_loss: frame.wan?.probe_loss_30s,
     power_w: dish?.power_w,
   };
 }
