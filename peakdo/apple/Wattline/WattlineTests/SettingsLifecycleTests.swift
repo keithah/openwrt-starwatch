@@ -218,6 +218,55 @@ final class SettingsLifecycleTests: XCTestCase {
         }
     }
 
+    func testRestartReconnectDisconnectDuringLifecycleDeliveryRetriesWithoutStranding() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(reconnectAfterRestart: true, deferReconnect: true)
+        let lifecycle = AsyncCallBarrier()
+        let model = try await makeConnectedModel(
+            transport,
+            clock: clock,
+            connectedLifecycleBarrier: { await lifecycle.waitIfHeld() }
+        )
+        let broker = model.deviceOperationBroker
+
+        try await restartAfterReleasingDisconnect(model, transport: transport)
+        try await waitUntil { await transport.deferredReconnectScopes.count == 1 }
+        let firstScopes = await transport.deferredReconnectScopes
+        let firstReconnectScope = try XCTUnwrap(firstScopes.first)
+
+        await lifecycle.holdNext()
+        await transport.releaseReconnect(scope: firstReconnectScope)
+        try await waitUntil { await lifecycle.isBlocked }
+
+        await transport.emit(.disconnected(
+            firstReconnectScope,
+            TransportFailure(message: "terminal during lifecycle delivery")
+        ))
+        try await waitUntil {
+            model.connectionStatus == .disconnected("terminal during lifecycle delivery")
+        }
+        await lifecycle.release()
+        try await waitUntil { await lifecycle.completedHoldCount == 1 }
+
+        try await waitUntil { await clock.hasSleeper(deadline: .seconds(1)) }
+        await clock.advance(by: .seconds(1))
+        try await waitUntil { await transport.deferredReconnectScopes.count == 1 }
+        let retryScopes = await transport.deferredReconnectScopes
+        let retryScope = try XCTUnwrap(retryScopes.first)
+        XCTAssertNotEqual(retryScope, firstReconnectScope)
+        XCTAssertEqual(model.maintenanceState, .restarting)
+
+        await transport.releaseReconnect(scope: retryScope)
+        try await waitUntil {
+            guard model.connectionStatus == .connected,
+                  model.maintenanceState == .idle,
+                  model.restartOperationIDForTesting == nil,
+                  model.brokerReconnectAttempt == nil
+            else { return false }
+            return await broker.hasConnectedContext
+        }
+    }
+
     func testWriteErrorAfterExpectedDisconnectStillRecovers() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(reconnectAfterRestart: true, restartFailsAfterDisconnect: true, deferReconnect: true)
@@ -481,7 +530,8 @@ final class SettingsLifecycleTests: XCTestCase {
     private func makeConnectedModel(
         _ transport: LifecycleTransport,
         clock: any DeviceClock = ContinuousDeviceClock(),
-        brokerCompletionBarrier: @escaping AppModel.BrokerCompletionBarrier = {}
+        brokerCompletionBarrier: @escaping AppModel.BrokerCompletionBarrier = {},
+        connectedLifecycleBarrier: @escaping AppModel.ConnectedLifecycleBarrier = {}
     ) async throws -> AppModel {
         let suite = "WattlineTests.SettingsLifecycle.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -491,6 +541,7 @@ final class SettingsLifecycleTests: XCTestCase {
             persistence: persistence,
             transportFactory: { transport },
             brokerCompletionBarrier: brokerCompletionBarrier,
+            connectedLifecycleBarrier: connectedLifecycleBarrier,
             maintenanceClock: clock
         )
         model.requestBluetoothAfterPriming()
@@ -513,11 +564,18 @@ final class SettingsLifecycleTests: XCTestCase {
         await restart.value
     }
 
-    private func waitUntil(_ condition: @escaping @MainActor () async -> Bool) async throws {
+    private func waitUntil(
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: @escaping @MainActor () async -> Bool
+    ) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(3))
         while !(await condition()) {
-            guard clock.now < deadline else { throw AsyncTestWaitError.timedOut }
+            guard clock.now < deadline else {
+                XCTFail("Condition was not met before timeout", file: file, line: line)
+                throw AsyncTestWaitError.timedOut
+            }
             await Task.yield()
         }
     }
@@ -669,6 +727,9 @@ private actor TestDeviceClock: DeviceClock {
     private var elapsed: Duration = .zero
     private var sleepers: [Sleeper] = []
     var sleeperCount: Int { sleepers.count }
+    func hasSleeper(deadline: Duration) -> Bool {
+        sleepers.contains { $0.deadline == deadline }
+    }
 
     var now: DeviceTimestamp { elapsed }
 

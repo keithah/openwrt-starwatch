@@ -782,13 +782,16 @@ final class AppModelReconnectTests: XCTestCase {
         let result = await reconnect.value
 
         switch result {
-        case let .success(reconnectedID):
-            XCTAssertEqual(reconnectedID, id)
+        case .success:
+            XCTFail("A reconnect invalidated during lifecycle delivery must not invoke its operation")
         case let .failure(error):
-            XCTFail("Reconnect waiter did not complete successfully: \(error)")
+            XCTAssertEqual(
+                error as? Wattline.DeviceOperationBroker.BrokerError,
+                .unavailable
+            )
         }
         let countBeforeRelease = await invocationCount.value
-        XCTAssertEqual(countBeforeRelease, 1)
+        XCTAssertEqual(countBeforeRelease, 0)
         let pendingConnectionCount = await model.deviceOperationBroker.pendingConnectionCount
         XCTAssertEqual(pendingConnectionCount, 0)
         XCTAssertNil(model.brokerReconnectAttempt)
@@ -796,7 +799,7 @@ final class AppModelReconnectTests: XCTestCase {
         await lifecycle.release()
         try await eventually { await lifecycle.completedHoldCount == 1 }
         let countAfterRelease = await invocationCount.value
-        XCTAssertEqual(countAfterRelease, 1)
+        XCTAssertEqual(countAfterRelease, 0)
         XCTAssertEqual(model.connectionStatus, .disconnected("terminal during delivery"))
     }
 
@@ -1297,7 +1300,11 @@ final class AppModelReconnectTests: XCTestCase {
         await fixture.transport.emit(.battery(battery, timestamp: .seconds(1)))
         await fixture.transport.emit(.dc(dc, timestamp: .seconds(2)))
         await fixture.transport.emit(.typeC(typeC, timestamp: .seconds(3)))
-        try await Task.sleep(for: .milliseconds(200))
+        await fixture.transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
+        await model.waitForTelemetryPersistenceForTesting()
         XCTAssertNil(fixture.persistence.loadPersistedDeviceState(for: id))
         await fixture.transport.emit(.handshakeCompleted(identity, scope: scope))
 

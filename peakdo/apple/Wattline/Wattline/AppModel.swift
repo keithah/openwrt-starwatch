@@ -557,6 +557,9 @@ final class AppModel {
               selectedPeripheralID == scope.peripheralID
         else { return }
         let key = RestartDisconnectKey(generation: generation, scope: scope)
+        if let restartDisconnectObserved, restartDisconnectObserved != key {
+            return
+        }
         restartDisconnectObserved = key
         guard let waiter = restartDisconnectWaiter,
               waiter.key == key,
@@ -1220,15 +1223,6 @@ final class AppModel {
                 await terminalizeBrokerReconnect(attempt, retireScope: true)
                 return
             }
-            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
-            guard isCurrentBrokerReconnect(attempt, scope: scope),
-                  activeConnectionScope == scope
-            else { return }
-            let brokerIsReady = await deviceOperationBroker.hasConnectedContext
-            guard brokerIsReady,
-                  isCurrentBrokerReconnect(attempt, scope: scope),
-                  activeConnectionScope == scope
-            else { return }
             if let session {
                 await connectedLifecycleBarrier()
                 guard isCurrentBrokerReconnect(attempt, scope: scope),
@@ -1240,6 +1234,15 @@ final class AppModel {
                 await session.receive(.connected(scope))
             }
             guard isCurrentBrokerReconnect(attempt, scope: scope),
+                  activeConnectionScope == scope
+            else {
+                await terminalizeBrokerReconnect(attempt, retireScope: true)
+                return
+            }
+            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
+            let brokerIsReady = await deviceOperationBroker.hasConnectedContext
+            guard brokerIsReady,
+                  isCurrentBrokerReconnect(attempt, scope: scope),
                   activeConnectionScope == scope
             else {
                 await terminalizeBrokerReconnect(attempt, retireScope: true)
@@ -1550,6 +1553,13 @@ final class AppModel {
             capabilities: capabilities
         )
     }
+
+    #if DEBUG
+    func waitForTelemetryPersistenceForTesting() async {
+        let task = telemetryPersistenceTask
+        await task?.value
+    }
+    #endif
 
     private func queueTelemetryPersistence(
         update: (inout PendingTelemetryPersistence, Date) -> Void
