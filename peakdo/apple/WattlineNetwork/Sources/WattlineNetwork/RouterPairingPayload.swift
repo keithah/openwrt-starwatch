@@ -56,6 +56,10 @@ public struct RouterPairingPayload: Equatable, Sendable,
             }
             values[item.name] = value
         }
+        let allowedFields: Set<String> = ["v", "id", "host", "http", "https", "pin", "tls"]
+        guard Set(values.keys).isSubset(of: allowedFields) else {
+            throw RouterPairingPayloadError.invalidPayload
+        }
         guard values["v"] == "1" else {
             if values["v"] != nil { throw RouterPairingPayloadError.unsupportedVersion }
             throw RouterPairingPayloadError.invalidPayload
