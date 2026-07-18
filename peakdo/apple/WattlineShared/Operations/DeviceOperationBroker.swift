@@ -40,6 +40,20 @@ actor DeviceOperationBroker {
             self.session = session
             self.lifecycle = lifecycle
         }
+
+        var key: ContextKey {
+            ContextKey(
+                generation: generation,
+                peripheralID: peripheralID,
+                lifecycleID: lifecycle.id
+            )
+        }
+    }
+
+    struct ContextKey: Equatable, Sendable {
+        let generation: UInt
+        let peripheralID: UUID
+        let lifecycleID: UUID
     }
 
     struct ConnectionAttempt: Equatable, Sendable {
@@ -47,6 +61,7 @@ actor DeviceOperationBroker {
         let peripheralID: UUID
         let lifecycleID: UUID
         let token: UUID
+        let sequence: UInt64
     }
 
     enum BrokerError: Error, Equatable {
@@ -61,25 +76,44 @@ actor DeviceOperationBroker {
     }
 
     typealias ReconnectRequest = @Sendable (ConnectionAttempt) async -> Void
+    typealias ReconnectInvalidation = @Sendable (ConnectionAttempt) async -> Void
+
+    private enum WaiterPhase: Equatable, Sendable {
+        case waiting
+        case prepared
+    }
+
+    private enum WaiterFailure: Sendable {
+        case unavailable
+        case superseded
+        case timedOut
+        case canceled
+    }
 
     private struct ConnectionWaiter {
         let attempt: ConnectionAttempt
         let continuation: CheckedContinuation<Context, Error>
         let timeoutTask: Task<Void, Never>
+        var phase: WaiterPhase
     }
 
     private let clock: any DeviceClock
+    private let invalidateReconnect: ReconnectInvalidation
     private let requestReconnect: ReconnectRequest
     private var context: Context?
     private var connectedGeneration: UInt?
     private var connectedPeripheralID: UUID?
     private var connectionWaiters: [UInt: ConnectionWaiter] = [:]
+    private var invalidatingWaiters: [UInt64: ConnectionWaiter] = [:]
+    private var nextAttemptSequence: UInt64 = 0
 
     init(
         clock: any DeviceClock = ContinuousDeviceClock(),
+        invalidateReconnect: @escaping ReconnectInvalidation = { _ in },
         requestReconnect: @escaping ReconnectRequest = { _ in }
     ) {
         self.clock = clock
+        self.invalidateReconnect = invalidateReconnect
         self.requestReconnect = requestReconnect
     }
 
@@ -111,21 +145,28 @@ actor DeviceOperationBroker {
             connectedPeripheralID = nil
         }
         for waiter in supersededWaiters {
-            resolveWaiter(
+            beginInvalidation(
                 attempt: waiter.attempt,
-                result: .failure(BrokerError.superseded)
+                failure: .superseded,
+                includingPrepared: true
             )
         }
     }
 
-    func detach(generation: UInt) {
-        guard context?.generation == generation else { return }
+    func detach(_ key: ContextKey) {
+        guard context?.key == key else { return }
         context?.lifecycle.invalidate()
         context = nil
         connectedGeneration = nil
         connectedPeripheralID = nil
-        if let waiter = connectionWaiters[generation] {
-            resolveWaiter(attempt: waiter.attempt, result: .failure(BrokerError.unavailable))
+        if let waiter = connectionWaiters[key.generation],
+           waiter.attempt.peripheralID == key.peripheralID,
+           waiter.attempt.lifecycleID == key.lifecycleID {
+            beginInvalidation(
+                attempt: waiter.attempt,
+                failure: .unavailable,
+                includingPrepared: true
+            )
         }
     }
 
@@ -145,26 +186,51 @@ actor DeviceOperationBroker {
         connectedPeripheralID = nil
     }
 
+    func prepareConnected(attempt: ConnectionAttempt) -> Bool {
+        guard var waiter = connectionWaiters[attempt.generation],
+              waiter.attempt == attempt,
+              waiter.phase == .waiting,
+              let context,
+              context.generation == attempt.generation,
+              context.peripheralID == attempt.peripheralID,
+              context.lifecycle.id == attempt.lifecycleID,
+              context.lifecycle.isActive
+        else { return false }
+        waiter.phase = .prepared
+        waiter.timeoutTask.cancel()
+        connectionWaiters[attempt.generation] = waiter
+        connectedGeneration = attempt.generation
+        connectedPeripheralID = attempt.peripheralID
+        return true
+    }
+
     func handleConnectionEvent(_ event: ConnectionEvent, attempt: ConnectionAttempt) {
-        guard connectionWaiters[attempt.generation]?.attempt == attempt else { return }
+        guard let waiter = connectionWaiters[attempt.generation],
+              waiter.attempt == attempt
+        else { return }
         guard let context,
               context.generation == attempt.generation,
               context.peripheralID == attempt.peripheralID,
               context.lifecycle.id == attempt.lifecycleID,
               context.lifecycle.isActive
         else {
-            resolveWaiter(attempt: attempt, result: .failure(BrokerError.superseded))
+            beginInvalidation(
+                attempt: attempt,
+                failure: .superseded,
+                includingPrepared: true
+            )
             return
         }
         switch event {
         case .connected:
+            guard waiter.phase == .prepared else { return }
             connectedGeneration = attempt.generation
             connectedPeripheralID = attempt.peripheralID
-            resolveWaiter(attempt: attempt, result: .success(context))
+            resolvePreparedWaiter(attempt: attempt, context: context)
         case .terminal:
             connectedGeneration = nil
             connectedPeripheralID = nil
-            resolveWaiter(attempt: attempt, result: .failure(BrokerError.unavailable))
+            resolveTerminalWaiter(attempt: attempt)
         }
     }
 
@@ -228,18 +294,21 @@ actor DeviceOperationBroker {
               context.peripheralID == peripheralID,
               context.lifecycle.isActive
         else { throw BrokerError.superseded }
+        nextAttemptSequence &+= 1
         let attempt = ConnectionAttempt(
             generation: generation,
             peripheralID: peripheralID,
             lifecycleID: context.lifecycle.id,
-            token: UUID()
+            token: UUID(),
+            sequence: nextAttemptSequence
         )
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 if let existing = connectionWaiters[generation] {
-                    resolveWaiter(
+                    beginInvalidation(
                         attempt: existing.attempt,
-                        result: .failure(BrokerError.superseded)
+                        failure: .superseded,
+                        includingPrepared: true
                     )
                 }
 
@@ -254,7 +323,8 @@ actor DeviceOperationBroker {
                 connectionWaiters[generation] = ConnectionWaiter(
                     attempt: attempt,
                     continuation: continuation,
-                    timeoutTask: timeoutTask
+                    timeoutTask: timeoutTask,
+                    phase: .waiting
                 )
 
                 Task { [requestReconnect] in await requestReconnect(attempt) }
@@ -265,20 +335,80 @@ actor DeviceOperationBroker {
     }
 
     private func timeOutWaiter(attempt: ConnectionAttempt) {
-        guard connectionWaiters[attempt.generation]?.attempt == attempt else { return }
-        resolveWaiter(attempt: attempt, result: .failure(BrokerError.timedOut))
+        beginInvalidation(
+            attempt: attempt,
+            failure: .timedOut,
+            includingPrepared: false
+        )
     }
 
     private func cancelWaiter(attempt: ConnectionAttempt) {
-        guard connectionWaiters[attempt.generation]?.attempt == attempt else { return }
-        resolveWaiter(attempt: attempt, result: .failure(CancellationError()))
+        beginInvalidation(
+            attempt: attempt,
+            failure: .canceled,
+            includingPrepared: false
+        )
     }
 
-    private func resolveWaiter(attempt: ConnectionAttempt, result: Result<Context, Error>) {
+    private func beginInvalidation(
+        attempt: ConnectionAttempt,
+        failure: WaiterFailure,
+        includingPrepared: Bool
+    ) {
+        guard let current = connectionWaiters[attempt.generation],
+              current.attempt == attempt,
+              includingPrepared || current.phase == .waiting,
+              let waiter = connectionWaiters.removeValue(forKey: attempt.generation)
+        else { return }
+        waiter.timeoutTask.cancel()
+        connectedGeneration = nil
+        connectedPeripheralID = nil
+        invalidatingWaiters[attempt.sequence] = waiter
+        Task { [weak self, invalidateReconnect] in
+            await invalidateReconnect(attempt)
+            await self?.finishInvalidation(attempt: attempt, failure: failure)
+        }
+    }
+
+    private func finishInvalidation(
+        attempt: ConnectionAttempt,
+        failure: WaiterFailure
+    ) {
+        guard let waiter = invalidatingWaiters.removeValue(forKey: attempt.sequence),
+              waiter.attempt == attempt
+        else { return }
+        switch failure {
+        case .unavailable:
+            waiter.continuation.resume(throwing: BrokerError.unavailable)
+        case .superseded:
+            waiter.continuation.resume(throwing: BrokerError.superseded)
+        case .timedOut:
+            waiter.continuation.resume(throwing: BrokerError.timedOut)
+        case .canceled:
+            waiter.continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func resolvePreparedWaiter(
+        attempt: ConnectionAttempt,
+        context: Context
+    ) {
+        guard let current = connectionWaiters[attempt.generation],
+              current.attempt == attempt,
+              current.phase == .prepared,
+              let waiter = connectionWaiters.removeValue(forKey: attempt.generation)
+        else { return }
+        waiter.timeoutTask.cancel()
+        waiter.continuation.resume(returning: context)
+    }
+
+    private func resolveTerminalWaiter(attempt: ConnectionAttempt) {
         guard connectionWaiters[attempt.generation]?.attempt == attempt,
               let waiter = connectionWaiters.removeValue(forKey: attempt.generation)
         else { return }
         waiter.timeoutTask.cancel()
-        waiter.continuation.resume(with: result)
+        connectedGeneration = nil
+        connectedPeripheralID = nil
+        waiter.continuation.resume(throwing: BrokerError.unavailable)
     }
 }

@@ -12,6 +12,7 @@ final class AppModel {
     typealias BrokerPublicationBarrier = @Sendable () async -> Void
     typealias BrokerCompletionBarrier = @Sendable () async -> Void
     typealias BrokerSuccessResolutionBarrier = @Sendable () async -> Void
+    typealias BrokerReconnectRequestBarrier = @Sendable () async -> Void
     typealias ConnectedLifecycleBarrier = @Sendable () async -> Void
 
     enum Route: Equatable {
@@ -207,6 +208,7 @@ final class AppModel {
     private let brokerPublicationBarrier: BrokerPublicationBarrier
     private let brokerCompletionBarrier: BrokerCompletionBarrier
     private let brokerSuccessResolutionBarrier: BrokerSuccessResolutionBarrier
+    private let brokerReconnectRequestBarrier: BrokerReconnectRequestBarrier
     private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
     private let notificationAdapter: any NotificationCenterAdapter
     private let maintenanceClock: any DeviceClock
@@ -237,6 +239,10 @@ final class AppModel {
     private(set) var brokerReconnectAttempt: DeviceOperationBroker.ConnectionAttempt?
     private var brokerReconnectScope: DeviceConnectionScope?
     private var brokerReconnectTask: Task<Void, Never>?
+    private var highestStartedBrokerReconnectSequence: UInt64 = 0
+    private var invalidatedBrokerReconnectSequenceFloor: UInt64 = 0
+    private var brokerReconnectFallbackStatus: ConnectionStatus?
+    private var brokerReconnectFallbackRoute: Route?
     private var restartTimeoutTask: Task<Void, Never>?
     private var restartRecoveryTask: Task<Void, Never>?
     private struct RestartDisconnectKey: Equatable {
@@ -263,10 +269,15 @@ final class AppModel {
 
     @ObservationIgnored
     private(set) lazy var deviceOperationBroker = DeviceOperationBroker(
-        clock: maintenanceClock
-    ) { [weak self] attempt in
-        await self?.startBrokerReconnect(attempt)
-    }
+        clock: maintenanceClock,
+        invalidateReconnect: { [weak self] attempt in
+            await self?.invalidateBrokerReconnectOwner(attempt)
+        },
+        requestReconnect: { [weak self] attempt in
+            await self?.brokerReconnectRequestBarrier()
+            await self?.startBrokerReconnect(attempt)
+        }
+    )
 
     @ObservationIgnored
     private(set) lazy var lowBatteryNotificationCoordinator: LowBatteryNotificationCoordinator = {
@@ -286,6 +297,7 @@ final class AppModel {
         brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {},
         brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
         brokerSuccessResolutionBarrier: @escaping BrokerSuccessResolutionBarrier = {},
+        brokerReconnectRequestBarrier: @escaping BrokerReconnectRequestBarrier = {},
         connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {},
         notificationAdapter: any NotificationCenterAdapter = SystemNotificationCenterAdapter(),
         maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
@@ -299,6 +311,7 @@ final class AppModel {
         self.brokerPublicationBarrier = brokerPublicationBarrier
         self.brokerCompletionBarrier = brokerCompletionBarrier
         self.brokerSuccessResolutionBarrier = brokerSuccessResolutionBarrier
+        self.brokerReconnectRequestBarrier = brokerReconnectRequestBarrier
         self.connectedLifecycleBarrier = connectedLifecycleBarrier
         self.notificationAdapter = notificationAdapter
         self.maintenanceClock = maintenanceClock
@@ -805,6 +818,7 @@ final class AppModel {
         restartOperationID = nil
         cancelRestartDisconnectWaiter()
         if maintenanceState == .restarting { maintenanceState = .idle }
+        let detachedContextKey = brokerContextKey
         invalidateBrokerContext()
         connectionOperationKey = nil
         retireActiveConnectionScope()
@@ -813,11 +827,12 @@ final class AppModel {
         route = .scan
         connectionStatus = .disconnected(nil)
         let broker = deviceOperationBroker
-        let generation = transportGeneration
         let barrier = brokerPublicationBarrier
         brokerPublicationTask = Task {
             await barrier()
-            await broker.detach(generation: generation)
+            if let detachedContextKey {
+                await broker.detach(detachedContextKey)
+            }
         }
         guard let context = beginOperationForCurrentTransport() else { return }
         operationTask = Task { [weak self] in
@@ -1012,6 +1027,7 @@ final class AppModel {
         restartOperationID = nil
         cancelRestartDisconnectWaiter()
         if maintenanceState == .restarting { maintenanceState = .idle }
+        let detachedContextKey = brokerContextKey
         invalidateBrokerContext()
         flushPendingTelemetryPersistence()
         telemetryPersistenceTask?.cancel()
@@ -1029,7 +1045,6 @@ final class AppModel {
         if let previousTransport {
             Task { await previousTransport.disconnect() }
         }
-        let previousGeneration = transportGeneration
         transportGeneration &+= 1
         operationGeneration &+= 1
         let generation = transportGeneration
@@ -1043,8 +1058,8 @@ final class AppModel {
         let barrier = brokerPublicationBarrier
         brokerPublicationTask = Task {
             await barrier()
-            if previousGeneration != 0 {
-                await broker.detach(generation: previousGeneration)
+            if let detachedContextKey {
+                await broker.detach(detachedContextKey)
             }
             if let brokerContext {
                 await broker.attach(brokerContext)
@@ -1100,6 +1115,18 @@ final class AppModel {
         return generation
     }
 
+    private var brokerContextKey: DeviceOperationBroker.ContextKey? {
+        guard let generation = brokerContextGeneration,
+              let peripheralID = brokerContextPeripheralID,
+              let lifecycle = brokerContextLifecycle
+        else { return nil }
+        return DeviceOperationBroker.ContextKey(
+            generation: generation,
+            peripheralID: peripheralID,
+            lifecycleID: lifecycle.id
+        )
+    }
+
     private func prepareBrokerContext(
         peripheralID: UUID,
         generation: UInt
@@ -1146,11 +1173,21 @@ final class AppModel {
         brokerReconnectScope = nil
         brokerReconnectTask?.cancel()
         brokerReconnectTask = nil
+        brokerReconnectFallbackStatus = nil
+        brokerReconnectFallbackRoute = nil
     }
 
     private func startBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
+        guard attempt.sequence > invalidatedBrokerReconnectSequenceFloor,
+              attempt.sequence > highestStartedBrokerReconnectSequence
+        else { return }
+        highestStartedBrokerReconnectSequence = attempt.sequence
         if let currentAttempt = brokerReconnectAttempt, currentAttempt != attempt {
-            await terminalizeBrokerReconnect(currentAttempt, retireScope: true)
+            await terminalizeBrokerReconnect(
+                currentAttempt,
+                retireScope: true,
+                preserveFallback: true
+            )
         }
         brokerReconnectTask?.cancel()
         let task = Task { [weak self] in
@@ -1159,6 +1196,35 @@ final class AppModel {
         }
         brokerReconnectTask = task
         await task.value
+    }
+
+    private func invalidateBrokerReconnectOwner(
+        _ attempt: DeviceOperationBroker.ConnectionAttempt
+    ) {
+        invalidatedBrokerReconnectSequenceFloor = max(
+            invalidatedBrokerReconnectSequenceFloor,
+            attempt.sequence
+        )
+        guard brokerReconnectAttempt == attempt else { return }
+        let fallbackStatus = brokerReconnectFallbackStatus
+        let fallbackRoute = brokerReconnectFallbackRoute
+        if let scope = brokerReconnectScope {
+            retiredConnectionScopeIDs.insert(scope.sessionID)
+            if activeConnectionScope == scope {
+                activeConnectionScope = nil
+            }
+        }
+        brokerReconnectAttempt = nil
+        brokerReconnectScope = nil
+        let task = brokerReconnectTask
+        brokerReconnectTask = nil
+        brokerReconnectFallbackStatus = nil
+        brokerReconnectFallbackRoute = nil
+        task?.cancel()
+        if case .reconnecting = connectionStatus, let fallbackStatus {
+            connectionStatus = fallbackStatus
+            if let fallbackRoute { route = fallbackRoute }
+        }
     }
 
     private func completeConnectionOperation(_ key: ConnectionOperationKey) async {
@@ -1196,7 +1262,9 @@ final class AppModel {
 
     private func requestBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
         reconnectAttemptsForTesting += 1
-        guard transportGeneration == attempt.generation,
+        guard attempt.sequence == highestStartedBrokerReconnectSequence,
+              attempt.sequence > invalidatedBrokerReconnectSequenceFloor,
+              transportGeneration == attempt.generation,
               selectedPeripheralID == attempt.peripheralID,
               let transport
         else {
@@ -1204,6 +1272,10 @@ final class AppModel {
             return
         }
 
+        if brokerReconnectFallbackStatus == nil {
+            brokerReconnectFallbackStatus = connectionStatus
+            brokerReconnectFallbackRoute = route
+        }
         brokerReconnectAttempt = attempt
         let scope = await transport.makeConnectionScope(for: attempt.peripheralID)
         guard isCurrentBrokerReconnect(attempt, scope: nil) else { return }
@@ -1243,11 +1315,9 @@ final class AppModel {
                 await terminalizeBrokerReconnect(attempt, retireScope: true)
                 return
             }
-            await deviceOperationBroker.markConnected(
-                peripheralID: attempt.peripheralID,
-                generation: attempt.generation
-            )
-            guard isCurrentBrokerReconnect(attempt, scope: scope),
+            let prepared = await deviceOperationBroker.prepareConnected(attempt: attempt)
+            guard prepared,
+                  isCurrentBrokerReconnect(attempt, scope: scope),
                   activeConnectionScope == scope
             else {
                 await terminalizeBrokerReconnect(attempt, retireScope: true)
@@ -1270,6 +1340,8 @@ final class AppModel {
             brokerReconnectAttempt = nil
             brokerReconnectScope = nil
             brokerReconnectTask = nil
+            brokerReconnectFallbackStatus = nil
+            brokerReconnectFallbackRoute = nil
         } catch {
             guard brokerReconnectAttempt == attempt else { return }
             connectionStatus = .disconnected(String(describing: error))
@@ -1282,6 +1354,8 @@ final class AppModel {
         scope: DeviceConnectionScope?
     ) -> Bool {
         guard !Task.isCancelled,
+              attempt.sequence == highestStartedBrokerReconnectSequence,
+              attempt.sequence > invalidatedBrokerReconnectSequenceFloor,
               transportGeneration == attempt.generation,
               selectedPeripheralID == attempt.peripheralID,
               brokerReconnectAttempt == attempt
@@ -1294,7 +1368,8 @@ final class AppModel {
 
     private func terminalizeBrokerReconnect(
         _ attempt: DeviceOperationBroker.ConnectionAttempt,
-        retireScope: Bool
+        retireScope: Bool,
+        preserveFallback: Bool = false
     ) async {
         guard brokerReconnectAttempt == attempt else { return }
         let scope = brokerReconnectScope
@@ -1309,6 +1384,10 @@ final class AppModel {
             }
         }
         task?.cancel()
+        if !preserveFallback {
+            brokerReconnectFallbackStatus = nil
+            brokerReconnectFallbackRoute = nil
+        }
         await deviceOperationBroker.handleConnectionEvent(.terminal, attempt: attempt)
     }
 

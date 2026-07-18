@@ -551,6 +551,57 @@ final class AppModelReconnectTests: XCTestCase {
         await publication.release()
     }
 
+    func testDelayedReturnToScanDetachCannotDetachSameGenerationReplacementContext() async throws {
+        let transport = ControlledConnectionTransport()
+        let publication = AsyncCallBarrier()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport },
+            brokerPublicationBarrier: { await publication.waitIfHeld() }
+        )
+        let broker = model.deviceOperationBroker
+        let firstID = UUID()
+        let replacementID = UUID()
+
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: firstID, localName: "First", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0, deliverConnectedEvent: false)
+        try await eventually {
+            guard model.connectionStatus == .connected else { return false }
+            return await broker.hasConnectedContext
+        }
+
+        await publication.holdNext()
+        model.returnToScan()
+        try await eventually { await publication.isBlocked }
+
+        model.choose(.init(id: replacementID, localName: "Replacement", rssi: -42, mode: .application))
+        try await eventually { await transport.connectCount == 2 }
+        await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
+        try await eventually {
+            guard model.connectionStatus == .connected else { return false }
+            return await broker.hasConnectedContext
+        }
+
+        await publication.release()
+        try await eventually { await publication.completedHoldCount == 1 }
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
+
+        XCTAssertEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(model.route, .connected)
+        let brokerReadyAfterOldDetach = await broker.hasConnectedContext
+        XCTAssertTrue(brokerReadyAfterOldDetach)
+        let connectedID = try await broker.withConnection(to: replacementID) { $0.peripheralID }
+        XCTAssertEqual(connectedID, replacementID)
+    }
+
     func testTransportReplacementRejectsOldBrokerContextWhileAttachPublicationIsHeld() async throws {
         let first = RecordingTransport(connectResult: .success)
         let second = RecordingTransport(connectResult: .success)
@@ -736,6 +787,110 @@ final class AppModelReconnectTests: XCTestCase {
         try await eventually { model.connectionStatus == .disconnected("current terminal") }
     }
 
+    func testBrokerReconnectTimeoutInvalidatesOwnerBeforeLateConnectSuccess() async throws {
+        let transport = ControlledConnectionTransport()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport }
+        )
+        let broker = model.deviceOperationBroker
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        let initialScope = await transport.scope(at: 0)
+        await transport.emit(.disconnected(initialScope, TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+
+        let reconnect = Task { () -> Result<UUID, Error> in
+            do {
+                return .success(try await broker.withConnection(
+                    to: id,
+                    timeout: .milliseconds(150)
+                ) { $0.peripheralID })
+            } catch {
+                return .failure(error)
+            }
+        }
+        try await eventually { await transport.connectCount == 2 }
+
+        switch await reconnect.value {
+        case .success:
+            XCTFail("The suspended reconnect must time out")
+        case let .failure(error):
+            XCTAssertEqual(error as? Wattline.DeviceOperationBroker.BrokerError, .timedOut)
+        }
+        XCTAssertNil(model.brokerReconnectAttempt)
+        let pendingAfterTimeout = await broker.pendingConnectionCount
+        XCTAssertEqual(pendingAfterTimeout, 0)
+
+        await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
+
+        XCTAssertEqual(model.connectionStatus, .disconnected("link lost"))
+        XCTAssertEqual(model.route, .connected)
+        let brokerReadyAfterLateSuccess = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReadyAfterLateSuccess)
+        XCTAssertNil(model.brokerReconnectAttempt)
+    }
+
+    func testBrokerReconnectCallerCancellationInvalidatesOwnerBeforeLateConnectSuccess() async throws {
+        let transport = ControlledConnectionTransport()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport }
+        )
+        let broker = model.deviceOperationBroker
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        let initialScope = await transport.scope(at: 0)
+        await transport.emit(.disconnected(initialScope, TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+
+        let reconnect = Task {
+            try await broker.withConnection(to: id) { $0.peripheralID }
+        }
+        try await eventually { await transport.connectCount == 2 }
+        reconnect.cancel()
+        do {
+            _ = try await reconnect.value
+            XCTFail("The canceled reconnect must not invoke its operation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertNil(model.brokerReconnectAttempt)
+        let pendingAfterCancellation = await broker.pendingConnectionCount
+        XCTAssertEqual(pendingAfterCancellation, 0)
+
+        await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
+
+        XCTAssertEqual(model.connectionStatus, .disconnected("link lost"))
+        XCTAssertEqual(model.route, .connected)
+        let brokerReadyAfterLateSuccess = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReadyAfterLateSuccess)
+        XCTAssertNil(model.brokerReconnectAttempt)
+    }
+
     func testBrokerReconnectTerminalDuringConnectedLifecycleDeliveryNeverStrandsWaiter() async throws {
         let transport = ControlledConnectionTransport()
         let lifecycle = AsyncCallBarrier()
@@ -877,6 +1032,77 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(finalInvocationCount, 0)
         XCTAssertEqual(finalPendingConnectionCount, 0)
         XCTAssertEqual(model.connectionStatus, .disconnected("terminal during broker completion"))
+    }
+
+    func testReversedBrokerReconnectRequestDeliveryKeepsNewestAttemptAsSoleOwner() async throws {
+        let transport = ControlledConnectionTransport()
+        let requestDelivery = AsyncCallBarrier()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport },
+            brokerReconnectRequestBarrier: { await requestDelivery.waitIfHeld() }
+        )
+        let broker = model.deviceOperationBroker
+        let id = UUID()
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await eventually { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0)
+        try await eventually { model.connectionStatus == .connected }
+        let initialScope = await transport.scope(at: 0)
+        await transport.emit(.disconnected(initialScope, TransportFailure(message: "link lost")))
+        try await eventually { model.connectionStatus == .disconnected("link lost") }
+
+        await requestDelivery.holdNext()
+        let first = Task { () -> Result<UUID, Error> in
+            do {
+                return .success(try await broker.withConnection(to: id) { $0.peripheralID })
+            } catch {
+                return .failure(error)
+            }
+        }
+        try await eventually { await requestDelivery.isBlocked }
+        let second = Task { () -> Result<UUID, Error> in
+            do {
+                return .success(try await broker.withConnection(to: id) { $0.peripheralID })
+            } catch {
+                return .failure(error)
+            }
+        }
+        try await eventually { await transport.connectCount == 2 }
+
+        await requestDelivery.release()
+        try await eventually { await requestDelivery.completedHoldCount == 1 }
+        await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
+
+        switch await first.value {
+        case .success:
+            XCTFail("The first waiter must remain superseded")
+        case let .failure(error):
+            XCTAssertEqual(error as? Wattline.DeviceOperationBroker.BrokerError, .superseded)
+        }
+        switch await second.value {
+        case let .success(connectedID):
+            XCTAssertEqual(connectedID, id)
+        case let .failure(error):
+            XCTFail("The newest waiter must remain the sole owner: \(error)")
+        }
+
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
+        let connectCount = await transport.connectCount
+        XCTAssertEqual(connectCount, 2)
+        XCTAssertEqual(model.connectionStatus, .connected)
+        XCTAssertNil(model.brokerReconnectAttempt)
+
+        if connectCount > 2 {
+            await transport.succeedConnect(at: 2, deliverConnectedEvent: false)
+        }
     }
 
     func testOldSamePeripheralConnectSuccessCannotResolveCurrentBrokerAttempt() async throws {
