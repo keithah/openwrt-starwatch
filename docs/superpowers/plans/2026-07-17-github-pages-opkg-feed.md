@@ -10,6 +10,12 @@
 
 ---
 
+> **Implemented security correction:** The deployable feed is signed with a
+> dedicated usign key. The installer pins its public key without disabling
+> OpenWrt's global signature checks. Manual deployment is supported for the
+> initial release as well as version-tag deployment; both use the same full
+> verification gate.
+
 ### Task 1: Test the bootstrap installer before adding it
 
 **Files:**

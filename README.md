@@ -5,12 +5,37 @@ routers. A static Go daemon reads the dish's local gRPC API, combines dish and
 router-side WAN telemetry, keeps tiered history, evaluates alerts, exposes a
 token-authenticated REST/WebSocket API, and serves a responsive embedded
 dashboard. No cloud account or Internet connection is required.
+After installation, monitoring and administration remain entirely local; the
+one-line installer itself downloads packages from GitHub Pages.
 
 The dashboard is available directly on port 9633, from **Services →
 Starwatch** in LuCI, or from **Applications → Starwatch** in the GL.iNet panel.
 The admin-panel packages pass the generated token to the dashboard through a
 small authenticated RPC bridge, so the router login remains the access
 boundary.
+
+## Quick install
+
+The public 0.1.0 feed currently supports `aarch64_cortex-a53` routers. Connect
+over SSH as root and run:
+
+```sh
+wget -qO- https://keithah.github.io/openwrt-starwatch/install.sh | sh
+```
+
+The installer checks the opkg architecture before changing anything. GL.iNet
+SDK4 routers receive `starwatchd` plus `gl-app-starwatch`; other supported
+OpenWrt routers receive `starwatchd` plus `luci-app-starwatch`. It manages only
+the `starwatch` entry in `/etc/opkg/customfeeds.conf`, preserving every other
+feed and all existing Starwatch configuration. It never forces a downgrade or
+reinstall. The feed index is signed with a dedicated Starwatch key installed
+alongside OpenWrt's existing opkg keys; global signature checking stays enabled.
+
+After installation, open `http://<router-address>:9633`, **Services →
+Starwatch** in LuCI, or **Applications → Starwatch** in the GL.iNet panel.
+Direct access prompts for the token shown by
+`uci get starwatch.main.token`; the LuCI and GL.iNet launchers supply it
+through their authenticated admin sessions.
 
 ## Dashboard
 
@@ -98,23 +123,10 @@ the LuCI launcher with `opkg install luci-theme-bootstrap`. The GL admin-panel
 menu is loaded at login, so log out and back in once after installing
 `gl-app-starwatch` for **Applications → Starwatch** to appear.
 
-## Install and upgrade from an opkg feed
+## Upgrade and publish the opkg feed
 
-On a supported `aarch64_cortex-a53` router, install Starwatch and the matching
-admin panel in one command:
-
-```sh
-wget -qO- https://keithah.github.io/openwrt-starwatch/install.sh | sh
-```
-
-The installer detects GL.iNet SDK4 and installs `gl-app-starwatch`; other
-supported OpenWrt systems receive `luci-app-starwatch`. It preserves other
-custom feeds, does not force downgrades or reinstalls, and leaves Starwatch
-configuration and routing untouched. Unsupported architectures stop before
-making changes.
-
-For later releases, refresh the public feed and upgrade the packages selected
-by your router type:
+The installer registers the public GitHub Pages feed. Upgrade through normal
+opkg version ordering with the package selected for your router type:
 
 ```sh
 opkg update
@@ -126,8 +138,14 @@ Maintainers can stage the exact static GitHub Pages feed artifact locally:
 
 ```sh
 make -C package feed-artifact
-# package/out/pages/{Packages,Packages.gz,install.sh,*.ipk}
+# unsigned local staging: package/out/pages/{Packages,Packages.gz,install.sh,*.ipk}
 ```
+
+Version-tag and explicit manual GitHub Actions runs publish that verified
+artifact to `https://keithah.github.io/openwrt-starwatch/`. Pull requests and
+ordinary `main` pushes run the same build and tests without deploying. The
+deployed artifact also contains `Packages.sig` and the public verification key;
+the private signing key remains in GitHub Actions secrets.
 
 The GL.iNet Plug-ins page can use the same feed. mwan3 is optional; Starwatch
 reports its status and offers an explicit failover-assist flow when installed.

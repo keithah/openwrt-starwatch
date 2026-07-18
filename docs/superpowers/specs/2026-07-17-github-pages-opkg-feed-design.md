@@ -30,6 +30,7 @@ wget -qO- https://keithah.github.io/openwrt-starwatch/install.sh | sh
 ```
 
 The script requires root, `opkg`, `wget`, and the supported architecture. It
+writes the pinned Starwatch usign public key under `/etc/opkg/keys`, then
 writes exactly one marked `src/gz starwatch ...` entry in the standard
 `/etc/opkg/customfeeds.conf` file, containing the GitHub Pages feed URL. It
 then runs `opkg update` and installs or upgrades the daemon plus
@@ -48,13 +49,16 @@ GitHub Actions builds the release IPKs, runs the existing feed-index generator,
 and publishes a Pages artifact containing:
 
 - `Packages` and `Packages.gz`
+- `Packages.sig` and the Starwatch public verification key
 - the three release IPKs
 - `install.sh`
 
-The Pages deployment is tied to an explicit version tag. The bootstrap script
-is also published from Pages so it and the feed are released together. A tag
-must not publish until the Go tests, vet, Linux ARM64 build, package build, and
-feed-index validation succeed.
+The Pages deployment runs for an explicit version tag or manual release action.
+The bootstrap script is also published from Pages so it and the feed are
+released together. Deployment must not begin until the Go tests, vet, Linux
+ARM64 build, package build, feed-index validation, signing, and signature
+verification succeed. The private signing key remains in GitHub Actions
+secrets; the repository and Pages artifact contain only the public key.
 
 ## Installer behavior and failures
 
@@ -75,6 +79,8 @@ documented manual recovery command rather than the bootstrap script.
   package action.
 - A package/feed test confirms `Packages.gz` references each published IPK and
   that the Pages artifact contains the installer.
+- A signed-artifact check verifies `Packages.sig` against the pinned public key;
+  the installer test confirms unrelated opkg keys remain untouched.
 - A GitHub Actions workflow test builds the artifact without publishing on
   pull requests; tag pushes publish the Pages feed.
 - README instructions are checked against the installer URL and package names.

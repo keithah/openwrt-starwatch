@@ -310,6 +310,10 @@ covered by an in-process fake gRPC server:
 7. Dashboard navigation and personalization: an icon rail groups the existing
    cards into seven sections, while Overview visibility and density stay local
    to each browser.
+8. Distribution: an architecture-checked one-line installer selects the
+   GL.iNet or LuCI integration and registers the verified GitHub Pages opkg
+   feed without changing unrelated feeds, disabling signature checks, or
+   forcing package versions.
 
 ---
 
@@ -317,7 +321,7 @@ covered by an in-process fake gRPC server:
 
 ### 10.1 Tech & delivery
 
-- Self-contained bundle (Preact + htm + **uPlot** for charts, all vendored — **zero external/CDN requests**; the router may be offline). Built at dev time, shipped as static files in the `starwatchd` package (`/usr/share/starwatch/www`), served by the daemon.
+- Self-contained bundle (Preact + htm + **uPlot** for charts, all vendored — **zero external/CDN requests**; the router may be offline). Static ES modules are embedded in the `starwatchd` binary and served directly by the daemon; no frontend build or CDN is required.
 - Live data over `/api/ws`; graphs scroll at 1 Hz like Speedify's.
 - Dark theme default matching admin-panel surroundings; light theme via `prefers-color-scheme`. Fully responsive: single column ≤ 720 px (Speedify's responsive behavior).
 
@@ -378,7 +382,7 @@ All wattline-verified mechanics carry over unchanged:
   - `starwatchd_<v>_aarch64_cortex-a53.ipk` — daemon, procd init, UCI defaults + token generator, SPA assets, postinst enables + **restarts** service (upgrade picks up new binary).
   - `luci-app-starwatch_<v>_all.ipk` — menu.d + rpcd ACL + iframe view.
   - `gl-app-starwatch_<v>_all.ipk` — oui menu.d + compiled view bundle.
-- **Feed:** `make -C package VERSION=x.y.z feed` → `package/out/{*.ipk, Packages, Packages.gz}`; host anywhere HTTP; router adds one `customfeeds.conf` line; upgrades via `opkg upgrade` / GL Plug-ins page. Version must be bumped in lockstep (Makefile injects it into control, filename, index — wattline-verified on GL-X3000).
+- **Feed:** `make -C package VERSION=x.y.z feed-artifact` stages exactly the current three IPKs, `Packages`, `Packages.gz`, and the bootstrap installer for local inspection. GitHub Actions signs `Packages` with a dedicated usign key and publishes the artifact, signature, and public key at `https://keithah.github.io/openwrt-starwatch/` on version tags or an explicit manual deployment. The installer pins that public key without disabling global opkg signature checks, accepts only `aarch64_cortex-a53` for 0.1.0, selects `gl-app-starwatch` for GL.iNet SDK4 or `luci-app-starwatch` otherwise, and maintains only the named `starwatch` entry in `/etc/opkg/customfeeds.conf`. Upgrades use normal opkg version ordering; version metadata, filenames, and the feed index advance together.
 - **Dev install:** pipe over ssh (`cat > /tmp/… `) since dropbear lacks scp — documented one-liner.
 - **Dependencies:** none beyond OpenWrt base (static Go binary; no bluez-equivalent this time). mwan3 optional.
 

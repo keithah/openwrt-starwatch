@@ -4,6 +4,9 @@ This document defines the token-authenticated API served by `starwatchd`. It
 documents the released 0.1.0 surface, including diagnostics, battery, and
 curated Starlink-router management.
 
+Installation, package selection, and opkg feed instructions live in the
+project README; this document is the wire contract after the daemon is running.
+
 Starwatch is local-network-first. It does not use a Starlink account or cloud
 API, and it does not claim account, billing, activation, plan, or global outage
 state.
@@ -30,8 +33,10 @@ state.
 - Mutation success codes are endpoint-specific. Dish controls,
   speed-test start, and alert-test enqueue return `202`; config PUT, failover
   assist POST, and token regeneration return `200`. A `202` means the
-  immediate operation was accepted or its upstream call returned without error,
-  not that every requested field was compared with a subsequent readback.
+  immediate operation was accepted or its upstream call returned without error.
+  The router mutation endpoints are deliberately stronger: their documented
+  `202` is returned only after the required configuration or live-client
+  readback confirms the requested change.
 
 ## Authentication
 
@@ -663,7 +668,8 @@ The SPA includes:
 - Power current/min/mean/max, 24-hour chart, kWh/day, snow-melt/sleep state,
   source badge, and the optional derived battery-runtime panel.
 - Satellite/GPS receiver context without claiming satellite identity.
-- A Network view with full client MAC/IP/name, band/interface, signal, SNR,
+- Topology-B cards in the Controls section with full client MAC/IP/name,
+  band/interface, signal, SNR,
   link/throughput rates, traffic counters, lease/activity state, and ping health.
 - A Radios & Interfaces view with bands, channels, widths, temperatures,
   traffic, Ethernet, bridge, WAN, and partial-telemetry reasons.
