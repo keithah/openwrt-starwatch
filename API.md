@@ -1,7 +1,7 @@
 # Starwatch HTTP API
 
 This document defines the token-authenticated API served by `starwatchd`. It
-documents the released 0.1.0 surface, including diagnostics, battery, and
+documents the released 0.1.1 surface, including diagnostics, battery, and
 curated Starlink-router management.
 
 Installation, package selection, and opkg feed instructions live in the

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-07-18
 
 - Makes dashboard telemetry strictly dish-gRPC sourced, with no router-counter
   or WAN-probe fallback. When the terminal is unreachable, the dashboard shows

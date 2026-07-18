@@ -4,7 +4,7 @@
 |---|---|
 | **Product** | Starwatch — Starlink dish monitoring + management for OpenWrt routers, with WAN-link health and failover assistance |
 | **Platforms** | OpenWrt 23.05+ (LuCI) and GL.iNet SDK4 firmware (native **Applications** panel entry). First target: GL-X3000 Spitz AX (`aarch64_cortex-a53`); arch is a build knob |
-| **Status** | Released v0.1.0 — 2026-07-17 |
+| **Status** | Released v0.1.1 — 2026-07-18 |
 | **Components** | `starwatchd` (Go daemon) · `luci-app-starwatch` · `gl-app-starwatch` · opkg feed |
 | **Sources** | Starlink local gRPC API (community-documented: sparky8512/starlink-grpc-tools, clarkzjw/starlink-grpc-golang protos) · Speedify OpenWrt integration (support.speedify.com articles 918/922/235/241/1066, sagar.se teardown) · starbar.app feature set · `peakdo/router` (wattline) packaging + GL-panel learnings, verified on a GL-X3000 |
 
@@ -382,7 +382,7 @@ All wattline-verified mechanics carry over unchanged:
   - `starwatchd_<v>_aarch64_cortex-a53.ipk` — daemon, procd init, UCI defaults + token generator, SPA assets, postinst enables + **restarts** service (upgrade picks up new binary).
   - `luci-app-starwatch_<v>_all.ipk` — menu.d + rpcd ACL + iframe view.
   - `gl-app-starwatch_<v>_all.ipk` — oui menu.d + compiled view bundle.
-- **Feed:** `make -C package VERSION=x.y.z feed-artifact` stages exactly the current three IPKs, `Packages`, `Packages.gz`, and the bootstrap installer for local inspection. GitHub Actions signs `Packages` with a dedicated usign key and publishes the artifact, signature, and public key at `https://keithah.github.io/openwrt-starwatch/` on version tags or an explicit manual deployment. The installer pins that public key without disabling global opkg signature checks, accepts only `aarch64_cortex-a53` for 0.1.0, selects `gl-app-starwatch` for GL.iNet SDK4 or `luci-app-starwatch` otherwise, and maintains only the named `starwatch` entry in `/etc/opkg/customfeeds.conf`. Upgrades use normal opkg version ordering; version metadata, filenames, and the feed index advance together.
+- **Feed:** `make -C package VERSION=x.y.z feed-artifact` stages exactly the current three IPKs, `Packages`, `Packages.gz`, and the bootstrap installer for local inspection. GitHub Actions signs `Packages` with a dedicated usign key and publishes the artifact, signature, and public key at `https://keithah.github.io/openwrt-starwatch/` on version tags or an explicit manual deployment. The installer pins that public key without disabling global opkg signature checks, accepts only `aarch64_cortex-a53` for the 0.1.x releases, selects `gl-app-starwatch` for GL.iNet SDK4 or `luci-app-starwatch` otherwise, and maintains only the named `starwatch` entry in `/etc/opkg/customfeeds.conf`. Upgrades use normal opkg version ordering; version metadata, filenames, and the feed index advance together.
 - **Dev install:** pipe over ssh (`cat > /tmp/… `) since dropbear lacks scp — documented one-liner.
 - **Dependencies:** none beyond OpenWrt base (static Go binary; no bluez-equivalent this time). mwan3 optional.
 
