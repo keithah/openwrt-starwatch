@@ -87,7 +87,10 @@ final class DeviceSessionTests: XCTestCase {
         _ = try await session.perform(.setDC(true))
         await clock.waitForSleepers(1)
         await clock.advance(by: .seconds(3))
-        await Task.yield()
+        let didTimeOut = await eventually {
+            await session.state.lastError == "Device did not confirm the requested change."
+        }
+        XCTAssertTrue(didTimeOut)
         let timedOut = await session.state
         XCTAssertEqual(timedOut.lastError, "Device did not confirm the requested change.")
 
@@ -109,7 +112,10 @@ final class DeviceSessionTests: XCTestCase {
         await clock.waitForSleepers(1)
 
         await clock.advance(by: .seconds(11))
-        await Task.yield()
+        let didBecomeStale = await eventually {
+            await session.state.freshness == .stale
+        }
+        XCTAssertTrue(didBecomeStale)
         state = await session.state
         XCTAssertEqual(state.freshness, .stale)
     }
@@ -134,7 +140,10 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertEqual(state.freshness, .live)
 
         await sessionClock.advance(by: .seconds(2))
-        await Task.yield()
+        let didBecomeStale = await eventually {
+            await session.state.freshness == .stale
+        }
+        XCTAssertTrue(didBecomeStale)
         state = await session.state
         XCTAssertEqual(state.freshness, .stale)
     }
@@ -231,7 +240,10 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertNil(state.lastError)
 
         await clock.advance(by: .seconds(2))
-        await Task.yield()
+        let didTimeOut = await eventually {
+            await session.state.pendingMutations.isEmpty
+        }
+        XCTAssertTrue(didTimeOut)
         state = await session.state
         XCTAssertTrue(state.pendingMutations.isEmpty)
         XCTAssertEqual(state.lastError, "Device did not confirm the requested change.")
@@ -252,7 +264,10 @@ final class DeviceSessionTests: XCTestCase {
         _ = try await session.perform(.setDC(true))
         await clock.waitForSleepers(2)
         await clock.advance(by: .seconds(3))
-        await Task.yield()
+        let didTimeOut = await eventually {
+            await session.state.pendingMutations.isEmpty
+        }
+        XCTAssertTrue(didTimeOut)
 
         let state = await session.state
         XCTAssertTrue(state.pendingMutations.isEmpty)
@@ -328,7 +343,10 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertEqual(state.freshness, .live)
 
         await clock.advance(by: .seconds(9))
-        await Task.yield()
+        let didBecomeStale = await eventually {
+            await session.state.freshness == .stale
+        }
+        XCTAssertTrue(didBecomeStale)
         state = await session.state
         XCTAssertEqual(state.freshness, .stale)
     }
@@ -372,9 +390,10 @@ final class DeviceSessionTests: XCTestCase {
         let operation = Task { try await session.perform(.setDC(true)) }
         await clock.waitForSleepers(2)
         await clock.advance(by: .seconds(3))
-        for _ in 0..<100 where !(await session.state.pendingMutations.isEmpty) {
-            await Task.yield()
+        let didTimeOut = await eventually {
+            await session.state.pendingMutations.isEmpty
         }
+        XCTAssertTrue(didTimeOut)
 
         var state = await session.state
         XCTAssertTrue(state.pendingMutations.isEmpty)
@@ -402,6 +421,19 @@ final class DeviceSessionTests: XCTestCase {
         let isRunning = await session.isEventConsumerRunning
         XCTAssertEqual(state.dc, status)
         XCTAssertTrue(isRunning)
+    }
+
+    private func eventually(
+        timeout: Duration = .seconds(1),
+        condition: @escaping () async -> Bool
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !(await condition()) {
+            guard clock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return true
     }
 }
 
