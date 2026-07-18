@@ -8,13 +8,14 @@
 import {
   deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
   friendlyModel, hasMotors, assembleSeries, outageBarLayout,
+  mergeLiveFrame, liveFrameValues,
   clientMutationPayload, clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry,
 } from './logic.js';
 import {dashboardSection, normalizeOverviewPreferences, visibleOverviewCards} from './dashboard-model.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 import {APIError} from './api.js';
 import {h, render} from './vendor/preact.module.js';
-import {ClientManagement, WifiEditor} from './cards.js';
+import {ClientManagement, GraphCard, WifiEditor} from './cards.js';
 
 const results = [];
 const assert = (name, condition) => {
@@ -28,6 +29,17 @@ try {
   assert('searching outage', deriveState({topology: 'full', dish_reachable: true, dish: {outage: {cause: 'NO_DOWNLINK'}}}) === 'Searching');
   assert('obstruction state', deriveState({topology: 'full', dish_reachable: true, dish: {obstruction: {currently_obstructed: true}}}) === 'Obstructed');
   assert('online state', deriveState({topology: 'full', dish_reachable: true, dish: {}}) === 'Online');
+  const disconnectedFrame = {topology: 'wan-only', dish_reachable: false, dish: null, wan: {router_down_bps: 1234}};
+  const disconnectedSnapshot = mergeLiveFrame({topology: 'full', dish_reachable: true, dish: {latency_ms: 42}}, disconnectedFrame);
+  assert('WAN-only live frame clears stale dish state', disconnectedSnapshot.topology === 'wan-only' && disconnectedSnapshot.dish_reachable === false && disconnectedSnapshot.dish === null);
+  const disconnectedValues = liveFrameValues(disconnectedFrame);
+  assert('WAN-only live frame appends router but not dish telemetry', disconnectedValues.latency_ms == null && disconnectedValues.dish_down_bps == null && disconnectedValues.router_down_bps === 1234);
+  const telemetryHost = document.createElement('div');
+  document.body.append(telemetryHost);
+  render(h(GraphCard, {tab: 'throughput', span: '15m', responses: [], dishReachable: false, topology: 'wan-only', onTab: () => {}, onSpan: () => {}}), telemetryHost);
+  assert('WAN-only telemetry card identifies absent Starlink source', telemetryHost.querySelector('h2')?.textContent === 'Telemetry' && telemetryHost.textContent.includes('No Starlink dish detected'));
+  render(null, telemetryHost);
+  telemetryHost.remove();
   assert('zero remains available', availabilityValue(0, {available: true}).available === true);
   assert('reason is retained', availabilityValue(3, {available: false, reason: 'not on this dish'}).reason === 'not on this dish');
   assert('local to UTC wraps', localMinutesToUTC(30, -120) === 1350);

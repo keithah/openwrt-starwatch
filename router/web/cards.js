@@ -39,10 +39,12 @@ const graphLabels = {
   latency_ms: 'Latency', drop_rate: 'Loss', wan_probe_loss: 'WAN loss', power_w: 'Power',
 };
 
-export function GraphCard({tab, span, responses, onTab, onSpan, loading}) {
+export function GraphCard({tab, span, responses, onTab, onSpan, loading, topology, dishReachable = true}) {
   const aligned = assembleSeries(responses || []);
+  const wanOnly = topology === 'wan-only' || dishReachable === false;
   aligned.series.forEach(item => { item.name = graphLabels[item.name] || item.name; });
-  return html`<${Card} title="Live telemetry" eyebrow="1 Hz · local dish API" className="graph-card full-width">
+  return html`<${Card} title="Telemetry" eyebrow=${wanOnly ? 'WAN-only · no Starlink dish' : '1 Hz · source-labeled'} className="graph-card full-width">
+    ${wanOnly && html`<p class="control-banner warning">No Starlink dish detected on this WAN. Router/WAN history may still be shown.</p>`}
     <div class="toolbar"><div class="tabs" role="tablist">${['Throughput','Latency','Loss','Power'].map(name => html`<button class=${tab === name.toLowerCase() ? 'active' : ''} onClick=${() => onTab(name.toLowerCase())}>${name}</button>`)}</div>
       <div class="span-picker">${['15m','3h','24h','7d','30d'].map(value => html`<button class=${span === value ? 'active' : ''} onClick=${() => onSpan(value)}>${value}</button>`)}</div></div>
     ${loading ? html`<div class="loading-line"></div>` : html`<${Plot} aligned=${aligned} kind=${tab} />`}

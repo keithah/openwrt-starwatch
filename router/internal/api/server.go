@@ -306,11 +306,27 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 			if s.deps.WAN != nil {
 				wan = s.deps.WAN.Snapshot()
 			}
+			// The poller deliberately retains the last dish snapshot so status and
+			// history can explain a failure. A retained snapshot is not a live
+			// sample, though: publishing it after reachability is lost would make a
+			// non-Starlink WAN look like it is still producing dish telemetry.
+			liveDish := snapshot.Dish
+			if !snapshot.DishReachable {
+				liveDish = nil
+			}
 			if !s.writeWS(connection, struct {
-				T    int64          `json:"t"`
-				Dish *dish.Status   `json:"dish,omitempty"`
-				WAN  dish.WANStatus `json:"wan"`
-			}{T: s.deps.Now().Unix(), Dish: snapshot.Dish, WAN: wan}) {
+				T             int64          `json:"t"`
+				Topology      dish.Topology  `json:"topology"`
+				DishReachable bool           `json:"dish_reachable"`
+				Dish          *dish.Status   `json:"dish"`
+				WAN           dish.WANStatus `json:"wan"`
+			}{
+				T:             s.deps.Now().Unix(),
+				Topology:      snapshot.Topology,
+				DishReachable: snapshot.DishReachable,
+				Dish:          liveDish,
+				WAN:           wan,
+			}) {
 				return
 			}
 		case message, ok := <-messages:

@@ -204,8 +204,11 @@ Queues a test notification through configured webhook and ntfy delivery.
 
 ### `GET /api/ws`
 
-Sends one-Hz frames containing `t`, `dish`, and `wan`, plus asynchronous
-`event` messages. Slow clients are disconnected when their bounded queue fills.
+Sends one-Hz frames containing `t`, `topology`, `dish_reachable`, `dish`, and
+`wan`, plus asynchronous `event` messages. `dish` is explicitly `null` when the
+terminal is unreachable; retained status/history values are never republished
+as current dish samples. Slow clients are disconnected when their bounded queue
+fills.
 
 ## Diagnostics and battery (0.1.0)
 

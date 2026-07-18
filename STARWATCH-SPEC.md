@@ -289,7 +289,7 @@ Bearer token (`Authorization: Bearer <token>` or `?token=` for the iframe bootst
 | `/api/wan` | GET | Interfaces, probe stats, mwan3 state |
 | `/api/wan/failover-assist` | GET/POST | GET: proposed UCI diff; POST: apply (§6.4) |
 | `/api/config` | GET/PUT | Daemon settings (writes go through UCI + reload) |
-| `/api/ws` | WS | 1 Hz status frames `{t, dish:{...}, wan:{...}}` + async `{event:...}` messages |
+| `/api/ws` | WS | 1 Hz status frames `{t, topology, dish_reachable, dish, wan}` + async `{event:...}` messages; `dish:null` when unreachable prevents retained samples from appearing live |
 
 ### 9.1 0.1.0 delivered phases
 
@@ -362,7 +362,7 @@ cards still auto-hide when their data source is absent.
 
 | Situation | Behavior |
 |---|---|
-| Dish unreachable at startup | Topology C: WAN-only mode, retry every 60 s, setup hint card (check bypass mode / host route) |
+| Dish unreachable at startup or WAN is not Starlink | Topology C: WAN-only mode, retry every 60 s, setup hint card (check WAN, bypass mode, or host route); never append retained dish values as live samples |
 | Dish rebooting (user-initiated) | Expected-outage window: `dish_unreachable` alert suppressed for 5 min after our own reboot command |
 | Unknown/new dish model | Parse what's present; unavailable-field machinery (§4.2) handles the rest; hardware card shows raw `hardware_version` string |
 | Router clock wrong at boot (common: no RTC) | History writes deferred until time is sane (year ≥ 2025 or NTP synced); dish `get_history` backfill re-anchors sample times |

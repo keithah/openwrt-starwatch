@@ -3,7 +3,7 @@ import htm from './vendor/htm.module.js';
 import {APIError, apiFetch, bootstrapToken, getHistory, LiveClient, storeToken} from './api.js';
 import {GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCard, ControlsCard, SleepScheduleCard, SpeedCard, AlertsCard, HardwareCard, StarlinkRouterCard, ClientManagementCard} from './cards.js';
 import {TokenView, SettingsView, EventsView} from './views.js';
-import {clientMutationPayload, clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry} from './logic.js';
+import {clientMutationPayload, clientMutationShouldRetry, liveFrameValues, mergeLiveFrame, wifiMutationPayload, wifiMutationShouldRetry} from './logic.js';
 import {CustomizePanel, IconRail, loadOverviewPreferences, resetOverviewPreferences, saveOverviewPreferences, SectionHeader} from './dashboard.js';
 import {dashboardSection, normalizeOverviewPreferences, sectionDefinition, visibleOverviewCards} from './dashboard-model.js';
 
@@ -49,13 +49,13 @@ class App extends Component {
   onFrame = frame => {
     if (frame.event) { this.refreshEvents(); return; }
     if (frame.snapshot) { const snapshot={...frame.snapshot,wan:frame.snapshot.wan||this.state.wan}; this.setState({snapshot,wan:snapshot.wan}); return; }
-    const snapshot={...this.state.snapshot,dish:frame.dish||this.state.snapshot.dish,wan:frame.wan||this.state.wan};
+    const snapshot=mergeLiveFrame(this.state.snapshot, frame);
     this.setState({snapshot,wan:snapshot.wan});
     if (['15m','3h'].includes(this.state.span)) this.appendLive(frame);
   };
 
   appendLive(frame) {
-    const values={dish_down_bps:frame.dish?.downlink_throughput_bps,dish_up_bps:frame.dish?.uplink_throughput_bps,router_down_bps:frame.wan?.router_down_bps,router_up_bps:frame.wan?.router_up_bps,latency_ms:frame.dish?.latency_ms,drop_rate:frame.dish?.drop_rate,wan_probe_rtt_ms:frame.wan?.probe_rtt_30s_ms,wan_probe_loss:frame.wan?.probe_loss_30s,power_w:frame.dish?.power_w};
+    const values=liveFrameValues(frame);
     const cutoff=(frame.t||Date.now()/1000)-(this.state.span==='15m'?900:10800);
     const responses=this.state.graphResponses.map(response=>({...response,points:[...(response.points||[]),...(values[response.series]==null?[]:[{time:new Date((frame.t||Date.now()/1000)*1000).toISOString(),value:values[response.series]}])].filter(point=>new Date(point.time).getTime()/1000>=cutoff)}));
     this.setState({graphResponses:responses});
@@ -138,7 +138,7 @@ class App extends Component {
   }
 
   cardRegistry(state) { return [
-    {id:'live-telemetry',label:'Live telemetry',available:true,render:()=>html`<${GraphCard} tab=${state.tab} span=${state.span} responses=${state.graphResponses} onTab=${this.setTab} onSpan=${this.setSpan} loading=${state.graphLoading}/>`},
+    {id:'live-telemetry',label:'Telemetry',available:true,render:()=>html`<${GraphCard} tab=${state.tab} span=${state.span} responses=${state.graphResponses} onTab=${this.setTab} onSpan=${this.setSpan} loading=${state.graphLoading} topology=${state.snapshot.topology} dishReachable=${state.snapshot.dish_reachable}/>`},
     {id:'obstruction',label:'Obstruction',available:!!(state.snapshot.dish?.obstruction || state.grid),render:()=>html`<${ObstructionCard} snapshot=${state.snapshot} grid=${state.grid} onClear=${this.clearMap}/>`},
     {id:'outage-timeline',label:'Outage timeline',available:true,render:()=>html`<${OutageCard} outages=${state.outages}/>`},
     {id:'alignment',label:'Alignment',available:!!state.snapshot.dish?.alignment,render:()=>html`<${AlignmentCard} snapshot=${state.snapshot}/>`},

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Stops retained dish samples from being republished as live after the terminal
+  becomes unreachable. WAN-only mode now explicitly clears the live dish source
+  while preserving separately labeled router/WAN history.
+
 ## 0.1.0 — 2026-07-17
 
 - Adds diagnostic summaries, GPS/PNT and disablement status fields, and

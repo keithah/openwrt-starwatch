@@ -39,11 +39,13 @@ through their authenticated admin sessions.
 
 ## Dashboard
 
-The dashboard keeps live terminal, WAN, and power information in one local
-view. Its icon rail groups the available cards into focused sections, while
-Overview visibility and compact density stay private to the current browser.
+The dashboard keeps source-labeled terminal, WAN, and power information in one
+local view. When the physical WAN is not connected to Starlink, the dashboard
+reports WAN-only mode and does not present retained dish samples as live data.
+Its icon rail groups the available cards into focused sections, while Overview
+visibility and compact density stay private to the current browser.
 
-![Starwatch desktop Overview showing the icon rail, live telemetry, WAN health, and power](docs/images/dashboard-overview.png)
+![Starwatch desktop Overview showing the icon rail, source-labeled telemetry, WAN health, and power](docs/images/dashboard-overview.png)
 
 <p align="center">
   <img src="docs/images/dashboard-mobile.png" width="390" alt="Starwatch mobile Overview with the section-menu button, live status, and telemetry graph">

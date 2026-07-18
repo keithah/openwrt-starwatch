@@ -412,7 +412,7 @@ func TestWebSocketAuthCadenceAndAsyncEvents(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	bus := liveevent.NewBus()
 	handler := NewServer(Deps{
-		Token: "secret", Snapshot: snapshotStub{snapshot: dish.Snapshot{Dish: &dish.Status{LatencyMS: 42}}},
+		Token: "secret", Snapshot: snapshotStub{snapshot: dish.Snapshot{Topology: dish.TopologyFull, DishReachable: true, Dish: &dish.Status{LatencyMS: 42}}},
 		History: history.NewStore(1), WAN: wanStub{snapshot: dish.WANStatus{Interface: "wan0"}}, Live: bus,
 		Now: func() time.Time { return now }, WSInterval: 10 * time.Millisecond,
 	})
@@ -434,14 +434,16 @@ func TestWebSocketAuthCadenceAndAsyncEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var frame struct {
-		T    int64          `json:"t"`
-		Dish *dish.Status   `json:"dish"`
-		WAN  dish.WANStatus `json:"wan"`
+		T             int64          `json:"t"`
+		Topology      dish.Topology  `json:"topology"`
+		DishReachable bool           `json:"dish_reachable"`
+		Dish          *dish.Status   `json:"dish"`
+		WAN           dish.WANStatus `json:"wan"`
 	}
 	if err := wsjson.Read(ctx, connection, &frame); err != nil {
 		t.Fatal(err)
 	}
-	if frame.T != now.Unix() || frame.Dish == nil || frame.Dish.LatencyMS != 42 || frame.WAN.Interface != "wan0" {
+	if frame.T != now.Unix() || frame.Topology != dish.TopologyFull || !frame.DishReachable || frame.Dish == nil || frame.Dish.LatencyMS != 42 || frame.WAN.Interface != "wan0" {
 		t.Fatalf("frame: %+v", frame)
 	}
 	bus.Publish(liveevent.Message{Kind: "alert_fired", At: now, Data: map[string]any{"alert": "path_degraded"}})
@@ -453,6 +455,37 @@ func TestWebSocketAuthCadenceAndAsyncEvents(t *testing.T) {
 	}
 	if async.Event.Kind != "alert_fired" {
 		t.Fatalf("async event: %+v", async)
+	}
+}
+
+func TestWebSocketDoesNotPublishStaleDishAsLiveWhenWANOnly(t *testing.T) {
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{snapshot: dish.Snapshot{
+			Topology: dish.TopologyWANOnly, DishReachable: false,
+			Dish: &dish.Status{LatencyMS: 42},
+		}},
+		History: history.NewStore(1), WSInterval: 10 * time.Millisecond,
+	})
+	defer handler.Close()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	connection, _, err := websocket.Dial(context.Background(), "ws"+server.URL[len("http"):]+"/api/ws?token=secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var frame struct {
+		Topology      dish.Topology `json:"topology"`
+		DishReachable bool          `json:"dish_reachable"`
+		Dish          *dish.Status  `json:"dish"`
+	}
+	if err := wsjson.Read(ctx, connection, &frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Topology != dish.TopologyWANOnly || frame.DishReachable || frame.Dish != nil {
+		t.Fatalf("WAN-only frame leaked stale dish telemetry: %+v", frame)
 	}
 }
 

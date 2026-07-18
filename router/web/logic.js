@@ -14,6 +14,32 @@ export function deriveState(snapshot = {}) {
   return 'Online';
 }
 
+export function mergeLiveFrame(snapshot = {}, frame = {}) {
+  const hasDish = Object.prototype.hasOwnProperty.call(frame, 'dish');
+  return {
+    ...snapshot,
+    topology: frame.topology ?? snapshot.topology,
+    dish_reachable: frame.dish_reachable ?? snapshot.dish_reachable,
+    dish: hasDish ? frame.dish : snapshot.dish,
+    wan: frame.wan ?? snapshot.wan,
+  };
+}
+
+export function liveFrameValues(frame = {}) {
+  const dish = frame.dish_reachable === false ? null : frame.dish;
+  return {
+    dish_down_bps: dish?.downlink_throughput_bps,
+    dish_up_bps: dish?.uplink_throughput_bps,
+    router_down_bps: frame.wan?.router_down_bps,
+    router_up_bps: frame.wan?.router_up_bps,
+    latency_ms: dish?.latency_ms,
+    drop_rate: dish?.drop_rate,
+    wan_probe_rtt_ms: frame.wan?.probe_rtt_30s_ms,
+    wan_probe_loss: frame.wan?.probe_loss_30s,
+    power_w: dish?.power_w,
+  };
+}
+
 export function availabilityValue(value, availability) {
   if (availability && availability.available === false) {
     return {available: false, value: null, reason: availability.reason || 'Unavailable on this dish'};
