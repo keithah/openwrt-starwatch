@@ -435,7 +435,11 @@ func TestMetadataRefreshUpdatesHistoryPowerSource(t *testing.T) {
 	defer cancel()
 	go poller.Run(ctx)
 
-	waitFor(t, func() bool { return historyCalls.Load() >= 2 })
+	waitFor(t, func() bool {
+		snapshot := poller.Snapshot()
+		return historyCalls.Load() >= 2 && snapshot.Dish != nil && snapshot.Dish.PowerW != nil &&
+			*snapshot.Dish.PowerW >= 42 && snapshot.Dish.PowerSource == "history"
+	})
 	snapshot := poller.Snapshot()
 	if snapshot.Dish == nil || snapshot.Dish.PowerW == nil || *snapshot.Dish.PowerW < 42 || snapshot.Dish.PowerSource != "history" {
 		t.Fatalf("metadata power fallback: %+v", snapshot.Dish)
