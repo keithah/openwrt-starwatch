@@ -288,7 +288,7 @@ git commit -m "test: harden restart lifecycle coverage"
 **Interfaces:**
 - Produces: a green baseline required by every later plan.
 
-- [ ] **Step 1: Run all package suites**
+- [x] **Step 1: Run all package suites**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineCore
@@ -298,7 +298,7 @@ swift test --package-path peakdo/apple/WattlineNetwork
 
 Expected: zero failures; record exact executed counts.
 
-- [ ] **Step 2: Run app, widget, and UI suites for real**
+- [x] **Step 2: Run app, widget, and UI suites for real**
 
 ```bash
 xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline \
@@ -311,7 +311,7 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
 
 Expected: real XCTest execution with zero failures, not build-for-testing output.
 
-- [ ] **Step 3: Run baseline audits**
+- [x] **Step 3: Run baseline audits**
 
 ```bash
 rg -n 'URLSession|NWBrowser|NWConnection|import Network|import Security' \
@@ -323,7 +323,7 @@ git diff --check
 
 Expected: no Core/UI networking hits, no new OTA/Timer surface, and no whitespace errors.
 
-- [ ] **Step 4: Commit verification evidence and stop**
+- [x] **Step 4: Commit verification evidence and stop**
 
 ```bash
 git add peakdo/apple/docs/superpowers/plans/2026-07-17-wattline-baseline-health.md
@@ -331,3 +331,5 @@ git commit -m "test: verify Wattline completion baseline"
 ```
 
 Report the unique pre-fix failures, exact post-fix counts, simulator UUID/runtime, environment launch errors encountered, and any external-only checks. Stop for Milestone 2 approval.
+
+**Verification evidence (2026-07-18):** package suites: WattlineCore 156/156, WattlineUI 26/26, and WattlineNetwork 97/97. Full real `Wattline` XCTest (result bundle `/tmp/wattline-task4-full-portable.xcresult`) passed 148/148 with 0 failed/skipped; the real `WattlineWidgets` XCTest rerun passed 148/148 with 0 failed/skipped (`/tmp/wattline-task4-widgets.xcresult`). Destination: `Wattline-Tests` iPhone 17e, UUID `81744CE3-2DBE-4986-9B27-D61D1E10A63D`, iOS 26.5 / build 23F77. Core/UI networking audit had no matches. OTA/Timer audit had only six existing UI-test negative assertions/test names containing `Timers`; it had no `api.peakdo.ca`, `scheduledOnOff`, or `TimerRow` matches. `git diff --check` passed. The original timeout/UI blockers were fixed and reviewed in approved range `4021b5fb..2f720163` (including `925790f1` and `2f720163`); unused-clone/debugger-version diagnostics remain non-fatal simulator environment noise.
