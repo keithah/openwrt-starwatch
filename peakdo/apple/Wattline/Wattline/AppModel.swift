@@ -1374,7 +1374,10 @@ final class AppModel {
         }
         scanMessage = nil
         connectionStatus = .connected
-        if maintenanceState == .restarting {
+        if maintenanceState == .restarting,
+           let restartDisconnectObserved,
+           restartDisconnectObserved.generation == transportGeneration,
+           restartDisconnectObserved.scope != scope {
             restartOperationID = nil
             restartTimeoutTask?.cancel()
             restartTimeoutTask = nil

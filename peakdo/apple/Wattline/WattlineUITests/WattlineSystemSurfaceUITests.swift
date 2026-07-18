@@ -13,7 +13,7 @@ final class WattlineSystemSurfaceUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["System Surfaces"].exists)
         XCTAssertTrue(app.switches["Live Activity while charging"].exists)
         XCTAssertTrue(app.switches["Live Activity while discharging"].exists)
-        XCTAssertTrue(app.switches["Low-battery notifications"].exists)
+        XCTAssertTrue(app.switches["Low-battery notifications"].scrollToExistence(in: app))
         XCTAssertFalse(app.tabBars.buttons["Timers"].exists)
     }
 }

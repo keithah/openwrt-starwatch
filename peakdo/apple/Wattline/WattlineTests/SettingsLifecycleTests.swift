@@ -189,6 +189,41 @@ final class SettingsLifecycleTests: XCTestCase {
         }
     }
 
+    func testLateConnectedForRestartedScopeDoesNotCancelRestart() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(reconnectAfterRestart: true, deferReconnect: true)
+        let model = try await makeConnectedModel(transport, clock: clock)
+        let connectedScopes = await transport.scopes
+        let originalScope = try XCTUnwrap(connectedScopes.first)
+        let restart = Task { await model.restartDevice() }
+
+        try await waitUntil { await transport.pendingDisconnectScope == originalScope }
+        try await waitUntil { await clock.sleeperCount == 1 }
+        let operationID = try XCTUnwrap(model.restartOperationIDForTesting)
+
+        await transport.emit(.connected(originalScope))
+        await transport.emit(.discovered(LifecycleTransport.eventBarrierDevice))
+        try await waitUntil {
+            model.discoveredDevices.contains { $0.id == LifecycleTransport.eventBarrierDevice.id }
+        }
+
+        guard model.maintenanceState == .restarting,
+              model.restartOperationIDForTesting == operationID
+        else {
+            await clock.advance(by: .seconds(1))
+            await restart.value
+            return XCTFail("A late connected event for the pre-restart scope canceled the owned restart")
+        }
+
+        await transport.releasePendingDisconnect()
+        await restart.value
+        try await waitUntil { await transport.reconnectIsWaiting }
+        await transport.releaseReconnect()
+        try await waitUntil {
+            model.connectionStatus == .connected && model.maintenanceState == .idle
+        }
+    }
+
     func testRestartAwaitsAsynchronousDisconnectDeliveredAfterWriteError() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(

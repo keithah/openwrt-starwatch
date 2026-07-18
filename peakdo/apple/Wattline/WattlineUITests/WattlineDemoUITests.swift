@@ -87,7 +87,9 @@ final class WattlineDemoUITests: XCTestCase {
             try capture("tab-\(tab.lowercased())", app: app)
         }
 
-        app.buttons["Connect a real device"].tap()
+        let connectRealDevice = app.buttons["Connect a real device"]
+        XCTAssertTrue(connectRealDevice.scrollToExistence(in: app))
+        connectRealDevice.tap()
         XCTAssertFalse(app.staticTexts["DEMO"].waitForExistence(timeout: 2))
     }
 
