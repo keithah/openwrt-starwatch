@@ -91,7 +91,7 @@ final class RouterAppWiringTests: XCTestCase {
         )
 
         model.connectViaRouter(saved)
-        await transport.waitUntilConnected()
+        try await waitUntil { await transport.connectCount == 1 }
 
         XCTAssertEqual(model.activeTransportKind, .router)
         XCTAssertEqual(routerFactoryCount, 1)
@@ -234,9 +234,6 @@ private actor RouterSelectionTransport: DeviceTransport {
     func refreshTelemetry() async throws {}
     func synchronizeDeviceTime() async throws {}
     func readDeviceTimeIfSupported() async throws -> Date? { nil }
-    func waitUntilConnected() async {
-        while connectCount == 0 { await Task.yield() }
-    }
 }
 
 private struct RouterNoopLiveActivityAdapter: LiveActivityAdapter {

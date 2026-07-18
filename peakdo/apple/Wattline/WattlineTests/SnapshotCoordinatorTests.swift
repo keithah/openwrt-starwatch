@@ -8,7 +8,7 @@ final class SnapshotCoordinatorTests: XCTestCase {
     func testConfirmedTelemetryPersistsAndPendingMutationDoesNotChangeSnapshot() async throws {
         let backend = RecordingSnapshotBackend()
         let store = SharedSnapshotStore(backend: backend)
-        let coordinator = SnapshotCoordinator(store: store, now: { Date(timeIntervalSince1970: 100) })
+        let coordinator = Wattline.SnapshotCoordinator(store: store, now: { Date(timeIntervalSince1970: 100) })
         let id = UUID()
         let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: "Demo", mode: .application, rawFeatures: 7, capabilities: DeviceCapabilities(features: []))
         let battery = try! BatteryStatus(frame: Data(repeating: 0, count: 16))
@@ -17,13 +17,13 @@ final class SnapshotCoordinatorTests: XCTestCase {
         await coordinator.flushPendingWrites()
         let persisted = await store.read()
         XCTAssertNotNil(persisted)
-        let writesAfterTelemetry = await backend.writeCount
+        let writesAfterTelemetry = backend.writeCount
 
         var pending = state
         pending.pendingMutations = [PendingMutation(id: UUID(), reconciler: .dcEnabled(false), startedAt: .zero, timeout: .seconds(3))]
         _ = await coordinator.receive(state: pending, identity: identity, capabilities: identity.capabilities, generation: 1)
         await coordinator.flushPendingWrites()
-        let pendingWrites = await backend.writeCount
+        let pendingWrites = backend.writeCount
         XCTAssertEqual(pendingWrites, writesAfterTelemetry, "pending control state must not persist a snapshot")
     }
 
@@ -31,7 +31,7 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let backend = RecordingSnapshotBackend()
         let store = SharedSnapshotStore(backend: backend)
         let now = Date(timeIntervalSince1970: 100)
-        let coordinator = SnapshotCoordinator(store: store, now: { now })
+        let coordinator = Wattline.SnapshotCoordinator(store: store, now: { now })
         let id = UUID()
         let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: nil, mode: .application, capabilities: DeviceCapabilities(features: []))
         let first = DeviceState(identity: identity, connection: .live, freshness: .live)
@@ -40,21 +40,21 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let stale = DeviceState(identity: identity, connection: .disconnected, freshness: .stale)
         let staleEvent = await coordinator.receive(state: stale, identity: identity, capabilities: identity.capabilities, generation: 1)
         XCTAssertNil(staleEvent)
-        let writes = await backend.writeCount
+        let writes = backend.writeCount
         XCTAssertEqual(writes, 1)
     }
 
     func testDemoModeNeverWritesInjectedStoreAndEntitlementDeclaresGroup() async throws {
         let backend = RecordingSnapshotBackend()
         let store = SharedSnapshotStore(backend: backend)
-        let coordinator = SnapshotCoordinator(store: store, now: Date.init, isDemo: true)
+        let coordinator = Wattline.SnapshotCoordinator(store: store, now: Date.init, isDemo: true)
         let id = UUID()
         let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: nil, mode: .application, capabilities: DeviceCapabilities(features: []))
         _ = await coordinator.receive(state: DeviceState(identity: identity), identity: identity, capabilities: identity.capabilities, generation: 1)
         await coordinator.flushPendingWrites()
-        let writes = await backend.writeCount
+        let writes = backend.writeCount
         XCTAssertEqual(writes, 0)
-        let entitlement = try String(contentsOfFile: "Wattline/Wattline.entitlements")
+        let entitlement = try String(contentsOf: TestProjectFiles.url("Wattline/Wattline.entitlements"), encoding: .utf8)
         XCTAssertTrue(entitlement.contains("group.com.keithah.wattline"))
     }
 
@@ -68,15 +68,15 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: "Demo", mode: .application, rawFeatures: 7, capabilities: DeviceCapabilities(features: []))
         let accepted = DeviceState(identity: identity, connection: .live, freshness: .live)
         model.applySessionState(accepted)
-        try await Task.sleep(for: .milliseconds(30))
-        let acceptedWrites = await backend.writeCount
+        try await waitUntil { backend.writeCount == 1 }
+        let acceptedWrites = backend.writeCount
         XCTAssertEqual(acceptedWrites, 1, "accepted session telemetry must reach the coordinator")
 
         var pending = accepted
         pending.pendingMutations = [PendingMutation(id: UUID(), reconciler: .dcEnabled(false), startedAt: .zero, timeout: .seconds(3))]
         model.applySessionState(pending)
-        try await Task.sleep(for: .milliseconds(30))
-        let pendingWrites = await backend.writeCount
+        try await waitUntil { backend.writeCount == acceptedWrites }
+        let pendingWrites = backend.writeCount
         XCTAssertEqual(pendingWrites, 1, "control/pending state must not write a snapshot")
     }
 
@@ -90,19 +90,20 @@ final class SnapshotCoordinatorTests: XCTestCase {
     func testAppModelAppliesWidgetReloadDecisionForAcceptedTelemetry() async throws {
         let backend = RecordingSnapshotBackend()
         let coordinator = Wattline.SnapshotCoordinator(store: SharedSnapshotStore(backend: backend), now: { Date(timeIntervalSince1970: 200) })
-        var reloads = 0
-        let adapter = Wattline.WidgetReloadAdapter { reloads += 1 }
+        let reloads = ReloadRecorder()
+        let adapter = Wattline.WidgetReloadAdapter { reloads.record() }
         let model = AppModel(persistence: AppPersistence(defaults: UserDefaults(suiteName: "WidgetReload-\(UUID().uuidString)!")!), snapshotCoordinator: coordinator, widgetReloadAdapter: adapter)
         let id = UUID()
         let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: "Demo", mode: .application, capabilities: DeviceCapabilities(features: []))
         model.applySessionState(DeviceState(identity: identity, connection: .live, freshness: .live))
-        try await Task.sleep(for: .milliseconds(40))
-        XCTAssertEqual(reloads, 1)
+        try await waitUntil { reloads.count == 1 }
+        XCTAssertEqual(reloads.count, 1)
     }
 
     func testAppModelFansOutAcceptedSnapshotToLiveActivityCoordinator() async throws {
         let backend = RecordingSnapshotBackend()
-        let coordinator = Wattline.SnapshotCoordinator(store: SharedSnapshotStore(backend: backend), now: { Date(timeIntervalSince1970: 200) })
+        let timestamps = SnapshotTimestampSequence(startingAt: 200)
+        let coordinator = Wattline.SnapshotCoordinator(store: SharedSnapshotStore(backend: backend), now: { timestamps.next() })
         let activity = SnapshotActivityAdapter()
         let model = AppModel(
             persistence: AppPersistence(defaults: UserDefaults(suiteName: "ActivityFanout-\(UUID().uuidString)")!),
@@ -113,9 +114,9 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let identity = DeviceIdentitySnapshot(peripheralID: id, advertisedName: "Demo", mode: .application, capabilities: DeviceCapabilities(features: []))
         let battery = try BatteryStatus(frame: batteryFrame(level: 80, status: .charging))
         model.applySessionState(DeviceState(identity: identity, connection: .live, freshness: .live, battery: battery))
-        try await Task.sleep(for: .milliseconds(80))
+        try await waitUntil { await activity.hasEventCount(1) }
         model.applySessionState(DeviceState(identity: identity, connection: .live, freshness: .live, battery: try BatteryStatus(frame: batteryFrame(level: 79, status: .charging))))
-        try await Task.sleep(for: .milliseconds(80))
+        try await waitUntil { await activity.hasEventCount(2) }
         let events = await activity.events
         XCTAssertEqual(events.map(\.0), [.request, .update])
     }
@@ -128,7 +129,7 @@ final class SnapshotCoordinatorTests: XCTestCase {
         let model = AppModel(persistence: persistence, snapshotCoordinator: nil)
         model.handleDeepLink(URL(string: "wattline://dashboard")!)
         XCTAssertEqual(model.route, .connected)
-        let plist = try String(contentsOfFile: "Wattline/Info.plist")
+        let plist = try String(contentsOf: TestProjectFiles.url("Wattline/Info.plist"), encoding: .utf8)
         XCTAssertTrue(plist.contains("<string>wattline</string>"))
     }
 }
@@ -144,6 +145,8 @@ private func batteryFrame(level: UInt8, status: PowerFlow) -> Data {
 private actor SnapshotActivityAdapter: LiveActivityAdapter {
     enum Event: Equatable { case request, update, end }
     private(set) var events: [(Event, WattlineActivityAttributes.ContentState?)] = []
+
+    func hasEventCount(_ count: Int) -> Bool { events.count == count }
     func request(state: WattlineActivityAttributes.ContentState) async throws { events.append((.request, state)) }
     func update(state: WattlineActivityAttributes.ContentState) async throws { events.append((.update, state)) }
     func end() async { events.append((.end, nil)) }
@@ -157,4 +160,39 @@ private final class RecordingSnapshotBackend: @unchecked Sendable, SnapshotKeyVa
     func data(forKey key: String) -> Data? { lock.lock(); defer { lock.unlock() }; return values[key] }
     func set(_ data: Data, forKey key: String) { lock.lock(); defer { lock.unlock() }; writes += 1; values[key] = data }
     func removeValue(forKey key: String) { lock.lock(); defer { lock.unlock() }; values[key] = nil }
+}
+
+private final class ReloadRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func record() {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+    }
+}
+
+private final class SnapshotTimestampSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var timestamp: TimeInterval
+
+    init(startingAt timestamp: TimeInterval) {
+        self.timestamp = timestamp
+    }
+
+    func next() -> Date {
+        lock.lock()
+        defer {
+            timestamp += 1
+            lock.unlock()
+        }
+        return Date(timeIntervalSince1970: timestamp)
+    }
 }

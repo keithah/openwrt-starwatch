@@ -2,14 +2,8 @@ import Foundation
 import XCTest
 
 final class Phase2ProjectConfigurationTests: XCTestCase {
-    private var root: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // WattlineTests
-            .deletingLastPathComponent() // Wattline
-    }
-
     private func projectText() throws -> String {
-        try String(contentsOf: root.appendingPathComponent("Wattline.xcodeproj/project.pbxproj"), encoding: .utf8)
+        try String(contentsOf: TestProjectFiles.url("Wattline.xcodeproj/project.pbxproj"), encoding: .utf8)
     }
 
     /// Return one Xcode object, rather than searching the entire project. This keeps
@@ -82,14 +76,14 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
     }
 
     func testAppGroupAndLiveActivitiesPlistConfiguration() throws {
-        let entitlements = try String(contentsOf: root.appendingPathComponent("WattlineWidgets/WattlineWidgets.entitlements"), encoding: .utf8)
+        let entitlements = try String(contentsOf: TestProjectFiles.url("WattlineWidgets/WattlineWidgets.entitlements"), encoding: .utf8)
         XCTAssertTrue(entitlements.contains("<string>group.com.keithah.wattline</string>"))
-        let plist = try NSDictionary(contentsOf: root.appendingPathComponent("Wattline/Info.plist"), error: ())
+        let plist = try NSDictionary(contentsOf: TestProjectFiles.url("Wattline/Info.plist"), error: ())
         XCTAssertEqual(plist["NSSupportsLiveActivities"] as? Bool, true)
     }
 
     func testWidgetExtensionDeclaresWidgetKitExtensionPoint() throws {
-        let plist = try NSDictionary(contentsOf: root.appendingPathComponent("WattlineWidgets/Info.plist"), error: ())
+        let plist = try NSDictionary(contentsOf: TestProjectFiles.url("WattlineWidgets/Info.plist"), error: ())
         XCTAssertEqual(plist["CFBundleName"] as? String, "WattlineWidgets")
         XCTAssertEqual(plist["CFBundleExecutable"] as? String, "$(EXECUTABLE_NAME)")
         let extensionDictionary = try XCTUnwrap(plist["NSExtension"] as? NSDictionary)
