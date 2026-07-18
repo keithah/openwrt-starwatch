@@ -153,8 +153,8 @@ public enum RouterHostValidator {
 
 public protocol RouterHostKeyValueStore: Sendable {
     func data(forKey key: String) -> Data?
-    func set(_ data: Data, forKey key: String)
-    func removeValue(forKey key: String)
+    func set(_ data: Data, forKey key: String) throws
+    func removeValue(forKey key: String) throws
 }
 
 public actor RouterHostStore {
@@ -182,15 +182,15 @@ public actor RouterHostStore {
         current.removeAll { $0.id == host.id }
         current.append(host)
         current.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        backend.set(try JSONEncoder().encode(current), forKey: key)
+        try backend.set(try JSONEncoder().encode(current), forKey: key)
     }
 
     public func remove(id: UUID) throws {
         let remaining = hosts().filter { $0.id != id }
         if remaining.isEmpty {
-            backend.removeValue(forKey: key)
+            try backend.removeValue(forKey: key)
         } else {
-            backend.set(try JSONEncoder().encode(remaining), forKey: key)
+            try backend.set(try JSONEncoder().encode(remaining), forKey: key)
         }
     }
 }

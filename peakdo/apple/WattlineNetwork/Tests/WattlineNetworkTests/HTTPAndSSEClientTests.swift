@@ -23,6 +23,21 @@ final class HTTPAndSSEClientTests: XCTestCase {
         XCTAssertEqual(URLProtocolFixture.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
     }
 
+    func testEnrollmentRequestSendsNoAuthorizationHeader() async throws {
+        URLProtocolFixture.response = .init(status: 201, body: Data(#"{"ok":true}"#.utf8))
+        let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        let (_, response) = try await client.publicRequest(
+            "POST",
+            "/api/v1/pair",
+            body: Data(#"{"pin":"123456","label":"Phone"}"#.utf8)
+        )
+
+        XCTAssertEqual(response.statusCode, 201)
+        XCTAssertNil(URLProtocolFixture.lastRequest?.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual(URLProtocolFixture.lastRequest?.value(forHTTPHeaderField: "Content-Type"), "application/json")
+    }
+
     func testHTTPClientThrowsNon2xxNetworkError() async {
         URLProtocolFixture.response = .init(status: 503, body: Data("down".utf8))
         let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())

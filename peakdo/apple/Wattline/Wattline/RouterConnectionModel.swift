@@ -32,6 +32,9 @@ final class RouterConnectionModel {
         _ endpoint: RouterEndpoint,
         _ credentials: any RouterCredentialProvider
     ) throws -> any DeviceTransport
+    typealias EnrollmentClientFactory = @MainActor (
+        _ endpoint: RouterEndpoint
+    ) throws -> RouterEnrollmentClient
 
     private(set) var savedHosts: [RouterHostMetadata] = []
     private(set) var loadError: String?
@@ -39,15 +42,18 @@ final class RouterConnectionModel {
 
     private let hostStore: RouterHostStore
     private let credentialStore: RouterCredentialStore
+    private let enrollmentClientFactory: EnrollmentClientFactory
     private let transportFactory: TransportFactory
 
     init(
         hostStore: RouterHostStore,
         credentialStore: RouterCredentialStore,
+        enrollmentClientFactory: @escaping EnrollmentClientFactory,
         transportFactory: @escaping TransportFactory
     ) {
         self.hostStore = hostStore
         self.credentialStore = credentialStore
+        self.enrollmentClientFactory = enrollmentClientFactory
         self.transportFactory = transportFactory
     }
 
@@ -56,7 +62,14 @@ final class RouterConnectionModel {
         let credentials = RouterCredentialStore(backend: KeychainRouterCredentialBackend())
         return RouterConnectionModel(
             hostStore: hosts,
-            credentialStore: credentials
+            credentialStore: credentials,
+            enrollmentClientFactory: { endpoint in
+                let session = try RouterURLSessionFactory.make(endpoint: endpoint)
+                let baseURL = try RouterURLSessionFactory.baseURL(for: endpoint)
+                return RouterEnrollmentClient(
+                    httpClient: HTTPClient(baseURL: baseURL, session: session)
+                )
+            }
         ) { endpoint, credentials in
             let session = try RouterURLSessionFactory.make(endpoint: endpoint)
             let baseURL = try RouterURLSessionFactory.baseURL(for: endpoint)
@@ -96,15 +109,40 @@ final class RouterConnectionModel {
             deviceID: deviceID,
             certificateFingerprint: certificateFingerprint
         )
-        try await credentialStore.saveToken(token, for: host.endpoint)
-        do {
-            try await hostStore.save(host)
-        } catch {
-            try? await credentialStore.deleteToken(for: host.endpoint)
-            throw error
+        return try await persist(host: host, token: token)
+    }
+
+    @discardableResult
+    func enroll(
+        payload: RouterPairingPayload,
+        displayName: String,
+        reachability: RouterHostReachability,
+        allowsInsecureWAN: Bool = false,
+        label: String
+    ) async throws -> RouterHostMetadata {
+        let client = try enrollmentClientFactory(payload.enrollmentEndpoint)
+        let result = try await client.enroll(
+            pin: payload.pin,
+            label: label,
+            expectedDeviceID: payload.deviceID,
+            expectedFingerprint: payload.certificateFingerprint
+        )
+        var components = URLComponents()
+        components.scheme = result.endpoint.scheme
+        components.host = result.endpoint.host
+        components.port = result.endpoint.port
+        guard let address = components.string else {
+            throw RouterEnrollmentError.invalidResponse
         }
-        await reloadSavedHosts()
-        return host
+        let host = try RouterHostValidator.validate(
+            address,
+            displayName: displayName,
+            reachability: reachability,
+            allowsInsecureWAN: allowsInsecureWAN,
+            deviceID: result.deviceID,
+            certificateFingerprint: result.endpoint.certificateFingerprint
+        )
+        return try await persist(host: host, token: result.token)
     }
 
     func remove(_ host: RouterHostMetadata) async throws {
@@ -115,6 +153,18 @@ final class RouterConnectionModel {
 
     func makeTransport(for host: RouterHostMetadata) throws -> any DeviceTransport {
         try transportFactory(host.endpoint, credentialStore)
+    }
+
+    private func persist(host: RouterHostMetadata, token: String) async throws -> RouterHostMetadata {
+        try await credentialStore.saveToken(token, for: host.endpoint)
+        do {
+            try await hostStore.save(host)
+        } catch {
+            try? await credentialStore.deleteToken(for: host.endpoint)
+            throw error
+        }
+        await reloadSavedHosts()
+        return host
     }
 
     func record(identity: DeviceIdentitySnapshot) {
@@ -173,15 +223,14 @@ final class RouterConnectionModel {
         endpoints: Set<RouterEndpointCapability>
     ) -> DeviceCapabilities {
         var features = identity.capabilities.features
-        if !endpoints.contains(.actions) {
+        if !endpoints.contains(.controls) {
             features.subtract([.dcControl, .usbOutputControl, .dcBypassControl, .shutdown])
         }
         if !endpoints.contains(.usbCLimit) {
             features.remove(.usbPowerLimit)
         }
-        if !endpoints.contains(.schedules) {
-            features.remove(.dcScheduler)
-        }
+        // The documented client API exposes no schedule endpoints.
+        features.remove(.dcScheduler)
         return DeviceCapabilities(features: features)
     }
 }

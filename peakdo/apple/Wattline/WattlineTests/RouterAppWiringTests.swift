@@ -2,6 +2,9 @@ import Foundation
 import WattlineCore
 import WattlineNetwork
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import Wattline
 
 @MainActor
@@ -32,7 +35,7 @@ final class RouterAppWiringTests: XCTestCase {
     func testRouterEndpointCapabilitiesRemoveUnsupportedSurfacesStructurally() {
         let resolved = RouterConnectionModel.capabilities(
             for: identity(mac: "DC:04:5A:EB:72:2B", cid: 0x0302),
-            endpoints: [.actions]
+            endpoints: [.controls]
         )
 
         XCTAssertTrue(resolved.hasDCControl)
@@ -60,14 +63,88 @@ final class RouterAppWiringTests: XCTestCase {
         XCTAssertEqual(savedToken, "secret-bearer")
     }
 
+    func testPairingPayloadEnrollmentPersistsOnlyMetadataAndStoresBearerInCredentialStore() async throws {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "http://router.local:8377/api/v1/pair")!,
+            statusCode: 201,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        ))
+        let fingerprint = String(repeating: "ab", count: 32)
+        let body = Data("""
+        {"token":"one-time-secret","device_id":"DC:04:5A:EB:72:2B","base_urls":{"https":"https://router.local:8378/api/v1","http":"http://router.local:8377/api/v1"},"tls_sha256":"\(fingerprint)","magic_dns_name":"router.tailnet.ts.net"}
+        """.utf8)
+        let enrollmentHTTP = RouterEnrollmentHTTPRecorder(result: .success((body, response)))
+        let fixture = makeFixture(enrollmentClientFactory: { _ in
+            RouterEnrollmentClient(httpClient: enrollmentHTTP)
+        })
+        let payload = try RouterPairingPayload.parse(URL(string:
+            "wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&https=8378&pin=123456&tls=\(fingerprint)"
+        )!)
+
+        let saved = try await fixture.model.enroll(
+            payload: payload,
+            displayName: "Kitchen router",
+            reachability: .lan,
+            label: "Keith's iPhone"
+        )
+
+        XCTAssertEqual(saved.deviceID, "DC045AEB722B")
+        XCTAssertEqual(saved.endpoint.scheme, "https")
+        XCTAssertEqual(saved.certificateFingerprint, fingerprint.uppercased())
+        XCTAssertEqual(fixture.model.savedHosts, [saved])
+        XCTAssertFalse(String(data: try XCTUnwrap(fixture.hostBackend.storedData), encoding: .utf8)?.contains("one-time-secret") == true)
+        let savedToken = await fixture.credentialBackend.savedToken
+        XCTAssertEqual(savedToken, "one-time-secret")
+        let requests = await enrollmentHTTP.requests
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.method, "POST")
+        XCTAssertEqual(request.path, "/api/v1/pair")
+    }
+
+    func testEnrollmentDeletesTokenWhenHostMetadataPersistenceFails() async throws {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "http://router.local:8377/api/v1/pair")!,
+            statusCode: 201,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        let body = Data("""
+        {"token":"must-be-rolled-back","device_id":"DC:04:5A:EB:72:2B","base_urls":{"https":null,"http":"http://router.local:8377/api/v1"},"tls_sha256":"","magic_dns_name":""}
+        """.utf8)
+        let enrollmentHTTP = RouterEnrollmentHTTPRecorder(result: .success((body, response)))
+        let fixture = makeFixture(
+            hostBackend: RouterHostMemoryBackend(setError: RouterHostBackendError.writeFailed),
+            enrollmentClientFactory: { _ in RouterEnrollmentClient(httpClient: enrollmentHTTP) }
+        )
+        let payload = try RouterPairingPayload.parse(URL(string:
+            "wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456"
+        )!)
+
+        do {
+            _ = try await fixture.model.enroll(
+                payload: payload,
+                displayName: "Kitchen router",
+                reachability: .lan,
+                label: "Keith's iPhone"
+            )
+            XCTFail("expected host persistence to fail")
+        } catch {
+            XCTAssertEqual(error as? RouterHostBackendError, .writeFailed)
+        }
+
+        let savedToken = await fixture.credentialBackend.savedToken
+        XCTAssertNil(savedToken, "failed metadata persistence must roll back the bearer token")
+    }
+
     func testRouterSelectionCreatesNoBluetoothOwnerAndUsesOnlyTheSelectedRouterTransport() async throws {
         let transport = RouterSelectionTransport(identity: identity(mac: "DC:04:5A:EB:72:2B", cid: 0x0302))
         var routerFactoryCount = 0
         var bluetoothFactoryCount = 0
-        let fixture = makeFixture { _, _ in
+        let fixture = makeFixture(transportFactory: { _, _ in
             routerFactoryCount += 1
             return transport
-        }
+        })
         let persistence = testPersistence()
         let model = AppModel(
             persistence: persistence,
@@ -101,11 +178,14 @@ final class RouterAppWiringTests: XCTestCase {
     }
 
     private func makeFixture(
+        hostBackend: RouterHostMemoryBackend = RouterHostMemoryBackend(),
+        enrollmentClientFactory: @escaping RouterConnectionModel.EnrollmentClientFactory = { _ in
+            throw NetworkError.unsupported("Enrollment client not configured")
+        },
         transportFactory: @escaping RouterConnectionModel.TransportFactory = { _, _ in
             RouterSelectionTransport(identity: RouterAppWiringTests.identity(mac: nil, cid: nil))
         }
     ) -> RouterFixture {
-        let hostBackend = RouterHostMemoryBackend()
         let credentialBackend = RouterCredentialMemoryBackend()
         let hostStore = RouterHostStore(backend: hostBackend)
         let credentialStore = RouterCredentialStore(backend: credentialBackend)
@@ -113,6 +193,7 @@ final class RouterAppWiringTests: XCTestCase {
             model: RouterConnectionModel(
                 hostStore: hostStore,
                 credentialStore: credentialStore,
+                enrollmentClientFactory: enrollmentClientFactory,
                 transportFactory: transportFactory
             ),
             hostStore: hostStore,
@@ -179,10 +260,46 @@ private struct RouterFixture {
 private final class RouterHostMemoryBackend: RouterHostKeyValueStore, @unchecked Sendable {
     private let lock = NSLock()
     private var data: Data?
+    private let setError: (any Error)?
+
+    init(setError: (any Error)? = nil) {
+        self.setError = setError
+    }
+
     var storedData: Data? { lock.withLock { data } }
     func data(forKey key: String) -> Data? { storedData }
-    func set(_ data: Data, forKey key: String) { lock.withLock { self.data = data } }
+    func set(_ data: Data, forKey key: String) throws {
+        if let setError { throw setError }
+        lock.withLock { self.data = data }
+    }
     func removeValue(forKey key: String) { lock.withLock { data = nil } }
+}
+
+private enum RouterHostBackendError: Error, Equatable {
+    case writeFailed
+}
+
+private actor RouterEnrollmentHTTPRecorder: RouterEnrollmentHTTPClient {
+    struct Request: Sendable {
+        let method: String
+        let path: String
+    }
+
+    private let result: Result<(Data, HTTPURLResponse), any Error>
+    private(set) var requests: [Request] = []
+
+    init(result: Result<(Data, HTTPURLResponse), any Error>) {
+        self.result = result
+    }
+
+    func publicRequest(
+        _ method: String,
+        _ path: String,
+        body: Data?
+    ) async throws -> (Data, HTTPURLResponse) {
+        requests.append(Request(method: method, path: path))
+        return try result.get()
+    }
 }
 
 private actor RouterCredentialMemoryBackend: RouterCredentialBackend {
