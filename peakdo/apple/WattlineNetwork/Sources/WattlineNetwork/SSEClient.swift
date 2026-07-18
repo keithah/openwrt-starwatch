@@ -54,6 +54,19 @@ public final class SSEClient: RouterEventStream, @unchecked Sendable {
         self.session = session
     }
 
+    public convenience init(
+        endpoint: RouterEndpoint,
+        configuration: URLSessionConfiguration = .ephemeral
+    ) throws {
+        self.init(
+            baseURL: try RouterURLSessionFactory.baseURL(for: endpoint),
+            session: try RouterURLSessionFactory.make(
+                endpoint: endpoint,
+                configuration: configuration
+            )
+        )
+    }
+
     public func events(path: String, token: String) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             guard path.hasPrefix("/"), let url = URL(string: path, relativeTo: self.baseURL)?.absoluteURL else {

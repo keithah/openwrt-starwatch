@@ -93,6 +93,8 @@ public struct RouterCommandMapper: Sendable {
             )
         case [0x11, 0x01]:
             return try action("restart", confirmation: .disconnect(.successThenReconnect))
+        case [0x46, 0x4D]:
+            return try action("shutdown", confirmation: .disconnect(.successThenDisarmReconnect))
         default:
             break
         }

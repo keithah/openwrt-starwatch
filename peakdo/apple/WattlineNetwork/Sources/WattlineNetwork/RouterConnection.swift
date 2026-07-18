@@ -22,6 +22,13 @@ actor RouterConnection {
         let timeoutTask: Task<Void, Never>
     }
 
+    private struct PendingDisconnectGrace {
+        let generation: UInt64
+        let scope: DeviceConnectionScope
+        let continuation: AsyncThrowingStream<Bool, Error>.Continuation
+        let timeoutTask: Task<Void, Never>
+    }
+
     private struct PowerLimitResponse: Decodable {
         struct Value: Decodable { let level: Int }
         let global: Value
@@ -59,6 +66,7 @@ actor RouterConnection {
     private var statusTask: Task<StatusContext, Error>?
     private var streamTask: Task<Void, Never>?
     private var pendingReconciliations: [UUID: PendingReconciliation] = [:]
+    private var pendingDisconnectGraces: [UUID: PendingDisconnectGrace] = [:]
     private var connectionIsReconnecting = false
 
     init(
@@ -87,6 +95,10 @@ actor RouterConnection {
         statusTask?.cancel()
         streamTask?.cancel()
         for pending in pendingReconciliations.values {
+            pending.timeoutTask.cancel()
+            pending.continuation.finish(throwing: CancellationError())
+        }
+        for pending in pendingDisconnectGraces.values {
             pending.timeoutTask.cancel()
             pending.continuation.finish(throwing: CancellationError())
         }
@@ -221,6 +233,7 @@ actor RouterConnection {
         statusTask = nil
         pendingScope = nil
         cancelAllReconciliations()
+        cancelAllDisconnectGraces()
         guard let establishedScope else { return }
         retireEstablishedScope(establishedScope)
     }
@@ -242,6 +255,7 @@ actor RouterConnection {
         lastTelemetryTimestamp = nil
         connectionIsReconnecting = false
         cancelAllReconciliations()
+        cancelAllDisconnectGraces()
         output.yield(.disconnected(scope, nil))
     }
 
@@ -304,7 +318,12 @@ actor RouterConnection {
                 )
                 return .sent
             } catch {
+                if Task.isCancelled { throw CancellationError() }
+                if error as? NetworkError == .unauthorized { throw error }
                 if isReconnectSuccess(context: context) { return .sent }
+                if try await waitForReconnectTransition(context: context, timeout: .seconds(2)) {
+                    return .sent
+                }
                 throw error
             }
 
@@ -538,6 +557,7 @@ actor RouterConnection {
         guard isEstablished(expectedGeneration, scope: scope) else { return false }
         connectionIsReconnecting = true
         output.yield(.reconnecting(scope))
+        completeDisconnectGraces(generation: expectedGeneration, scope: scope, succeeded: true)
         return true
     }
 
@@ -590,9 +610,10 @@ actor RouterConnection {
     ) -> ReconciliationWaiter {
         let id = UUID()
         let pair = AsyncThrowingStream<CommandOutcome, Error>.makeStream()
+        let clock = clock
         let timeoutTask = Task { [weak self] in
             do {
-                try await Task.sleep(for: timeout)
+                try await clock.sleep(for: timeout)
                 await self?.timeoutReconciliation(id)
             } catch {}
         }
@@ -660,6 +681,74 @@ actor RouterConnection {
         for pending in values {
             pending.timeoutTask.cancel()
             pending.continuation.finish(throwing: CancellationError())
+        }
+    }
+
+    private func waitForReconnectTransition(
+        context: EstablishedContext,
+        timeout: Duration
+    ) async throws -> Bool {
+        if isReconnectSuccess(context: context) { return true }
+        guard isEstablished(context.generation, scope: context.scope) else { return false }
+        let id = UUID()
+        let pair = AsyncThrowingStream<Bool, Error>.makeStream()
+        let clock = clock
+        let timeoutTask = Task { [weak self] in
+            do {
+                try await clock.sleep(for: timeout)
+                await self?.completeDisconnectGrace(id: id, succeeded: false)
+            } catch {}
+        }
+        pendingDisconnectGraces[id] = PendingDisconnectGrace(
+            generation: context.generation,
+            scope: context.scope,
+            continuation: pair.continuation,
+            timeoutTask: timeoutTask
+        )
+        if isReconnectSuccess(context: context) {
+            completeDisconnectGrace(id: id, succeeded: true)
+        }
+        return try await withTaskCancellationHandler {
+            var iterator = pair.stream.makeAsyncIterator()
+            return try await iterator.next() ?? false
+        } onCancel: {
+            Task { [weak self] in
+                await self?.cancelDisconnectGrace(id: id)
+            }
+        }
+    }
+
+    private func completeDisconnectGraces(
+        generation: UInt64,
+        scope: DeviceConnectionScope,
+        succeeded: Bool
+    ) {
+        let matches = pendingDisconnectGraces.compactMap { id, pending in
+            pending.generation == generation && pending.scope == scope ? id : nil
+        }
+        for id in matches { completeDisconnectGrace(id: id, succeeded: succeeded) }
+    }
+
+    private func completeDisconnectGrace(id: UUID, succeeded: Bool) {
+        guard let pending = pendingDisconnectGraces.removeValue(forKey: id) else { return }
+        pending.timeoutTask.cancel()
+        pending.continuation.yield(succeeded)
+        pending.continuation.finish()
+    }
+
+    private func cancelDisconnectGrace(id: UUID) {
+        guard let pending = pendingDisconnectGraces.removeValue(forKey: id) else { return }
+        pending.timeoutTask.cancel()
+        pending.continuation.finish(throwing: CancellationError())
+    }
+
+    private func cancelAllDisconnectGraces() {
+        let values = pendingDisconnectGraces.values
+        pendingDisconnectGraces.removeAll()
+        for pending in values {
+            pending.timeoutTask.cancel()
+            pending.continuation.yield(false)
+            pending.continuation.finish()
         }
     }
 

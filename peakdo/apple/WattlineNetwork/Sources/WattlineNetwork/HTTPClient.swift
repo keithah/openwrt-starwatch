@@ -26,29 +26,13 @@ public final class HTTPClient: RouterHTTPClient, @unchecked Sendable {
         endpoint: RouterEndpoint,
         configuration: URLSessionConfiguration = .ephemeral
     ) throws {
-        var components = URLComponents()
-        components.scheme = endpoint.scheme.lowercased()
-        components.host = endpoint.host
-        components.port = endpoint.port
-        guard let baseURL = components.url else { throw RouterHostValidationError.invalidAddress }
-
-        if endpoint.scheme.caseInsensitiveCompare("https") == .orderedSame {
-            guard let expectedFingerprint = endpoint.certificateFingerprint else {
-                throw RouterHostValidationError.missingCertificateFingerprint
-            }
-#if canImport(Security) && !canImport(FoundationNetworking)
-            let session = URLSession(
-                configuration: configuration,
-                delegate: RouterTLSPinningDelegate(expectedFingerprint: expectedFingerprint),
-                delegateQueue: nil
+        self.init(
+            baseURL: try RouterURLSessionFactory.baseURL(for: endpoint),
+            session: try RouterURLSessionFactory.make(
+                endpoint: endpoint,
+                configuration: configuration
             )
-            self.init(baseURL: baseURL, session: session)
-#else
-            throw NetworkError.unsupported("HTTPS certificate pinning is unavailable on this platform")
-#endif
-        } else {
-            self.init(baseURL: baseURL, session: URLSession(configuration: configuration))
-        }
+        )
     }
 
     public func get(_ path: String, token: String) async throws -> (Data, HTTPURLResponse) {

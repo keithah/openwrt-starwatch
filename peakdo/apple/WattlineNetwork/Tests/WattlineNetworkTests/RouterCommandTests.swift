@@ -42,16 +42,52 @@ final class RouterCommandMapperTests: XCTestCase {
         XCTAssertEqual(get.confirmation, .powerLimit(.runtime))
     }
 
-    func testRestartIsAllowListedButShutdownClockAndRawCommandsAreUnsupported() throws {
+    func testRestartAndShutdownAreAllowListedButRawCommandsAreUnsupported() throws {
         let restart = try mapper.route(for: .restart)
         XCTAssertEqual(try bodyString(restart, key: "action"), "restart")
         XCTAssertEqual(restart.confirmation, .disconnect(.successThenReconnect))
 
-        for command in [DeviceCommand.shutdown, .enterOTA, .runningMode(.factory)] {
+        let shutdown = try mapper.route(for: .shutdown)
+        XCTAssertEqual(try bodyString(shutdown, key: "action"), "shutdown")
+        XCTAssertEqual(shutdown.confirmation, .disconnect(.successThenDisarmReconnect))
+
+        for command in [DeviceCommand.enterOTA, .runningMode(.factory)] {
             XCTAssertThrowsError(try mapper.route(for: command)) { error in
                 guard case .unsupported = error as? NetworkError else {
                     return XCTFail("expected unsupported, received \(error)")
                 }
+            }
+        }
+    }
+
+    func testEveryAdvertisedSurfaceHasARouterRoute() throws {
+        let features: FeatureFlags = [
+            .dcControl, .usbOutputControl, .usbPowerLimit,
+            .dcBypassControl, .dcScheduler, .shutdown,
+        ]
+        let capabilities = RouterCapabilities(
+            features: features.rawValue,
+            endpoints: [.actions, .usbCLimit, .bypassThreshold, .schedules]
+        )
+
+        for surface in capabilities.supportedSurfaces {
+            switch surface {
+            case .dcControl:
+                _ = try mapper.route(for: .setDC(true))
+            case .typeCOutput:
+                _ = try mapper.route(for: .setTypeCOutput(true))
+            case .powerLimits:
+                _ = try mapper.route(for: .setPowerLimit(.output, level: .watts100))
+            case .bypassControl:
+                _ = try mapper.route(for: .setBypass(true))
+            case .bypassThreshold:
+                _ = try mapper.setBypassThreshold(volts: 19.6)
+            case .schedules:
+                _ = mapper.listSchedules()
+            case .restart:
+                _ = try mapper.route(for: .restart)
+            case .shutdown:
+                _ = try mapper.route(for: .shutdown)
             }
         }
     }
@@ -245,8 +281,8 @@ final class RouterCommandExecutionTests: XCTestCase {
             XCTAssertEqual(error as? NetworkError, .httpStatus(502, "router command failed"))
         }
         do {
-            _ = try await transport.perform(.shutdown)
-            XCTFail("expected unsupported shutdown")
+            _ = try await transport.perform(.runningMode(.factory))
+            XCTFail("expected unsupported raw command")
         } catch {
             guard case .unsupported = error as? NetworkError else {
                 return XCTFail("expected unsupported, received \(error)")
@@ -293,7 +329,38 @@ final class RouterCommandExecutionTests: XCTestCase {
         XCTAssertEqual(outcome, .sent)
     }
 
-    func testCommandCancellationMapsURLCancelledAndRemovesTelemetryWaiter() async throws {
+    func testRestartWriteErrorBeforeStreamDisconnectStillSucceedsWithinGrace() async throws {
+        let client = GatedRestartHTTPClient(status: statusBody())
+        let events = CommandRouterServer()
+        let clock = ControlledCommandClock(origin: origin)
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: events,
+            clock: clock,
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        let recorder = CommandEventRecorder(transport.events)
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await events.waitForEventStream()
+        addTeardownBlock { await transport.disconnect() }
+
+        let restart = Task { try await transport.perform(.restart) }
+        await client.waitUntilRestartStarted()
+        await client.releaseWithDisconnectError()
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(events.push(Data(#"{"connected":false}"#.utf8)))
+        try await recorder.waitUntil { $0 == .reconnecting(scope) }
+
+        let outcome = try await restart.value
+        XCTAssertEqual(outcome, .sent)
+        let requestedSleeps = await clock.requestedSleeps
+        XCTAssertEqual(requestedSleeps.first, .seconds(2))
+    }
+
+    func testCommandCancellationMapsURLCancelledAndLateTelemetryIsSafe() async throws {
         let client = CommandCancellationHTTPClient(status: statusBody())
         let events = CommandRouterServer()
         let transport = RouterTransport(
@@ -321,6 +388,81 @@ final class RouterCommandExecutionTests: XCTestCase {
             XCTFail("expected CancellationError, received \(error)")
         }
         XCTAssertTrue(events.push(snapshot(dcEnabled: true)))
+    }
+
+    func testInjectedClockTimeoutCleansWaiterAndLateTelemetryCannotCompleteSuccessor() async throws {
+        let server = commandServer()
+        let clock = ControlledCommandClock(origin: origin)
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: server,
+            events: server,
+            clock: clock,
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStream()
+        addTeardownBlock { await transport.disconnect() }
+
+        let timedOut = Task { try await transport.perform(.setDC(true)) }
+        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/action", count: 1)
+        await clock.waitForSleepCount(1)
+        let firstSleeps = await clock.requestedSleeps
+        guard firstSleeps == [.seconds(3)] else {
+            timedOut.cancel()
+            return XCTFail("reconciliation timeout bypassed injected clock: \(firstSleeps)")
+        }
+        await clock.advanceNext()
+        do {
+            _ = try await timedOut.value
+            XCTFail("expected reconciliation timeout")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .timeout)
+        }
+
+        XCTAssertTrue(server.push(snapshot(dcEnabled: true)), "late telemetry remains publishable")
+        let successor = Task { try await transport.perform(.setDC(false)) }
+        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/action", count: 2)
+        await clock.waitForSleepCount(2)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(server.push(snapshot(dcEnabled: false)))
+        let successorOutcome = try await successor.value
+        XCTAssertEqual(successorOutcome, .sent)
+    }
+
+    func testTelemetryBeforeInjectedClockTimeoutCompletesAndCancelsSleeper() async throws {
+        let server = commandServer()
+        let clock = ControlledCommandClock(origin: origin)
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: server,
+            events: server,
+            clock: clock,
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStream()
+        addTeardownBlock { await transport.disconnect() }
+
+        let command = Task { try await transport.perform(.setDC(true)) }
+        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/action", count: 1)
+        await clock.waitForSleepCount(1)
+        let requestedSleeps = await clock.requestedSleeps
+        guard requestedSleeps == [.seconds(3)] else {
+            command.cancel()
+            return XCTFail("reconciliation timeout bypassed injected clock: \(requestedSleeps)")
+        }
+        XCTAssertTrue(server.push(snapshot(dcEnabled: true)))
+
+        let outcome = try await command.value
+        XCTAssertEqual(outcome, .sent)
+        await clock.waitForActiveSleepCount(0)
+        let activeSleepCount = await clock.activeSleepCount
+        XCTAssertEqual(activeSleepCount, 0)
     }
 
     func testRefreshCompletingAfterReplacementPublishesNoStaleTelemetry() async throws {
@@ -482,6 +624,14 @@ private final class CommandRouterServer: RouterHTTPClient, RouterEventStream, @u
         }
         throw CommandTestError.timedOut
     }
+
+    func waitForRequestCount(method: String, path: String, count: Int) async throws {
+        for _ in 0..<20_000 {
+            if requests.filter({ $0.method == method && $0.path == path }).count >= count { return }
+            await Task.yield()
+        }
+        throw CommandTestError.timedOut
+    }
 }
 
 private actor CommandCompletionProbe {
@@ -500,6 +650,66 @@ private actor CommandTestClock: RouterConnectionClock {
     func sleep(for duration: Duration) async throws {
         timestamp += duration
         try await Task.sleep(for: .milliseconds(1))
+    }
+}
+
+private actor ControlledCommandClock: RouterConnectionClock {
+    private struct Sleeper {
+        let duration: Duration
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var timestamp: DeviceTimestamp = .seconds(50)
+    private var sleepers: [UUID: Sleeper] = [:]
+    private var sleepOrder: [UUID] = []
+    private(set) var requestedSleeps: [Duration] = []
+    let origin: RouterTimestampOrigin
+
+    init(origin: RouterTimestampOrigin) { self.origin = origin }
+    var now: DeviceTimestamp { timestamp }
+    func sampleTimestampOrigin() -> RouterTimestampOrigin { origin }
+
+    func sleep(for duration: Duration) async throws {
+        let id = UUID()
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                requestedSleeps.append(duration)
+                sleepOrder.append(id)
+                sleepers[id] = Sleeper(duration: duration, continuation: continuation)
+            }
+        } onCancel: {
+            Task { await self.cancel(id: id) }
+        }
+    }
+
+    func advanceNext() {
+        guard !sleepOrder.isEmpty else { return }
+        let id = sleepOrder.removeFirst()
+        guard let sleeper = sleepers.removeValue(forKey: id) else { return }
+        timestamp += sleeper.duration
+        sleeper.continuation.resume()
+    }
+
+    func waitForSleepCount(_ count: Int) async {
+        for _ in 0..<20_000 {
+            if requestedSleeps.count >= count { return }
+            await Task.yield()
+        }
+    }
+
+    var activeSleepCount: Int { sleepers.count }
+
+    func waitForActiveSleepCount(_ count: Int) async {
+        for _ in 0..<20_000 {
+            if sleepers.count == count { return }
+            await Task.yield()
+        }
+    }
+
+    private func cancel(id: UUID) {
+        sleepOrder.removeAll { $0 == id }
+        sleepers.removeValue(forKey: id)?.continuation.resume(throwing: CancellationError())
     }
 }
 

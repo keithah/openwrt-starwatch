@@ -315,8 +315,8 @@ final class RouterTransportConnectionTests: XCTestCase {
         try await states.waitUntil { $0.connection == .live && $0.battery?.level == 40 }
 
         do {
-            _ = try await session.perform(DeviceCommand.shutdown)
-            XCTFail("expected unsupported shutdown")
+            _ = try await session.perform(DeviceCommand.runningMode(.factory))
+            XCTFail("expected unsupported raw command")
         } catch {}
         let stateAfterError = await session.state
         let operationError = try XCTUnwrap(stateAfterError.lastError)
