@@ -11,6 +11,7 @@ final class AppModel {
     typealias TransportFactory = @MainActor () -> any DeviceTransport
     typealias BrokerPublicationBarrier = @Sendable () async -> Void
     typealias BrokerCompletionBarrier = @Sendable () async -> Void
+    typealias BrokerSuccessResolutionBarrier = @Sendable () async -> Void
     typealias ConnectedLifecycleBarrier = @Sendable () async -> Void
 
     enum Route: Equatable {
@@ -205,6 +206,7 @@ final class AppModel {
     private let transportFactory: TransportFactory
     private let brokerPublicationBarrier: BrokerPublicationBarrier
     private let brokerCompletionBarrier: BrokerCompletionBarrier
+    private let brokerSuccessResolutionBarrier: BrokerSuccessResolutionBarrier
     private let connectedLifecycleBarrier: ConnectedLifecycleBarrier
     private let notificationAdapter: any NotificationCenterAdapter
     private let maintenanceClock: any DeviceClock
@@ -283,6 +285,7 @@ final class AppModel {
         transportFactory: @escaping TransportFactory = { BLETransport() },
         brokerPublicationBarrier: @escaping BrokerPublicationBarrier = {},
         brokerCompletionBarrier: @escaping BrokerCompletionBarrier = {},
+        brokerSuccessResolutionBarrier: @escaping BrokerSuccessResolutionBarrier = {},
         connectedLifecycleBarrier: @escaping ConnectedLifecycleBarrier = {},
         notificationAdapter: any NotificationCenterAdapter = SystemNotificationCenterAdapter(),
         maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
@@ -295,6 +298,7 @@ final class AppModel {
         self.transportFactory = transportFactory
         self.brokerPublicationBarrier = brokerPublicationBarrier
         self.brokerCompletionBarrier = brokerCompletionBarrier
+        self.brokerSuccessResolutionBarrier = brokerSuccessResolutionBarrier
         self.connectedLifecycleBarrier = connectedLifecycleBarrier
         self.notificationAdapter = notificationAdapter
         self.maintenanceClock = maintenanceClock
@@ -1239,7 +1243,16 @@ final class AppModel {
                 await terminalizeBrokerReconnect(attempt, retireScope: true)
                 return
             }
-            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
+            await deviceOperationBroker.markConnected(
+                peripheralID: attempt.peripheralID,
+                generation: attempt.generation
+            )
+            guard isCurrentBrokerReconnect(attempt, scope: scope),
+                  activeConnectionScope == scope
+            else {
+                await terminalizeBrokerReconnect(attempt, retireScope: true)
+                return
+            }
             let brokerIsReady = await deviceOperationBroker.hasConnectedContext
             guard brokerIsReady,
                   isCurrentBrokerReconnect(attempt, scope: scope),
@@ -1248,10 +1261,15 @@ final class AppModel {
                 await terminalizeBrokerReconnect(attempt, retireScope: true)
                 return
             }
+            establishConnectedPresentation(scope: scope, cancelRestartRecoveryTask: false)
+            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
+            await brokerSuccessResolutionBarrier()
+            guard isCurrentBrokerReconnect(attempt, scope: scope),
+                  activeConnectionScope == scope
+            else { return }
             brokerReconnectAttempt = nil
             brokerReconnectScope = nil
             brokerReconnectTask = nil
-            establishConnectedPresentation(scope: scope)
         } catch {
             guard brokerReconnectAttempt == attempt else { return }
             connectionStatus = .disconnected(String(describing: error))
@@ -1493,7 +1511,10 @@ final class AppModel {
         }
     }
 
-    private func establishConnectedPresentation(scope: DeviceConnectionScope) {
+    private func establishConnectedPresentation(
+        scope: DeviceConnectionScope,
+        cancelRestartRecoveryTask: Bool = true
+    ) {
         let id = scope.peripheralID
         if !isDemo {
             persistence.lastSuccessfulPeripheralID = id
@@ -1527,7 +1548,9 @@ final class AppModel {
             restartOperationID = nil
             restartTimeoutTask?.cancel()
             restartTimeoutTask = nil
-            restartRecoveryTask?.cancel()
+            if cancelRestartRecoveryTask {
+                restartRecoveryTask?.cancel()
+            }
             restartRecoveryTask = nil
             maintenanceState = .idle
         }

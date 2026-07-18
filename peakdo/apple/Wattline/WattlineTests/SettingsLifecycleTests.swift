@@ -267,6 +267,52 @@ final class SettingsLifecycleTests: XCTestCase {
         }
     }
 
+    func testRestartDisconnectAfterBrokerSuccessResolutionCannotStrandMaintenance() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(reconnectAfterRestart: true, deferReconnect: true)
+        let successResolution = AsyncCallBarrier()
+        let model = try await makeConnectedModel(
+            transport,
+            clock: clock,
+            brokerSuccessResolutionBarrier: { await successResolution.waitIfHeld() }
+        )
+        let broker = model.deviceOperationBroker
+
+        try await restartAfterReleasingDisconnect(model, transport: transport)
+        try await waitUntil { await transport.deferredReconnectScopes.count == 1 }
+        let reconnectScopes = await transport.deferredReconnectScopes
+        let reconnectScope = try XCTUnwrap(reconnectScopes.first)
+
+        await successResolution.holdNext()
+        await transport.releaseReconnect(scope: reconnectScope)
+        try await waitUntil { await successResolution.isBlocked }
+
+        XCTAssertEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(model.maintenanceState, .idle)
+        XCTAssertNil(model.restartOperationIDForTesting)
+        let brokerReadyAtResolution = await broker.hasConnectedContext
+        XCTAssertTrue(brokerReadyAtResolution)
+
+        await transport.emit(.disconnected(
+            reconnectScope,
+            TransportFailure(message: "terminal after broker success")
+        ))
+        try await waitUntil {
+            model.connectionStatus == .disconnected("terminal after broker success")
+        }
+        await successResolution.release()
+        try await waitUntil { await successResolution.completedHoldCount == 1 }
+
+        XCTAssertEqual(model.connectionStatus, .disconnected("terminal after broker success"))
+        XCTAssertEqual(model.maintenanceState, .idle)
+        XCTAssertNil(model.restartOperationIDForTesting)
+        XCTAssertNil(model.brokerReconnectAttempt)
+        let pendingCount = await broker.pendingConnectionCount
+        let brokerReadyAfterTerminal = await broker.hasConnectedContext
+        XCTAssertEqual(pendingCount, 0)
+        XCTAssertFalse(brokerReadyAfterTerminal)
+    }
+
     func testWriteErrorAfterExpectedDisconnectStillRecovers() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(reconnectAfterRestart: true, restartFailsAfterDisconnect: true, deferReconnect: true)
@@ -531,6 +577,7 @@ final class SettingsLifecycleTests: XCTestCase {
         _ transport: LifecycleTransport,
         clock: any DeviceClock = ContinuousDeviceClock(),
         brokerCompletionBarrier: @escaping AppModel.BrokerCompletionBarrier = {},
+        brokerSuccessResolutionBarrier: @escaping AppModel.BrokerSuccessResolutionBarrier = {},
         connectedLifecycleBarrier: @escaping AppModel.ConnectedLifecycleBarrier = {}
     ) async throws -> AppModel {
         let suite = "WattlineTests.SettingsLifecycle.\(UUID().uuidString)"
@@ -541,6 +588,7 @@ final class SettingsLifecycleTests: XCTestCase {
             persistence: persistence,
             transportFactory: { transport },
             brokerCompletionBarrier: brokerCompletionBarrier,
+            brokerSuccessResolutionBarrier: brokerSuccessResolutionBarrier,
             connectedLifecycleBarrier: connectedLifecycleBarrier,
             maintenanceClock: clock
         )
