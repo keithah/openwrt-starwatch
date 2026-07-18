@@ -20,6 +20,8 @@ enum AppTransportKind: String, CaseIterable, Hashable, Sendable {
 struct AppDeviceConnectionRecord: Identifiable, Equatable, Sendable {
     let id: String
     let identity: DeviceIdentitySnapshot?
+    let bluetoothDevice: DiscoveredDevice?
+    let discoveredRouter: DiscoveredRouter?
     let routerHost: RouterHostMetadata?
     let transportOptions: Set<AppTransportKind>
     let preferredTransport: AppTransportKind
@@ -213,6 +215,8 @@ final class RouterConnectionModel {
             AppDeviceConnectionRecord(
                 id: "ble:\(identity.peripheralID.uuidString)",
                 identity: identity,
+                bluetoothDevice: nil,
+                discoveredRouter: nil,
                 routerHost: nil,
                 transportOptions: [.bluetooth],
                 preferredTransport: .bluetooth
@@ -238,6 +242,8 @@ final class RouterConnectionModel {
                 records[matchingIndex] = AppDeviceConnectionRecord(
                     id: existing.id,
                     identity: existing.identity,
+                    bluetoothDevice: existing.bluetoothDevice,
+                    discoveredRouter: existing.discoveredRouter,
                     routerHost: host,
                     transportOptions: [.bluetooth, .router],
                     preferredTransport: .bluetooth
@@ -246,6 +252,8 @@ final class RouterConnectionModel {
                 records.append(AppDeviceConnectionRecord(
                     id: "router:\(host.id.uuidString)",
                     identity: routerIdentities[host.endpoint.peripheralID],
+                    bluetoothDevice: nil,
+                    discoveredRouter: nil,
                     routerHost: host,
                     transportOptions: [.router],
                     preferredTransport: .router
@@ -253,6 +261,146 @@ final class RouterConnectionModel {
             }
         }
         return records
+    }
+
+    func scanRecords(
+        bluetooth devices: [DiscoveredDevice],
+        identities: [UUID: AppModel.CachedIdentity]
+    ) -> [AppDeviceConnectionRecord] {
+        var records = devices.map { device in
+            AppDeviceConnectionRecord(
+                id: "ble:\(device.id.uuidString)",
+                identity: identities[device.id].map { Self.snapshot(for: device, cached: $0) },
+                bluetoothDevice: device,
+                discoveredRouter: nil,
+                routerHost: nil,
+                transportOptions: [.bluetooth],
+                preferredTransport: .bluetooth
+            )
+        }
+
+        for router in discoveredRouters {
+            let routerIdentity = Self.snapshot(for: router)
+            let host = savedHosts.first { Self.matches($0, router: router) }
+            if let index = records.firstIndex(where: {
+                DeviceIdentityDeduplicator.merge(ble: $0.identity, router: routerIdentity) != nil
+            }) {
+                let existing = records[index]
+                records[index] = AppDeviceConnectionRecord(
+                    id: existing.id,
+                    identity: existing.identity,
+                    bluetoothDevice: existing.bluetoothDevice,
+                    discoveredRouter: router,
+                    routerHost: host,
+                    transportOptions: [.bluetooth, .router],
+                    preferredTransport: .bluetooth
+                )
+            } else {
+                records.append(AppDeviceConnectionRecord(
+                    id: "router-discovered:\(router.deviceID)",
+                    identity: routerIdentity,
+                    bluetoothDevice: nil,
+                    discoveredRouter: router,
+                    routerHost: host,
+                    transportOptions: [.router],
+                    preferredTransport: .router
+                ))
+            }
+        }
+
+        for host in savedHosts where !records.contains(where: { $0.routerHost?.id == host.id }) {
+            if let index = records.firstIndex(where: { record in
+                guard let hostMAC = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID),
+                      let deviceMAC = DeviceIdentityDeduplicator.normalizedMAC(record.identity?.macAddress)
+                else { return false }
+                return hostMAC == deviceMAC
+            }) {
+                let existing = records[index]
+                records[index] = AppDeviceConnectionRecord(
+                    id: existing.id,
+                    identity: existing.identity,
+                    bluetoothDevice: existing.bluetoothDevice,
+                    discoveredRouter: existing.discoveredRouter,
+                    routerHost: host,
+                    transportOptions: [.bluetooth, .router],
+                    preferredTransport: .bluetooth
+                )
+            } else {
+                records.append(AppDeviceConnectionRecord(
+                    id: "router-saved:\(host.id.uuidString)",
+                    identity: routerIdentities[host.endpoint.peripheralID],
+                    bluetoothDevice: nil,
+                    discoveredRouter: nil,
+                    routerHost: host,
+                    transportOptions: [.router],
+                    preferredTransport: .router
+                ))
+            }
+        }
+
+        return records.sorted { lhs, rhs in
+            if lhs.preferredTransport != rhs.preferredTransport {
+                return lhs.preferredTransport == .bluetooth
+            }
+            return Self.displayName(for: lhs)
+                .localizedCaseInsensitiveCompare(Self.displayName(for: rhs)) == .orderedAscending
+        }
+    }
+
+    private static func snapshot(
+        for device: DiscoveredDevice,
+        cached: AppModel.CachedIdentity
+    ) -> DeviceIdentitySnapshot {
+        let features = cached.rawFeatures.map(FeatureFlags.init(rawValue:))
+        return DeviceIdentitySnapshot(
+            peripheralID: device.id,
+            advertisedName: cached.advertisedName,
+            mode: device.mode,
+            modelNumber: cached.modelNumber,
+            hardwareRevision: cached.hardwareRevision,
+            otaFirmwareRevision: cached.otaFirmwareRevision,
+            appFirmwareRevision: cached.appFirmwareRevision,
+            cid: cached.cid,
+            rawFeatures: cached.rawFeatures,
+            macAddress: cached.macAddress,
+            capabilities: CapabilityResolver.resolve(
+                features: features,
+                cid: cached.cid,
+                model: cached.modelNumber
+            )
+        )
+    }
+
+    private static func snapshot(for router: DiscoveredRouter) -> DeviceIdentitySnapshot {
+        let features = router.features.map(FeatureFlags.init(rawValue:))
+        return DeviceIdentitySnapshot(
+            peripheralID: router.endpoint.peripheralID,
+            advertisedName: router.serviceName,
+            mode: .application,
+            modelNumber: router.model,
+            cid: router.cid,
+            rawFeatures: router.features,
+            macAddress: router.deviceID,
+            capabilities: CapabilityResolver.resolve(
+                features: features,
+                cid: router.cid,
+                model: router.model
+            )
+        )
+    }
+
+    private static func matches(_ host: RouterHostMetadata, router: DiscoveredRouter) -> Bool {
+        if let hostMAC = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID) {
+            return hostMAC == router.deviceID
+        }
+        return host.endpoint.peripheralID == router.endpoint.peripheralID
+    }
+
+    private static func displayName(for record: AppDeviceConnectionRecord) -> String {
+        record.bluetoothDevice?.localName
+            ?? record.routerHost?.displayName
+            ?? record.discoveredRouter?.serviceName
+            ?? "Wattline"
     }
 
     static func capabilities(

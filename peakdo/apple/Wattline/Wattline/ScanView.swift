@@ -7,11 +7,19 @@ struct ScanView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
     @State private var showsRouterSetup = false
+    @State private var discoveredRouterSetup: DiscoveredRouter?
+
+    private var scanRecords: [AppDeviceConnectionRecord] {
+        model.routerConnections.scanRecords(
+            bluetooth: model.sortedDevices,
+            identities: model.knownDevices
+        )
+    }
 
     var body: some View {
         NavigationStack {
             Group {
-                if let issue = model.bluetoothIssue, model.routerConnections.savedHosts.isEmpty {
+                if let issue = model.bluetoothIssue, scanRecords.isEmpty {
                     BluetoothExplainer(issue: issue) {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             openURL(url)
@@ -19,7 +27,7 @@ struct ScanView: View {
                     } demo: {
                         model.enterDemo()
                     }
-                } else if model.sortedDevices.isEmpty && model.routerConnections.savedHosts.isEmpty {
+                } else if scanRecords.isEmpty {
                     ScrollView {
                         ContentUnavailableView {
                             Label("Looking for Wattline devices", systemImage: "antenna.radiowaves.left.and.right")
@@ -43,35 +51,30 @@ struct ScanView: View {
                                     }
                                 }
                             }
-                        } else if !model.sortedDevices.isEmpty {
-                            Section("Nearby over Bluetooth") {
-                                ForEach(model.sortedDevices) { device in
-                                    Button {
-                                        model.choose(device)
-                                    } label: {
-                                        DeviceRow(device: device, identity: model.knownDevices[device.id])
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
                         }
 
-                        if !model.routerConnections.savedHosts.isEmpty {
-                            Section("Advanced · Saved routers") {
-                                ForEach(model.routerConnections.savedHosts) { host in
+                        Section("Nearby devices") {
+                            ForEach(scanRecords) { record in
+                                let presentation = ScanRecordPresentation(record: record)
+                                HStack(spacing: 8) {
                                     Button {
-                                        model.connectViaRouter(host)
+                                        perform(presentation.primaryAction, record: record)
                                     } label: {
-                                        RouterHostRow(host: host)
+                                        UnifiedDeviceRow(record: record, presentation: presentation)
                                     }
                                     .buttonStyle(.plain)
-                                }
-                                .onDelete { offsets in
-                                    let hosts = model.routerConnections.savedHosts
-                                    Task {
-                                        for index in offsets {
-                                            try? await model.routerConnections.remove(hosts[index])
+
+                                    if presentation.offersRouterAction {
+                                        Menu {
+                                            Button(record.routerHost == nil ? "Enroll with router" : "Connect via router") {
+                                                performRouterAction(record)
+                                            }
+                                        } label: {
+                                            Image(systemName: "ellipsis.circle")
+                                                .font(.title3)
+                                                .foregroundStyle(.secondary)
                                         }
+                                        .accessibilityLabel("Router options for \(presentation.title)")
                                     }
                                 }
                             }
@@ -102,12 +105,112 @@ struct ScanView: View {
             .sheet(isPresented: $showsRouterSetup) {
                 RouterSetupView()
             }
+            .sheet(item: $discoveredRouterSetup) { router in
+                RouterSetupView(discoveredRouter: router)
+            }
             .sheet(item: Bindable(model).otaRecoveryDevice) { device in
                 OTARecoveryView(device: device) {
                     model.otaRecoveryDevice = nil
                 }
             }
+            .onAppear { model.routerConnections.startDiscovery() }
+            .onDisappear { model.routerConnections.stopDiscovery() }
         }
+    }
+
+    private func perform(_ action: ScanPrimaryAction, record: AppDeviceConnectionRecord) {
+        switch action {
+        case .connectBluetooth:
+            if let device = record.bluetoothDevice { model.choose(device) }
+        case .connectRouter:
+            if let host = record.routerHost { model.connectViaRouter(host) }
+        case .enrollRouter:
+            if let router = record.discoveredRouter { discoveredRouterSetup = router }
+        }
+    }
+
+    private func performRouterAction(_ record: AppDeviceConnectionRecord) {
+        if let host = record.routerHost {
+            model.connectViaRouter(host)
+        } else if let router = record.discoveredRouter {
+            discoveredRouterSetup = router
+        }
+    }
+}
+
+enum ScanPrimaryAction: Equatable, Sendable {
+    case connectBluetooth
+    case connectRouter
+    case enrollRouter
+}
+
+struct ScanRecordPresentation: Equatable, Sendable {
+    let title: String
+    let subtitle: String
+    let transportLabels: [String]
+    let primaryAction: ScanPrimaryAction
+    let offersRouterAction: Bool
+
+    init(record: AppDeviceConnectionRecord) {
+        title = record.bluetoothDevice?.localName
+            ?? record.routerHost?.displayName
+            ?? record.discoveredRouter?.serviceName
+            ?? "Wattline"
+        if let host = record.routerHost {
+            subtitle = "\(host.host):\(host.port)"
+        } else if let router = record.discoveredRouter {
+            subtitle = "\(router.endpoint.host):\(router.endpoint.port)"
+        } else {
+            subtitle = record.identity?.modelNumber ?? "Link-Power"
+        }
+        transportLabels = AppTransportKind.allCases.compactMap {
+            record.transportOptions.contains($0) ? $0.label : nil
+        }
+        if record.bluetoothDevice != nil {
+            primaryAction = .connectBluetooth
+        } else if record.routerHost != nil {
+            primaryAction = .connectRouter
+        } else {
+            primaryAction = .enrollRouter
+        }
+        offersRouterAction = record.bluetoothDevice != nil
+            && (record.routerHost != nil || record.discoveredRouter != nil)
+    }
+}
+
+private struct UnifiedDeviceRow: View {
+    let record: AppDeviceConnectionRecord
+    let presentation: ScanRecordPresentation
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: record.bluetoothDevice == nil ? "network" : "battery.75percent")
+                .foregroundStyle(.indigo)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(presentation.title).font(.headline)
+                Text(presentation.subtitle)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack(spacing: 5) {
+                ForEach(presentation.transportLabels, id: \.self) { label in
+                    Text(label)
+                        .font(.caption2.monospaced())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.secondary.opacity(0.15), in: Capsule())
+                }
+            }
+            if let device = record.bluetoothDevice {
+                RSSIBars(strength: DeviceRowPresentation(
+                    device: device,
+                    identity: nil
+                ).signalStrength)
+            }
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 5)
     }
 }
 
@@ -176,6 +279,11 @@ private struct RouterSetupView: View {
     @State private var allowsInsecureWAN = false
     @State private var errorMessage: String?
     @State private var isSaving = false
+    let discoveredRouter: DiscoveredRouter?
+
+    init(discoveredRouter: DiscoveredRouter? = nil) {
+        self.discoveredRouter = discoveredRouter
+    }
 
     var body: some View {
         NavigationStack {
@@ -215,6 +323,14 @@ private struct RouterSetupView: View {
                 }
             }
             .navigationTitle("Advanced connection")
+            .onAppear {
+                guard let discoveredRouter else { return }
+                name = discoveredRouter.serviceName
+                address = "\(discoveredRouter.endpoint.scheme)://\(discoveredRouter.endpoint.host):\(discoveredRouter.endpoint.port)"
+                deviceID = discoveredRouter.deviceID
+                fingerprint = discoveredRouter.certificateFingerprint ?? ""
+                reachability = .lan
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }

@@ -28,6 +28,10 @@
 	<string>Wattline uses Bluetooth to find and connect to your power device.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Wattline connects directly to an optional wattlined router on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_wattline._tcp</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

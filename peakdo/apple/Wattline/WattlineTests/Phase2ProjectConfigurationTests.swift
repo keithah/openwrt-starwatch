@@ -82,6 +82,12 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         XCTAssertEqual(plist["NSSupportsLiveActivities"] as? Bool, true)
     }
 
+    func testAppDeclaresLocalRouterDiscoveryPrivacyConfiguration() throws {
+        let plist = try NSDictionary(contentsOf: TestProjectFiles.url("Wattline/Info.plist"), error: ())
+        XCTAssertEqual(plist["NSBonjourServices"] as? [String], ["_wattline._tcp"])
+        XCTAssertFalse((plist["NSLocalNetworkUsageDescription"] as? String)?.isEmpty ?? true)
+    }
+
     func testWidgetExtensionDeclaresWidgetKitExtensionPoint() throws {
         let plist = try NSDictionary(contentsOf: TestProjectFiles.url("WattlineWidgets/Info.plist"), error: ())
         XCTAssertEqual(plist["CFBundleName"] as? String, "WattlineWidgets")

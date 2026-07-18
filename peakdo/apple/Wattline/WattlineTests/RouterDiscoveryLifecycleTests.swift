@@ -31,6 +31,62 @@ final class RouterDiscoveryLifecycleTests: XCTestCase {
         XCTAssertEqual(model.discoveredRouters.first?.deviceID, "AABBCCDDEEFF")
     }
 
+    func testLiveRouterAndKnownBluetoothDeviceProduceOneBluetoothPreferredScanRecord() async throws {
+        let source = RecordingRouterDiscoverySource()
+        let model = makeModel(discovery: RouterDiscovery(source: source))
+        let bluetoothID = UUID()
+        let bluetooth = DiscoveredDevice(
+            id: bluetoothID,
+            localName: "Link-Power",
+            rssi: -42,
+            mode: .application
+        )
+        let cached = AppModel.CachedIdentity(
+            advertisedName: "Link-Power",
+            deviceInformationName: "Link-Power 2",
+            macAddress: "dc-04-5a-eb-72-2b",
+            cid: 0x0305,
+            rawFeatures: 0x0000_0fff
+        )
+
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 1 }
+        source.yield([serviceRecord(id: "DC:04:5A:EB:72:2B")], session: 0)
+        try await waitUntil { await model.discoveredRouters.count == 1 }
+
+        let records = model.scanRecords(
+            bluetooth: [bluetooth],
+            identities: [bluetoothID: cached]
+        )
+
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].bluetoothDevice, bluetooth)
+        XCTAssertEqual(records[0].discoveredRouter?.deviceID, "DC045AEB722B")
+        XCTAssertEqual(records[0].transportOptions, [.bluetooth, .router])
+        XCTAssertEqual(records[0].preferredTransport, .bluetooth)
+        let presentation = ScanRecordPresentation(record: records[0])
+        XCTAssertEqual(presentation.primaryAction, .connectBluetooth)
+        XCTAssertTrue(presentation.offersRouterAction)
+        XCTAssertEqual(presentation.transportLabels, ["BT", "Router"])
+    }
+
+    func testRouterOnlyDiscoveryPresentsEnrollmentAsPrimaryAction() async throws {
+        let source = RecordingRouterDiscoverySource()
+        let model = makeModel(discovery: RouterDiscovery(source: source))
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 1 }
+        source.yield([serviceRecord(id: "DC:04:5A:EB:72:2B")], session: 0)
+        try await waitUntil { await model.discoveredRouters.count == 1 }
+
+        let record = try XCTUnwrap(model.scanRecords(bluetooth: [], identities: [:]).first)
+        let presentation = ScanRecordPresentation(record: record)
+
+        XCTAssertEqual(presentation.title, "wattline-DC:04:5A:EB:72:2B")
+        XCTAssertEqual(presentation.primaryAction, .enrollRouter)
+        XCTAssertFalse(presentation.offersRouterAction)
+        XCTAssertEqual(presentation.transportLabels, ["Router"])
+    }
+
     private func makeModel(discovery: RouterDiscovery) -> RouterConnectionModel {
         RouterConnectionModel(
             hostStore: RouterHostStore(backend: DiscoveryHostBackend()),
