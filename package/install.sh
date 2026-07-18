@@ -22,14 +22,15 @@ if ! printf '%s\n' "$architectures" | awk '$2 == "aarch64_cortex-a53" { found = 
 	fail 'this installer requires aarch64_cortex-a53'
 fi
 
-[ -f "$feeds_file" ] || fail "missing $feeds_file"
+[ -d "$target_root/etc/opkg" ] || fail "missing $target_root/etc/opkg"
+[ -f "$feeds_file" ] || : >"$feeds_file"
 
 if [ -e "$target_root/etc/config/glconfig" ] || [ -e "$target_root/usr/lib/oui-httpd" ]; then
 	ui_package='gl-app-starwatch'
-	dashboard_url='http://192.168.100.1/'
+	dashboard_url='http://router-address:9633/'
 else
 	ui_package='luci-app-starwatch'
-	dashboard_url='http://192.168.100.1/cgi-bin/luci/admin/services/starwatch'
+	dashboard_url='http://router-address:9633/'
 fi
 
 feeds_dir=$(dirname "$feeds_file")

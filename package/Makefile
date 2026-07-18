@@ -8,24 +8,53 @@ VERSION := 0.1.0
 ARCH := aarch64_cortex-a53
 OUT := out
 BIN := $(OUT)/starwatchd-bin
+STARWATCHD_IPK := $(OUT)/starwatchd_$(VERSION)_$(ARCH).ipk
+LUCI_IPK := $(OUT)/luci-app-starwatch_$(VERSION)_all.ipk
+GLAPP_IPK := $(OUT)/gl-app-starwatch_$(VERSION)_all.ipk
 
-.PHONY: all clean test bin ipk-starwatchd ipk-luci ipk-glapp feed
+# Reject destinations which could turn the pages cleanup into a root or source
+# tree cleanup.  This is evaluated while make reads the file, before it can
+# build feed prerequisites or run any staging recipe.
+ifneq ($(filter feed-artifact,$(MAKECMDGOALS)),)
+ifeq ($(strip $(OUT)),)
+$(error feed-artifact requires a non-empty OUT)
+endif
+ifeq ($(abspath $(OUT)),/)
+$(error feed-artifact refuses OUT=/)
+endif
+ifeq ($(abspath $(OUT)),$(CURDIR))
+$(error feed-artifact refuses OUT=$(OUT))
+endif
+endif
+
+.PHONY: all clean test bin ipk-starwatchd ipk-luci ipk-glapp feed feed-artifact
 
 all: ipk-starwatchd ipk-luci ipk-glapp
 
 test:
 	sh tests/uci-defaults-route-test.sh
+	sh tests/feed-artifact-test.sh
 
 # feed: build all ipks + an opkg index (Packages/Packages.gz) so a router can
 # `opkg update && opkg upgrade` from a hosted feed instead of manual reinstall.
 # Bump VERSION (e.g. make VERSION=0.1.0 feed) so opkg sees an upgrade.
 feed: all
-	sh mkfeed.sh $(OUT)
+	index_dir=$$(mktemp -d "$(OUT)/.feed-index.XXXXXX") && \
+	cp $(STARWATCHD_IPK) $(LUCI_IPK) $(GLAPP_IPK) "$$index_dir/" && \
+	sh mkfeed.sh "$$index_dir" && \
+	cp "$$index_dir/Packages" "$$index_dir/Packages.gz" $(OUT)/ && \
+	rm -rf "$$index_dir"
+
+# feed-artifact: stage only the static files published as the opkg feed.
+feed-artifact: feed
+	rm -rf $(OUT)/pages
+	mkdir -p $(OUT)/pages
+	cp $(OUT)/Packages $(OUT)/Packages.gz $(STARWATCHD_IPK) $(LUCI_IPK) $(GLAPP_IPK) install.sh $(OUT)/pages/
 
 bin:
 	mkdir -p $(OUT)
 	cd ../router && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
-		-ldflags "-s -w" -o ../package/$(BIN) ./cmd/starwatchd
+		-ldflags "-s -w" -o $(abspath $(BIN)) ./cmd/starwatchd
 
 # Assemble an ipk from a staging dir: $1=pkgname $2=stagedir $3=arch
 define make_ipk

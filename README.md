@@ -100,27 +100,33 @@ menu is loaded at login, so log out and back in once after installing
 
 ## Install and upgrade from an opkg feed
 
-Build all packages plus `Packages` and `Packages.gz`:
+On a supported `aarch64_cortex-a53` router, install Starwatch and the matching
+admin panel in one command:
 
 ```sh
-make -C package VERSION=0.1.0 feed
-# package/out/{*.ipk,Packages,Packages.gz}
+wget -qO- https://keithah.github.io/openwrt-starwatch/install.sh | sh
 ```
 
-Host `package/out/` on an HTTP server reachable by the router, then register it
-once:
+The installer detects GL.iNet SDK4 and installs `gl-app-starwatch`; other
+supported OpenWrt systems receive `luci-app-starwatch`. It preserves other
+custom feeds, does not force downgrades or reinstalls, and leaves Starwatch
+configuration and routing untouched. Unsupported architectures stop before
+making changes.
 
-```sh
-echo 'src/gz starwatch https://your-host/starwatch-feed' >> /etc/opkg/customfeeds.conf
-opkg update
-opkg install starwatchd luci-app-starwatch gl-app-starwatch
-```
-
-For later releases, bump `VERSION`, publish the refreshed feed, and run:
+For later releases, refresh the public feed and upgrade the packages selected
+by your router type:
 
 ```sh
 opkg update
-opkg upgrade starwatchd luci-app-starwatch gl-app-starwatch
+opkg upgrade starwatchd luci-app-starwatch
+# GL.iNet SDK4: opkg upgrade starwatchd gl-app-starwatch
+```
+
+Maintainers can stage the exact static GitHub Pages feed artifact locally:
+
+```sh
+make -C package feed-artifact
+# package/out/pages/{Packages,Packages.gz,install.sh,*.ipk}
 ```
 
 The GL.iNet Plug-ins page can use the same feed. mwan3 is optional; Starwatch
