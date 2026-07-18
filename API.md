@@ -1,9 +1,8 @@
 # Starwatch HTTP API
 
 This document defines the token-authenticated API served by `starwatchd`. It
-documents the released 1.0.2 surface and the approved 1.1.0 diagnostic, battery,
-and Starlink-router additions. Sections marked **1.1.0** are design contracts and
-are not implemented in 1.0.2.
+documents the released 1.1.0 surface, including diagnostics, battery, and
+curated Starlink-router management.
 
 Starwatch is local-network-first. It does not use a Starlink account or cloud
 API, and it does not claim account, billing, activation, plan, or global outage
@@ -45,7 +44,7 @@ An empty configured token denies every API request. `POST
 /api/config/regenerate-token` returns a replacement once and invalidates the old
 token immediately.
 
-## Released endpoints (1.0.2)
+## Released endpoints
 
 ### `GET /api/status`
 
@@ -203,7 +202,7 @@ Queues a test notification through configured webhook and ntfy delivery.
 Sends one-Hz frames containing `t`, `dish`, and `wan`, plus asynchronous
 `event` messages. Slow clients are disconnected when their bounded queue fills.
 
-## Diagnostic expansion (1.1.0)
+## Diagnostics and battery (1.1.0)
 
 ### Additions to `GET /api/status`
 
@@ -306,9 +305,9 @@ and 500 milliseconds. The final open bucket has `upper_bound_ms: null`.
 Outage totals merge only intervals inside the requested span and do not double
 count overlapping representations of the same outage.
 
-## Battery configuration (1.1.0)
+## Battery configuration
 
-`GET /api/config` gains:
+`GET /api/config` returns:
 
 ```json
 {
@@ -353,7 +352,7 @@ StarBar reports power but explicitly does not estimate battery runtime.
 UCI persistence uses a dedicated `config battery` section. Unknown UCI content
 continues to be preserved.
 
-## Starlink-router telemetry (1.1.0)
+## Starlink-router telemetry and guarded writes (1.1.0)
 
 ### `GET /api/router`
 
@@ -655,7 +654,7 @@ authority.
 
 ## Dashboard additions (1.1.0)
 
-The SPA will add:
+The SPA includes:
 
 - Ping-success values and source-labeled dish/router/WAN checks.
 - Latency current/mean/P95/max, distribution, and router-vs-dish context. The

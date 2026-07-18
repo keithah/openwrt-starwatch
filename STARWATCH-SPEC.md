@@ -4,7 +4,7 @@
 |---|---|
 | **Product** | Starwatch — Starlink dish monitoring + management for OpenWrt routers, with WAN-link health and failover assistance |
 | **Platforms** | OpenWrt 23.05+ (LuCI) and GL.iNet SDK4 firmware (native **Applications** panel entry). First target: GL-X3000 Spitz AX (`aarch64_cortex-a53`); arch is a build knob |
-| **Status** | Draft v1.0 — 2026-07-15 |
+| **Status** | Released v1.1.0 — 2026-07-17 |
 | **Components** | `starwatchd` (Go daemon) · `luci-app-starwatch` · `gl-app-starwatch` · opkg feed |
 | **Sources** | Starlink local gRPC API (community-documented: sparky8512/starlink-grpc-tools, clarkzjw/starlink-grpc-golang protos) · Speedify OpenWrt integration (support.speedify.com articles 918/922/235/241/1066, sagar.se teardown) · starbar.app feature set · `peakdo/router` (wattline) packaging + GL-panel learnings, verified on a GL-X3000 |
 
@@ -131,7 +131,7 @@ config alerts
 | | Topology | Dish reachability | Behavior |
 |---|---|---|---|
 | **A (primary)** | Dish in **bypass mode** → OpenWrt WAN gets CGNAT/public IP | Needs a host route: `192.168.100.1/32` out the WAN interface | Full functionality. Package `postinst` offers the route via a UCI static-route entry if missing (well-known community requirement; documented in starlink-grpc-tools setup guidance) |
-| **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC on port 9000 is polled for clients, ping health, configuration, radios, diagnostics, and interfaces. Curated writes follow the guarded `API.md` contract: client blocking is schedule-based, transmit power uses the protocol's percentage levels, and whole-network writes remain gated on verified credential readback. The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
+| **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC on port 9000 is polled for clients, ping health, configuration, radios, diagnostics, and interfaces. Curated writes follow the guarded `API.md` contract: client blocking is schedule-based, transmit power uses real `TX_POWER_LEVEL_*` enums, and whole-network writes remain gated on credential readback. The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
 | **C** | No dish reachable (probe fails) | — | **WAN-only mode:** dashboard shows WAN health cards + outage log from probes; dish cards show a setup hint. Daemon retries discovery every 60 s |
 
 Detection is automatic at startup and on failure: try `get_device_info` at `dish_addr`; classify topology; expose it in `/api/status` and the UI header.
@@ -291,10 +291,10 @@ Bearer token (`Authorization: Bearer <token>` or `?token=` for the iframe bootst
 | `/api/config` | GET/PUT | Daemon settings (writes go through UCI + reload) |
 | `/api/ws` | WS | 1 Hz status frames `{t, dish:{...}, wan:{...}}` + async `{event:...}` messages |
 
-### 9.1 1.1.0 implementation phases
+### 9.1 1.1.0 delivered phases
 
-The expanded contracts in `API.md` are implemented in risk order, with each
-phase independently testable against a fake gRPC server:
+The expanded contracts in `API.md` shipped in risk order, with each phase
+covered by an in-process fake gRPC server:
 
 1. Diagnostics plus status GPS/PNT and disablement fields.
 2. Battery configuration and derived runtime.
@@ -303,12 +303,10 @@ phase independently testable against a fake gRPC server:
    `ClientConfig`.
 5. Client block/unblock through a Starwatch-owned `WeeklyBlockSchedule` on the
    same targeted RPC.
-6. Wi-Fi network and radio writes. Whole-network writes are blocked from release
-   until on-device verification proves `wifi_get_config` returns every BSS
-   credential required to reconstruct the `ApplyNetworks` collection; if any
-   credential is redacted, network writes are withheld. Radio writes use only
-   the real transmit-power percentages and router-advertised non-DFS channels
-   defined in `API.md`.
+6. Wi-Fi network and radio writes. Each network edit is rejected when any
+   sibling PSK credential is redacted, so `ApplyNetworks` cannot erase an
+   unseen password. Scalar writes use exactly one apply flag; channel writes
+   remain withheld when firmware does not advertise a non-DFS allowed set.
 
 ---
 
@@ -346,7 +344,7 @@ Speedify's structure: status header, then a vertical stack of cards. Card order 
 | **Speed test** | Run button, latest + history table | §5.1, `speedtests` |
 | **Alerts** | Active raw dish flags + Starwatch alert history; link to settings | §7 |
 | **Hardware** | Model (friendly name mapped from `hardware_version`), firmware, dish id, country, mobility class, temperatures when available | §4.1 |
-| **Starlink router** (topology B only) | Clients with full MAC/IP/signal/SNR/rates, ping health, radios, temperatures, Ethernet/bridge/interfaces, plus the guarded `API.md` write surface: targeted client rename, schedule-based block/unblock, protocol-defined transmit-power percentages, and credential-readback-gated network edits | router gRPC :9000 |
+| **Starlink router** (topology B only) | Clients with full MAC/IP/signal/SNR/rates, ping health, radios, temperatures, Ethernet/bridge/interfaces, plus the guarded `API.md` write surface: targeted client rename, schedule-based block/unblock, real transmit-power enums, and credential-readback-gated network edits | router gRPC :9000 |
 | **Settings** | Token display/regenerate, dish address, probe hosts, alert thresholds + webhook/ntfy config with "send test", history retention | §2.1 |
 
 ---

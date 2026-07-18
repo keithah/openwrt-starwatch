@@ -26,11 +26,11 @@ ls -la package/out/*.ipk
 
 The build produces:
 
-- `starwatchd_1.0.1_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
+- `starwatchd_1.1.0_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
   UCI configuration, guarded dish route, token generator, and procd service.
-- `luci-app-starwatch_1.0.1_all.ipk` — LuCI menu, one-method rpcd bridge, and
+- `luci-app-starwatch_1.1.0_all.ipk` — LuCI menu, one-method rpcd bridge, and
   iframe launcher.
-- `gl-app-starwatch_1.0.1_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
+- `gl-app-starwatch_1.1.0_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
   evaluated Vue 2 iframe view.
 
 The outer `.ipk` is a **gzipped ustar tar**, not an `ar` archive. Its three
@@ -42,7 +42,7 @@ macOS pax headers. All payload paths remain below ustar's 100-character limit.
 architecture when needed:
 
 ```sh
-make -C package VERSION=1.0.2 ARCH=aarch64_cortex-a53 all
+make -C package VERSION=1.1.0 ARCH=aarch64_cortex-a53 all
 ```
 
 The committed GL view at
@@ -66,9 +66,9 @@ for f in package/out/*.ipk; do
 done
 
 ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/starwatchd_1.0.1_aarch64_cortex-a53.ipk \
-  /tmp/luci-app-starwatch_1.0.1_all.ipk \
-  /tmp/gl-app-starwatch_1.0.1_all.ipk'
+  /tmp/starwatchd_1.1.0_aarch64_cortex-a53.ipk \
+  /tmp/luci-app-starwatch_1.1.0_all.ipk \
+  /tmp/gl-app-starwatch_1.1.0_all.ipk'
 ```
 
 Install either admin-panel package or both. `starwatchd`'s post-install script
@@ -93,7 +93,7 @@ menu is loaded at login, so log out and back in once after installing
 Build all packages plus `Packages` and `Packages.gz`:
 
 ```sh
-make -C package VERSION=1.0.2 feed
+make -C package VERSION=1.1.0 feed
 # package/out/{*.ipk,Packages,Packages.gz}
 ```
 
@@ -170,6 +170,8 @@ with `uci get starwatch.main.token`.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/status` | Dish, topology, availability, config readback, and router card |
+| `GET /api/diagnostics?span=` | Derived latency, ping, outage, power, and configured-battery summaries |
+| `GET /api/router` | Topology-B Starlink-router read model, clients, radios, and interfaces |
 | `GET /api/history?series=&span=` | RAM/minute/quarter telemetry history |
 | `GET /api/wan` | Interface probes, rates, and optional mwan3 state |
 | `GET /api/outages?span=` | Merged dish, reachability, and path outage timeline |
@@ -178,7 +180,10 @@ with `uci get starwatch.main.token`.
 | `POST /api/control/<action>` | Audited dish controls |
 | `GET`, `POST /api/speedtest` | Speed-test state and trigger |
 | `GET`, `PUT /api/config` | Read or update safe daemon settings |
+| `PATCH /api/router/clients/{mac}` | Confirmed client rename and Starwatch-owned schedule block/unblock |
+| `PATCH /api/router/wifi` | Guarded scalar Wi-Fi/radio edits and credential-preserving BSS edits |
 | `GET /api/ws` | One-hertz snapshots and asynchronous events |
 
 The complete wire format and operational constraints are in
-[`STARWATCH-SPEC.md`](STARWATCH-SPEC.md).
+[`API.md`](API.md) and [`STARWATCH-SPEC.md`](STARWATCH-SPEC.md). Release notes
+are maintained in [`CHANGELOG.md`](CHANGELOG.md).
