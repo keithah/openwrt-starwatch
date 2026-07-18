@@ -12,7 +12,17 @@ The admin-panel packages pass the generated token to the dashboard through a
 small authenticated RPC bridge, so the router login remains the access
 boundary.
 
-> Screenshot placeholder: add the GL.iNet dashboard capture.
+## Dashboard
+
+The dashboard keeps live terminal, WAN, and power information in one local
+view. Its icon rail groups the available cards into focused sections, while
+Overview visibility and compact density stay private to the current browser.
+
+![Starwatch desktop Overview showing the icon rail, live telemetry, WAN health, and power](docs/images/dashboard-overview.png)
+
+<p align="center">
+  <img src="docs/images/dashboard-mobile.png" width="390" alt="Starwatch mobile Overview with the section-menu button, live status, and telemetry graph">
+</p>
 
 ## Build the packages
 
