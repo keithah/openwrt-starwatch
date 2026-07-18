@@ -117,33 +117,6 @@ export function hasMotors(hardwareVersion = '') {
   return !(value.includes('mini') || value.startsWith('rev_hp') || value.startsWith('rev4'));
 }
 
-// Preferences are deliberately a small, versioned browser-local model. The
-// registry remains authoritative so dashboards gain cards introduced by later
-// releases and never try to render retired card ids.
-export function normalizeCardPreferences(cards = [], saved = null) {
-  const ids = cards.map(card => card.id);
-  const known = new Set(ids);
-  const savedOrder = Array.isArray(saved?.order) ? saved.order : [];
-  const order = [];
-  for (const id of savedOrder) {
-    if (known.has(id) && !order.includes(id)) order.push(id);
-  }
-  for (const id of ids) if (!order.includes(id)) order.push(id);
-  const hidden = {};
-  if (saved?.hidden && typeof saved.hidden === 'object') {
-    for (const [id, value] of Object.entries(saved.hidden)) if (known.has(id) && value === true) hidden[id] = true;
-  }
-  return {order, hidden};
-}
-
-export function visibleCardOrder(cards = [], preferences = {}) {
-  const byID = new Map(cards.map(card => [card.id, card]));
-  return (preferences.order || [])
-    .map(id => byID.get(id))
-    .filter(card => card?.available && !preferences.hidden?.[card.id])
-    .map(card => card.id);
-}
-
 // Router writes deliberately have one mutation per request. Keeping the
 // confirmation phrase here makes the UI payload observable and testable while
 // the server remains the authority for validation.

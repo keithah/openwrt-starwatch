@@ -8,9 +8,9 @@
 import {
   deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
   friendlyModel, hasMotors, assembleSeries, outageBarLayout,
-  normalizeCardPreferences, visibleCardOrder, clientMutationPayload,
-  clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry,
+  clientMutationPayload, clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry,
 } from './logic.js';
+import {dashboardSection, normalizeOverviewPreferences, visibleOverviewCards} from './dashboard-model.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 import {APIError} from './api.js';
 import {h, render} from './vendor/preact.module.js';
@@ -61,17 +61,16 @@ try {
   chartHost.remove();
   const shortOutage = outageBarLayout({start: '2026-01-30T23:59:15Z', duration: 45e9}, Date.parse('2026-01-31T00:00:00Z'), 30 * 86400);
   assert('short outage bars retain minimum visibility', shortOutage.widthPercent >= .4);
-  const cards = [
-    {id: 'live', available: true}, {id: 'power', available: true},
-    {id: 'router', available: true}, {id: 'alignment', available: false},
-  ];
-  const savedCards = {order: ['power', 'old-card', 'live'], hidden: {power: true, 'old-card': true}};
-  const preferences = normalizeCardPreferences(cards, savedCards);
-  assert('saved card order is retained and new cards append', preferences.order.join(',') === 'power,live,router,alignment');
-  assert('unknown card ids are pruned', !preferences.order.includes('old-card') && !('old-card' in preferences.hidden));
-  assert('hidden card preferences are retained', preferences.hidden.power === true);
-  assert('data absence wins over card visibility preferences', visibleCardOrder(cards, preferences).join(',') === 'live,router');
-  assert('reset restores default ordered visible cards', visibleCardOrder(cards, normalizeCardPreferences(cards, null)).join(',') === 'live,power,router');
+  assert('telemetry hash resolves to the telemetry section', dashboardSection('#/telemetry') === 'telemetry');
+  assert('unknown dashboard hashes resolve to overview', dashboardSection('#/retired-section') === 'overview');
+  const overviewPreferences = normalizeOverviewPreferences({
+    hidden: {power: true, 'retired-card': true},
+    compact: true,
+  });
+  assert('Overview preferences prune hidden cards outside the registry', Object.keys(overviewPreferences.hidden).join(',') === 'power');
+  assert('Overview preferences retain compact density', overviewPreferences.compact === true);
+  const overviewCards = [{id: 'power'}, {id: 'alerts'}];
+  assert('Overview cards default visible and honor hidden preferences', visibleOverviewCards(overviewCards, overviewPreferences).map(card => card.id).join(',') === 'alerts' && visibleOverviewCards(overviewCards, normalizeOverviewPreferences()).length === 2);
   const renamePayload = clientMutationPayload({configRevision: 'incarnation:19', givenName: 'Work Mac'});
   assert('rename payload carries the current revision and typed confirmation', renamePayload.config_revision === 'incarnation:19' && renamePayload.confirmation === 'RENAME CLIENT' && renamePayload.given_name === 'Work Mac');
   const blockPayload = clientMutationPayload({configRevision: 'incarnation:20', blocked: true});
@@ -110,7 +109,7 @@ try {
   await new Promise(resolve => requestAnimationFrame(resolve));
   const failedDialog = document.querySelector('.wifi-confirm');
   const failedInput = failedDialog.querySelector('input');
-  failedInput.value = 'APPLY WIFI CHANGES';
+  failedInput.value = 'CREATE OPEN NETWORK';
   failedInput.dispatchEvent(new Event('input', {bubbles: true}));
   failedDialog.querySelector('button').click();
   await new Promise(resolve => setTimeout(resolve, 0));

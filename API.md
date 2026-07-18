@@ -1,7 +1,7 @@
 # Starwatch HTTP API
 
 This document defines the token-authenticated API served by `starwatchd`. It
-documents the released 1.1.0 surface, including diagnostics, battery, and
+documents the released 0.1.0 surface, including diagnostics, battery, and
 curated Starlink-router management.
 
 Starwatch is local-network-first. It does not use a Starlink account or cloud
@@ -15,8 +15,8 @@ state.
 - `?token=<token>` is also accepted for browser and WebSocket bootstrap. Clients
   should avoid it elsewhere because URLs are commonly logged.
 - JSON request bodies generally reject unknown fields and have a 128 KiB limit.
-  In 1.0.2, `POST /api/control/{action}` is an exception: it accepts unknown
-  fields and has a 64 KiB limit. Every 1.1.0 PATCH handler must call
+  `POST /api/control/{action}` is an exception: it accepts unknown fields and
+  has a 64 KiB limit. Every PATCH handler must call
   `json.Decoder.DisallowUnknownFields` and enforce the 128 KiB limit.
 - Date-time values are RFC 3339 strings unless a field is explicitly named `*_ns` or
   `*_seconds`.
@@ -24,12 +24,12 @@ state.
   temperatures use degrees Celsius, and radio rates use megabits per second.
 - Missing data is omitted or represented by an availability object. A numeric
   zero is never used to mean unavailable.
-- Existing errors are UTF-8 `text/plain`. The principal 1.0.2 endpoint-specific
+- Existing errors are UTF-8 `text/plain`. The principal endpoint-specific
   codes are `400` invalid input, `401` authentication failure, `409` conflicting
   state, `502` upstream gRPC failure, and `503` unavailable component.
-- Mutation success codes are endpoint-specific in 1.0.2. Dish controls,
+- Mutation success codes are endpoint-specific. Dish controls,
   speed-test start, and alert-test enqueue return `202`; config PUT, failover
-  assist POST, and token regeneration return `200`. A 1.0.2 `202` means the
+  assist POST, and token regeneration return `200`. A `202` means the
   immediate operation was accepted or its upstream call returned without error,
   not that every requested field was compared with a subsequent readback.
 
@@ -169,7 +169,7 @@ Current canonical actions are `reboot`, `stow`, `unstow`, `snow-melt`,
 `sleep-schedule`, `gps`, `gps-enable`, `gps-disable`,
 `clear-obstruction-map`, and `firmware-update`. The aliases `snow-melt-mode`,
 `sleep`, and `software-update` are also accepted. `firmware-update-check` and
-`firmware-update-apply` are deprecated aliases: in 1.0.2 both invoke the same
+`firmware-update-apply` are deprecated aliases: both invoke the same
 `software_update` RPC as `firmware-update`; “check” is not a safe no-op query.
 Every action is audited. The generic `gps` action requires an explicit
 `enabled` boolean.
@@ -202,7 +202,7 @@ Queues a test notification through configured webhook and ntfy delivery.
 Sends one-Hz frames containing `t`, `dish`, and `wan`, plus asynchronous
 `event` messages. Slow clients are disconnected when their bounded queue fills.
 
-## Diagnostics and battery (1.1.0)
+## Diagnostics and battery (0.1.0)
 
 ### Additions to `GET /api/status`
 
@@ -352,7 +352,7 @@ StarBar reports power but explicitly does not estimate battery runtime.
 UCI persistence uses a dedicated `config battery` section. Unknown UCI content
 continues to be preserved.
 
-## Starlink-router telemetry and guarded writes (1.1.0)
+## Starlink-router telemetry and guarded writes (0.1.0)
 
 ### `GET /api/router`
 
@@ -463,7 +463,7 @@ Router status, clients, ping metrics, diagnostics, configuration, and radio
 statistics are polled every 60 seconds. Each subfield follows the existing
 three-consecutive-failures availability rule.
 
-## Curated Starlink-router writes (1.1.0)
+## Curated Starlink-router writes (0.1.0)
 
 All router mutations:
 
@@ -483,9 +483,8 @@ All router mutations:
    writes use the targeted RPC and never resend either client collection. No
    unrelated apply flag is set.
 4. Reread configuration and compare every requested field before returning
-   `202`. This is a new 1.1.0 requirement, not behavior guaranteed by a 1.0.2
-   success response. A mismatch is an upstream failure and must not be reported
-   as accepted.
+   `202`. A mismatch is an upstream failure and must not be reported as
+   accepted.
 5. Append a `router_control` audit event containing action, non-secret
    parameters, result/error, and affected network/client identifiers.
 6. Publish the audit event over `/api/ws`.
@@ -493,7 +492,7 @@ All router mutations:
    addresses are non-secret identifiers and do persist in `router_control`
    audit events and sqlite when they identify the affected client.
 
-Every 1.1.0 PATCH body rejects unknown fields and is limited to 128 KiB. In
+Every PATCH body rejects unknown fields and is limited to 128 KiB. In
 addition to the released error codes, these endpoints use `422` for a known but
 unsupported or unsafe-on-this-router value.
 
@@ -652,7 +651,7 @@ regulatory state, or becoming a general Starlink-router administration clone.
 The official Starlink application remains the recovery and advanced-management
 authority.
 
-## Dashboard additions (1.1.0)
+## Dashboard additions (0.1.0)
 
 The SPA includes:
 
@@ -670,12 +669,15 @@ The SPA includes:
   traffic, Ethernet, bridge, WAN, and partial-telemetry reasons.
 - A guarded Wi-Fi editor and client rename/schedule-based block controls using
   the mutation contracts and network-write gate above.
+- Seven hash-routed dashboard sections behind an expandable icon rail. Overview
+  card visibility and compact density are browser-local preferences; they do
+  not alter daemon configuration or telemetry collection.
 
 The page remains fully offline, uses relative daemon URLs only, and hides cards
 whose entire data source is absent. Individual missing fields render `—` with an
 availability reason rather than a fabricated zero.
 
-## Verification requirements for 1.1.0
+## Verification requirements for 0.1.0
 
 - Fake gRPC coverage for every new read and write request type.
 - Tests asserting exact `apply_*` flags and absence of unrelated apply flags.

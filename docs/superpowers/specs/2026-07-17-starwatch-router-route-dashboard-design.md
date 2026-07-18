@@ -52,18 +52,15 @@ UCI or kernel route covering the dish.
 
 ## Dashboard customization
 
-A card registry provides stable IDs, labels, default positions, availability,
-and render functions. Versioned localStorage preferences contain only order and
-hidden maps. Normalization drops unknown IDs, preserves saved known order,
-inserts newly introduced cards at their relative default positions, and leaves
-data-driven card absence authoritative over user visibility.
+A dashboard manifest provides stable section and card IDs, labels, rail icons,
+and card membership. Overview preferences contain only the visibility map and
+compact-density setting; unknown IDs are dropped and data-driven card absence
+remains authoritative over user visibility.
 
-The status-header gear opens a right-side drawer on desktop and a full-height
-mobile sheet. Pointer events support mouse and touch reorder. Move-up/down
-buttons provide a keyboard equivalent. The drawer is a labeled modal with
-focus containment, Escape close, restored trigger focus, accessible toggles,
-and an explanatory data-availability note. Existing dark/light variables and
-reduced-motion rules apply.
+The header's Customize control opens an Overview-only right drawer. The rail
+expands on desktop hover and becomes a hamburger-triggered left drawer on
+mobile. Both drawers preserve focus, close with Escape, and respect the
+existing dark/light variables and reduced-motion rules.
 
 ## Documentation and verification
 

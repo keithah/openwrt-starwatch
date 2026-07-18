@@ -2,7 +2,7 @@
 
 ## Scope
 
-Implement the read-only 1.1.0 diagnostic expansion: corrected dish GPS/PNT,
+Implement the read-only 0.1.0 diagnostic expansion: corrected dish GPS/PNT,
 slot, and disablement status fields plus `GET /api/diagnostics`. The work adds no
 gRPC writes, battery model, `/api/router`, new router RPC, SPA change, Wi-Fi or
 client access, control change, or packaging change.

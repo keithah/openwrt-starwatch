@@ -2,7 +2,7 @@
 
 ## Scope
 
-Implement the approved 1.1.0 battery configuration and derived terminal-runtime
+Implement the approved 0.1.0 battery configuration and derived terminal-runtime
 contract. The feature is pure configuration and arithmetic: no gRPC writes,
 router API/telemetry, Wi-Fi/client access, dish-control change, SPA change, or
 packaging change.

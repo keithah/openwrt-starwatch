@@ -1,5 +1,5 @@
 Package: starwatchd
-Version: 1.0.1
+Version: 0.1.0
 Architecture: aarch64_cortex-a53
 Maintainer: Keith <keith@kodi.tv>
 Section: utils

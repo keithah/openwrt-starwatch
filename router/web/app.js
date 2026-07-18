@@ -1,72 +1,31 @@
 import {Component, h, render} from './vendor/preact.module.js';
 import htm from './vendor/htm.module.js';
 import {APIError, apiFetch, bootstrapToken, getHistory, LiveClient, storeToken} from './api.js';
-import {StatusHeader, GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCard, ControlsCard, SpeedCard, AlertsCard, HardwareCard, StarlinkRouterCard, ClientManagementCard} from './cards.js';
+import {GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCard, ControlsCard, SleepScheduleCard, SpeedCard, AlertsCard, HardwareCard, StarlinkRouterCard, ClientManagementCard} from './cards.js';
 import {TokenView, SettingsView, EventsView} from './views.js';
-import {clientMutationPayload, clientMutationShouldRetry, normalizeCardPreferences, wifiMutationPayload, wifiMutationShouldRetry} from './logic.js';
+import {clientMutationPayload, clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry} from './logic.js';
+import {CustomizePanel, IconRail, loadOverviewPreferences, resetOverviewPreferences, saveOverviewPreferences, SectionHeader} from './dashboard.js';
+import {dashboardSection, normalizeOverviewPreferences, sectionDefinition, visibleOverviewCards} from './dashboard-model.js';
 
 const html = htm.bind(h);
 const graphSeries = {
   throughput: ['dish_down_bps','dish_up_bps','router_down_bps','router_up_bps'],
   latency: ['latency_ms','wan_probe_rtt_ms'], loss: ['drop_rate','wan_probe_loss'], power: ['power_w'],
 };
-const CARD_PREFERENCES_KEY = 'starwatch.dashboard.cards.v1';
-
-const loadCardPreferences = () => {
-  try { return JSON.parse(localStorage.getItem(CARD_PREFERENCES_KEY) || 'null'); } catch (_) { return null; }
-};
-
-class CardDrawer extends Component {
-  componentDidMount() { this.focusFirst(); }
-  focusFirst() { requestAnimationFrame(() => this.closeButton?.focus()); }
-  keyDown = event => {
-    if (event.key === 'Escape') { event.preventDefault(); this.props.onClose(); return; }
-    if (event.key !== 'Tab') return;
-    const focusable = [...this.base.querySelectorAll('button:not([disabled]), input:not([disabled])')];
-    const first = focusable[0], last = focusable.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-  };
-  pointerDown = (event, id) => { event.preventDefault(); event.currentTarget.setPointerCapture?.(event.pointerId); this.dragging = id; };
-  pointerMove = event => {
-    if (!this.dragging) return;
-    event.preventDefault();
-    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-card-id]')?.dataset.cardId;
-    if (target && target !== this.dragging) this.props.onMove(this.dragging, target);
-  };
-  pointerUp = () => { this.dragging = null; };
-  render({cards, preferences, onClose, onToggle, onMove, onReset}) {
-    const byID = new Map(cards.map(card => [card.id, card]));
-    const ordered = preferences.order.map(id => byID.get(id)).filter(Boolean);
-    return html`<div class="drawer-layer" onMouseDown=${event => { if (event.target === event.currentTarget) onClose(); }}>
-      <aside class="card-drawer" role="dialog" aria-modal="true" aria-labelledby="card-drawer-title" onKeyDown=${this.keyDown}>
-        <header class="drawer-heading"><div><span class="eyebrow">LOCAL VIEW</span><h2 id="card-drawer-title">Customize dashboard</h2></div><button class="drawer-close" type="button" aria-label="Close dashboard customization" onClick=${onClose} ref=${node => { this.closeButton = node; }}>×</button></header>
-        <p class="drawer-note">Some cards only show when they have data to present.</p>
-        <ol class="drawer-cards" onPointerMove=${this.pointerMove} onPointerUp=${this.pointerUp} onPointerCancel=${this.pointerUp}>${ordered.map((card, index) => html`<li data-card-id=${card.id} class=${card.available ? '' : 'unavailable'}>
-          <button class="drag-handle" type="button" aria-label=${`Drag ${card.label} to reorder`} onPointerDown=${event => this.pointerDown(event, card.id)} onPointerUp=${this.pointerUp}>⠿</button>
-          <span>${card.label}</span><small>${card.available ? '' : 'Waiting for data'}</small>
-          <button class="move-card" type="button" disabled=${index === 0} aria-label=${`Move ${card.label} up`} onClick=${() => onMove(card.id, ordered[index - 1]?.id, false)}>↑</button>
-          <button class="move-card" type="button" disabled=${index === ordered.length - 1} aria-label=${`Move ${card.label} down`} onClick=${() => onMove(card.id, ordered[index + 1]?.id, true)}>↓</button>
-          <label class="card-toggle"><input type="checkbox" checked=${!preferences.hidden[card.id]} onChange=${() => onToggle(card.id)}/><span class="sr-only">Show ${card.label}</span></label>
-        </li>`)}</ol>
-        <button class="button subtle drawer-reset" type="button" onClick=${onReset}>Reset to default</button>
-      </aside>
-    </div>`;
-  }
-}
 
 class App extends Component {
   constructor() {
     super();
     const token=bootstrapToken();
-    this.state={token,authNeeded:!token,route:location.hash||'#/',connection:'connecting',snapshot:{},wan:{},outages:[],events:[],speed:{state:'idle'},speedHistory:[],tab:'throughput',span:'3h',graphResponses:[],powerResponses:[],graphLoading:false,notice:'',error:'',cardPreferences:loadCardPreferences(),cardDrawerOpen:false,router:null};
+    this.state={token,authNeeded:!token,route:location.hash||'#/',connection:'connecting',snapshot:{},wan:{},outages:[],events:[],speed:{state:'idle'},speedHistory:[],tab:'throughput',span:'3h',graphResponses:[],powerResponses:[],graphLoading:false,notice:'',error:'',overviewPreferences:loadOverviewPreferences(),cardDrawerOpen:false,railOpen:false,fullscreen:false,router:null};
   }
 
   componentDidMount() {
     this.onHash=()=>this.setState({route:location.hash||'#/'}); addEventListener('hashchange',this.onHash);
+    this.onFullscreenChange=()=>this.setState({fullscreen:!!document.fullscreenElement}); document.addEventListener('fullscreenchange',this.onFullscreenChange);
     if (this.state.token) this.hydrate();
   }
-  componentWillUnmount() { removeEventListener('hashchange',this.onHash); this.live?.stop(); this.graphAbort?.abort(); clearTimeout(this.speedTimer); }
+  componentWillUnmount() { removeEventListener('hashchange',this.onHash); document.removeEventListener('fullscreenchange',this.onFullscreenChange); this.live?.stop(); this.graphAbort?.abort(); clearTimeout(this.speedTimer); }
 
   unauthorized = () => { this.live?.stop(); storeToken(''); this.setState({authNeeded:true,token:'',error:'Token rejected by Starwatch.'}); };
   request = async (path, options) => { try{return await apiFetch(this.state.token,path,options);}catch(error){if(error.status===401)this.unauthorized();throw error;} };
@@ -166,19 +125,16 @@ class App extends Component {
   testAlert=async()=>{try{await this.request('/api/alerts/test',{method:'POST'});this.setState({notice:'Test notification queued.'});}catch(error){this.setState({notice:error.message});}};
   regenerate=async()=>{if(!confirm('Regenerate the access token? Existing dashboard sessions will stop working.'))return;try{const {token}=await this.request('/api/config/regenerate-token',{method:'POST'});storeToken(token);this.setState({token,newToken:token,notice:'Token regenerated. Copy the full value now.'},()=>this.hydrate());}catch(error){this.setState({notice:error.message});}};
   copyToken=async()=>{try{await navigator.clipboard.writeText(this.state.newToken);this.setState({notice:'New token copied.'});}catch(_){this.setState({notice:'Clipboard access was denied; select and copy the token manually.'});}};
-  setCardPreferences = updater => this.setState(state => {
-    const cardPreferences = updater(state.cardPreferences || {order: [], hidden: {}});
-    try { localStorage.setItem(CARD_PREFERENCES_KEY, JSON.stringify(cardPreferences)); } catch (_) {}
-    return {cardPreferences};
-  });
-  moveCard = (id, target, after = null) => { if (!target) return; this.setCardPreferences(preferences => { const original = normalizeCardPreferences(this.cardRegistry(this.state), preferences).order; const from = original.indexOf(id), targetIndex = original.indexOf(target); const order = original.filter(item => item !== id); const placeAfter = after === null ? from < targetIndex : after; const index = order.indexOf(target) + (placeAfter ? 1 : 0); order.splice(Math.max(0, index), 0, id); return {...preferences, order}; }); };
-  toggleCard = id => this.setCardPreferences(preferences => ({...preferences, hidden: {...preferences.hidden, [id]: !preferences.hidden?.[id]}}));
-  resetCards = () => { try { localStorage.removeItem(CARD_PREFERENCES_KEY); } catch (_) {} this.setState({cardPreferences:null}); };
+  toggleOverviewCard = id => this.setState(state => ({overviewPreferences: saveOverviewPreferences(normalizeOverviewPreferences({...state.overviewPreferences, hidden: {...state.overviewPreferences.hidden, [id]: !state.overviewPreferences.hidden[id]}}))}));
+  toggleDensity = () => this.setState(state => ({overviewPreferences: saveOverviewPreferences(normalizeOverviewPreferences({...state.overviewPreferences, compact: !state.overviewPreferences.compact}))}));
+  resetOverview = () => this.setState({overviewPreferences: resetOverviewPreferences()});
+  toggleFullscreen = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen?.(); } catch (_) {} };
 
   render(_,state) {
     if(state.authNeeded)return html`<${TokenView} error=${state.error} onSubmit=${this.acceptToken}/>`;
-    const route=state.route.split('?')[0];
-    return html`<div class="app-shell"><${StatusHeader} snapshot=${state.snapshot} connection=${state.connection} onCustomize=${() => this.setState({cardDrawerOpen:true})}/>${state.notice&&html`<button class="toast" onClick=${()=>this.setState({notice:''})}>${state.notice}<span>×</span></button>`}${route==='#/settings'?html`<${SettingsView} config=${state.config} onSave=${this.saveConfig} onTest=${this.testAlert} onRegenerate=${this.regenerate} onCopyToken=${this.copyToken} newToken=${state.newToken} notice=${state.notice}/>`:route==='#/events'?html`<${EventsView} events=${state.events}/>`:this.dashboard(state)}${state.cardDrawerOpen&&html`<${CardDrawer} cards=${this.cardRegistry(state)} preferences=${normalizeCardPreferences(this.cardRegistry(state), state.cardPreferences)} onClose=${() => this.setState({cardDrawerOpen:false}, () => document.querySelector('.header-customize')?.focus())} onToggle=${this.toggleCard} onMove=${this.moveCard} onReset=${this.resetCards}/>`}</div>`;
+    const section=dashboardSection(state.route.split('?')[0]);
+    const overviewCards=this.overviewCards(state);
+    return html`<div class=${`dashboard-shell${state.railOpen ? ' rail-drawer-open' : ''}`}><${IconRail} section=${section} open=${state.railOpen} onNavigate=${() => this.setState({railOpen:false,cardDrawerOpen:false})}/><div class="app-shell"><${SectionHeader} section=${section} snapshot=${state.snapshot} connection=${state.connection} fullscreen=${state.fullscreen} onFullscreen=${this.toggleFullscreen} onMenu=${() => this.setState({railOpen:true})} onCustomize=${() => this.setState({cardDrawerOpen:true})}/>${state.railOpen&&html`<button class="rail-scrim" type="button" aria-label="Close dashboard sections" onClick=${() => this.setState({railOpen:false})}/>`}${state.notice&&html`<button class="toast" onClick=${()=>this.setState({notice:''})}>${state.notice}<span>×</span></button>`}<main id="dashboard" class=${`dashboard dashboard-${section}${state.overviewPreferences.compact ? ' dashboard-compact' : ''}`}>${this.sectionContent(section, state)}</main>${state.cardDrawerOpen&&html`<${CustomizePanel} cards=${overviewCards} preferences=${state.overviewPreferences} onClose=${() => this.setState({cardDrawerOpen:false}, () => document.querySelector('[data-customize-overview]')?.focus())} onToggle=${this.toggleOverviewCard} onDensity=${this.toggleDensity} onReset=${this.resetOverview}/>`}</div></div>`;
   }
 
   cardRegistry(state) { return [
@@ -189,13 +145,23 @@ class App extends Component {
     {id:'power',label:'Power',available:state.snapshot.dish?.power_w != null || !!state.powerResponses?.length,render:()=>html`<${PowerCard} snapshot=${state.snapshot} responses=${state.powerResponses}/>`},
     {id:'wan-health',label:'WAN health',available:!!(state.wan?.available || state.wan?.mwan3),render:()=>html`<${WANCard} wan=${state.wan} assist=${state.assist} onRefreshAssist=${this.refreshAssist} onApplyAssist=${this.applyAssist}/>`},
     {id:'dish-controls',label:'Dish controls',available:true,render:()=>html`<${ControlsCard} snapshot=${state.snapshot} onControl=${this.control}/>`},
+    {id:'sleep-schedule',label:'Sleep schedule',available:true,render:()=>html`<${SleepScheduleCard} snapshot=${state.snapshot} onControl=${this.control}/>`},
     {id:'speed-test',label:'Speed test',available:true,render:()=>html`<${SpeedCard} speed=${state.speed} history=${state.speedHistory} onRun=${this.runSpeed} reachable=${state.snapshot.dish_reachable}/>`},
     {id:'alerts',label:'Alerts',available:true,render:()=>html`<${AlertsCard} snapshot=${state.snapshot} events=${state.events}/>`},
     {id:'hardware',label:'Hardware',available:!!state.snapshot.device_info,render:()=>html`<${HardwareCard} snapshot=${state.snapshot}/>`},
     {id:'starlink-router',label:'Starlink router',available:!!state.router,render:()=>html`<${StarlinkRouterCard} router=${state.router} onMutate=${this.mutateRouterWifi}/>`},
     {id:'client-management',label:'Client management',available:!!state.router,render:()=>html`<${ClientManagementCard} router=${state.router} onMutate=${this.mutateRouterClient}/>`},
   ]; }
-  dashboard(state) { const cards=this.cardRegistry(state); const preferences=normalizeCardPreferences(cards,state.cardPreferences); const byID=new Map(cards.map(card=>[card.id,card])); return html`<main id="dashboard" class="dashboard"><nav class="quick-nav"><a href="#/events">Events</a><a href="#/settings">Settings</a></nav><div class="card-grid">${preferences.order.filter(id=>!preferences.hidden[id]).map(id=>byID.get(id)).filter(card=>card?.available).map(card=>card.render())}</div></main>`; }
+  overviewCards(state) { return this.cardsForSection(state, 'overview'); }
+  cardsForSection(state, section) { const byID=new Map(this.cardRegistry(state).map(card => [card.id, card])); return sectionDefinition(section).cards.map(id => byID.get(id)).filter(Boolean); }
+  sectionCards(state, section) { return this.cardsForSection(state, section).filter(card => card.available).map(card => card.render()); }
+  sectionContent(section, state) {
+    if (section === 'settings') return html`<${SettingsView} embedded=${true} config=${state.config} onSave=${this.saveConfig} onTest=${this.testAlert} onRegenerate=${this.regenerate} onCopyToken=${this.copyToken} newToken=${state.newToken} notice=${state.notice}/>`;
+    if (section === 'events') return html`<div class="card-grid">${this.sectionCards(state, section)}</div><${EventsView} embedded=${true} events=${state.events}/>`;
+    const cards = section === 'overview' ? visibleOverviewCards(this.overviewCards(state), state.overviewPreferences).filter(card => card.available).map(card => card.render()) : this.sectionCards(state, section);
+    return html`<div class="card-grid">${cards}</div>`;
+  }
 }
 
-render(html`<${App}/>`,document.querySelector('#app'));
+const appRoot = document.querySelector('#app');
+if (appRoot) render(html`<${App}/>`,appRoot);

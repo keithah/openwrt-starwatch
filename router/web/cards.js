@@ -1,6 +1,6 @@
 import {Component, h} from './vendor/preact.module.js';
 import htm from './vendor/htm.module.js';
-import {assembleSeries, availabilityValue, deriveState, formatDuration, formatRate, friendlyModel, hasMotors, minutesLabel, outageBarLayout, utcMinutesToLocal, localMinutesToUTC} from './logic.js';
+import {assembleSeries, availabilityValue, formatDuration, formatRate, friendlyModel, hasMotors, minutesLabel, outageBarLayout, utcMinutesToLocal, localMinutesToUTC} from './logic.js';
 import {mountChart} from './charts.js';
 
 const html = htm.bind(h);
@@ -32,24 +32,6 @@ class Plot extends Component {
   componentWillUnmount() { this.chart?.destroy(); }
   draw() { if (this.base && this.props.aligned?.timestamps?.length) this.chart = mountChart(this.base, this.props.aligned, this.props); }
   render() { return html`<div class="plot" ref=${node => { this.base = node; }}>${!this.props.aligned?.timestamps?.length && html`<div class="empty">History is collecting…</div>`}</div>`; }
-}
-
-export function StatusHeader({snapshot = {}, connection, onCustomize}) {
-  const state = deriveState(snapshot);
-  const dish = snapshot.dish || {};
-  const wan = snapshot.wan || {};
-  const statusAvailability = snapshot.field_availability?.status;
-  return html`<header class="status-header state-${state.toLowerCase().replace(/[^a-z]+/g, '-')}">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">✦</span><div><span class="eyebrow">STARLINK OBSERVATORY</span><h1>Starwatch</h1></div></div>
-    <div class="status-primary"><span class="state-dot"></span><div><span class="eyebrow">LINK STATE</span><strong>${state}</strong></div></div>
-    <div class="header-metrics">
-      <${Metric} label="Uptime" value=${formatDuration(dish.uptime_seconds)} availability=${statusAvailability}/>
-      <${Metric} label="Down" value=${formatRate(dish.downlink_throughput_bps ?? wan.router_down_bps)} availability=${statusAvailability}/>
-      <${Metric} label="Up" value=${formatRate(dish.uplink_throughput_bps ?? wan.router_up_bps)} availability=${statusAvailability}/>
-      <${Metric} label="Latency" value=${number(dish.latency_ms)} unit="ms" availability=${statusAvailability}/>
-    </div>
-    <div class="badges"><span class="badge">${snapshot.topology || 'unknown'}</span><span class=${`badge connection-${connection}`}>${connection}</span><button class="header-customize" type="button" onClick=${onCustomize} aria-label="Customize dashboard cards" title="Customize dashboard cards">⚙<span aria-hidden="true">Customize</span></button></div>
-  </header>`;
 }
 
 const graphLabels = {
@@ -136,11 +118,20 @@ export function WANCard({wan={}, assist, onRefreshAssist, onApplyAssist}) {
   </${Card}>`;
 }
 
+function SleepScheduleRow({config, onControl}) {
+  return html`<div class="control-row"><label>Sleep schedule <small>router-local · stored UTC ${minutesLabel(config.power_save_start_minutes||0)}</small></label><input id="sleep-start" type="time" value=${minutesLabel(utcMinutesToLocal(config.power_save_start_minutes||0))}/><input id="sleep-duration" type="number" min="0" max="1440" value=${config.power_save_duration_minutes||0}/><button class="button subtle" onClick=${()=>{const [h,m]=document.querySelector('#sleep-start').value.split(':').map(Number);onControl('sleep-schedule',{enabled:true,start_minutes:localMinutesToUTC(h*60+m),duration_minutes:Number(document.querySelector('#sleep-duration').value)});}}>Save schedule</button></div>`;
+}
+
+export function SleepScheduleCard({snapshot, onControl}) {
+  const config = snapshot.config || {};
+  return html`<${Card} title="Sleep schedule" eyebrow="Terminal power"><fieldset disabled=${!snapshot.dish_reachable}><${SleepScheduleRow} config=${config} onControl=${onControl}/></fieldset></${Card}>`;
+}
+
 export function ControlsCard({snapshot, onControl}) {
   const cfg=snapshot.config||{}; const reachable=snapshot.dish_reachable;
   return html`<${Card} title="Dish controls" eyebrow="Explicit · audited"><div class=${`control-banner ${reachable?'':'disabled'}`}>${reachable?'Writes are sent directly to your dish and recorded.':'Dish unreachable — controls are disabled.'}</div><fieldset disabled=${!reachable}>
     <div class="control-row"><label>Snow melt</label><div class="segments">${['AUTO','ALWAYS_ON','ALWAYS_OFF'].map(mode=>html`<button class=${cfg.snow_melt_mode===mode?'active':''} onClick=${()=>onControl('snow-melt',{snow_melt_mode:mode})}>${mode.replace('_',' ')}</button>`)}</div></div>
-    <div class="control-row"><label>Sleep schedule <small>router-local · stored UTC ${minutesLabel(cfg.power_save_start_minutes||0)}</small></label><input id="sleep-start" type="time" value=${minutesLabel(utcMinutesToLocal(cfg.power_save_start_minutes||0))}/><input id="sleep-duration" type="number" min="0" max="1440" value=${cfg.power_save_duration_minutes||0}/><button class="button subtle" onClick=${()=>{const [h,m]=document.querySelector('#sleep-start').value.split(':').map(Number);onControl('sleep-schedule',{enabled:true,start_minutes:localMinutesToUTC(h*60+m),duration_minutes:Number(document.querySelector('#sleep-duration').value)});}}>Save schedule</button></div>
+    <${SleepScheduleRow} config=${cfg} onControl=${onControl}/>
     <div class="control-actions"><button class="button subtle" onClick=${()=>onControl('gps',{enabled:true},'confirm')}>Enable GPS</button><button class="button subtle" onClick=${()=>onControl('gps',{enabled:false},'confirm')}>Disable GPS</button>${hasMotors(snapshot.device_info?.hardware_version)&&html`<button class="button subtle" onClick=${()=>onControl('stow',{},'confirm')}>Stow</button><button class="button subtle" onClick=${()=>onControl('unstow',{},'confirm')}>Unstow</button>`}<button class="button warning" onClick=${()=>onControl('firmware-update',{},'confirm')}>Firmware update</button><button class="button danger" onClick=${()=>onControl('reboot',{},'typed')}>Reboot dish</button></div>
   </fieldset></${Card}>`;
 }

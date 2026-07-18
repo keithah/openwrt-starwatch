@@ -4,7 +4,7 @@
 |---|---|
 | **Product** | Starwatch — Starlink dish monitoring + management for OpenWrt routers, with WAN-link health and failover assistance |
 | **Platforms** | OpenWrt 23.05+ (LuCI) and GL.iNet SDK4 firmware (native **Applications** panel entry). First target: GL-X3000 Spitz AX (`aarch64_cortex-a53`); arch is a build knob |
-| **Status** | Released v1.1.0 — 2026-07-17 |
+| **Status** | Released v0.1.0 — 2026-07-17 |
 | **Components** | `starwatchd` (Go daemon) · `luci-app-starwatch` · `gl-app-starwatch` · opkg feed |
 | **Sources** | Starlink local gRPC API (community-documented: sparky8512/starlink-grpc-tools, clarkzjw/starlink-grpc-golang protos) · Speedify OpenWrt integration (support.speedify.com articles 918/922/235/241/1066, sagar.se teardown) · starbar.app feature set · `peakdo/router` (wattline) packaging + GL-panel learnings, verified on a GL-X3000 |
 
@@ -26,16 +26,16 @@ No Starlink account, no cloud API, no telemetry leaves the router. Everything wo
 2. **Everything the local API can control, that Starbar can't.** Stow/unstow, reboot, snow-melt mode, sleep schedule, GPS toggle, clear obstruction map, firmware update, dish speed test — with destructive actions gated behind confirmation.
 3. **History that outlives the dish's 15-minute buffer.** 30 days of graphs and a persistent outage log, stored flash-gently (RAM ring + downsampled sqlite flush).
 4. **WAN-link truth.** Independent latency/loss probes out the Starlink interface so "dish healthy, path bad" and "dish outage" are distinguishable; merged outage timeline; optional mwan3 awareness and a one-click Starlink-primary/cellular-backup assist on GL.iNet.
-5. **Speedify-grade looks.** Card-stack dashboard with live scrolling graphs pushed over WebSocket at 1 Hz — not a LuCI form page.
+5. **Speedify-grade looks.** Icon-rail dashboard with live scrolling graphs pushed over WebSocket at 1 Hz — not a LuCI form page.
 6. **Alerting that wakes you up.** Outages, obstruction growth, thermal events, water detection, stuck motors → webhook + ntfy, with in-UI alert history.
 
-### 1.3 Non-goals (v1)
+### 1.3 Non-goals (initial release)
 
 - **No Starlink cloud/account API.** Billing, service plans, data quotas, remote (off-LAN) dishes, fleet management — out of scope permanently for this tool.
 - **No channel bonding / VPN.** We borrow Speedify's *UX*, not its product. Starwatch never routes traffic.
 - **No general automatic routing changes.** The one narrow exception is the self-healing, VPN-bypassing `192.168.100.1/32` dish-management host route. Starwatch may maintain only that exact route (and users may disable it with `manage_dish_route=0`); it never rewrites default/general routing or firewall config. The mwan3 assist remains an explicit user action.
 - **No factory reset button.** The API offers it; we deliberately don't expose it.
-- **No general rules engine.** Fixed alert catalog with thresholds (§7). Condition→action rules (wattline-style) are a v1.x candidate (§14).
+- **No general rules engine.** Fixed alert catalog with thresholds (§7). Condition→action rules (wattline-style) are a future-release candidate (§14).
 - **Curated Starlink-router Wi-Fi management only.** Topology B may expose ordinary Wi-Fi settings and client controls through guarded, audited, readback-confirmed writes. Factory, regulatory, mesh-trust, bypass/routing, firewall, DHCP, aviation, calibration, and debug surfaces remain excluded; see `API.md`.
 
 ### 1.4 Target users
@@ -239,7 +239,7 @@ Fixed set, each individually enable/disable-able with thresholds in UCI + Settin
 | `firmware_pending` | software update state indicates pending install | Update applied | info |
 | `failover_event` | mwan3 switched active interface | — (event, no clear) | warning |
 
-**Decision:** the remaining `get_status.alerts` booleans (~20 total) that aren't cataloged above are surfaced in the UI's Alerts card as raw flags but don't push notifications in v1.
+**Decision:** the remaining `get_status.alerts` booleans (~20 total) that aren't cataloged above are surfaced in the UI's Alerts card as raw flags but don't push notifications in the initial release.
 
 ### 7.2 Delivery
 
@@ -291,7 +291,7 @@ Bearer token (`Authorization: Bearer <token>` or `?token=` for the iframe bootst
 | `/api/config` | GET/PUT | Daemon settings (writes go through UCI + reload) |
 | `/api/ws` | WS | 1 Hz status frames `{t, dish:{...}, wan:{...}}` + async `{event:...}` messages |
 
-### 9.1 1.1.0 delivered phases
+### 9.1 0.1.0 delivered phases
 
 The expanded contracts in `API.md` shipped in risk order, with each phase
 covered by an in-process fake gRPC server:
@@ -307,6 +307,9 @@ covered by an in-process fake gRPC server:
    sibling PSK credential is redacted, so `ApplyNetworks` cannot erase an
    unseen password. Scalar writes use exactly one apply flag; channel writes
    remain withheld when firmware does not advertise a non-DFS allowed set.
+7. Dashboard navigation and personalization: an icon rail groups the existing
+   cards into seven sections, while Overview visibility and density stay local
+   to each browser.
 
 ---
 
@@ -326,7 +329,9 @@ covered by an in-process fake gRPC server:
 
 ### 10.3 Layout
 
-Speedify's structure: status header, then a vertical stack of cards. Card order is fixed in v1 (drag-reorder is v1.x, §14); cards auto-hide when their data source is absent.
+The dashboard uses seven hash-routed sections behind an expandable icon rail.
+Overview card visibility and compact density are browser-local preferences;
+cards still auto-hide when their data source is absent.
 
 **Status header** — dish state dot + word (Online / Obstructed / Outage / Searching / Unreachable / WAN-only), uptime, current down/up rate, latency, topology badge. This is the "big Speedify toggle" position, minus the toggle (nothing to toggle — monitoring is always on).
 
@@ -382,12 +387,15 @@ All wattline-verified mechanics carry over unchanged:
 ## 13. Open questions
 
 1. **§10.2 iframe vs. served-through-LuCI:** iframing `:9633` fails if the browser can't reach that port (strict firewall zones, remote access via VPN with port restrictions). Fallback option: uhttpd reverse-proxy stanza. Ship iframe-first, revisit if reports come in.
-2. **§5.1 dish speed test reliability:** `start_speedtest`/`get_speedtest_status` availability varies by firmware; if too flaky in practice, add a daemon-run HTTP throughput test (against user-configured endpoint) as fallback in v1.x.
+2. **§5.1 dish speed test reliability:** `start_speedtest`/`get_speedtest_status` availability varies by firmware; if too flaky in practice, add a daemon-run HTTP throughput test (against user-configured endpoint) as a future fallback.
 3. **§2.1 history DB location:** `/etc/starwatch/` survives sysupgrade but sits on the config partition; if 30-day DBs prove larger than expected on small-flash devices, move default to `/overlay` data dir with a settings toggle.
 
-## 14. v1.x candidates
+## 14. Future candidates
 
-Drag-reorderable/hideable cards with persisted layout (full Speedify parity) · rules engine (condition→action, wattline-style) · Prometheus `/metrics` exporter + MQTT publish (Home Assistant) · obstruction-map time-lapse · multi-dish support · daemon-run speed test fallback · CSV/JSON export buttons · public REST docs page.
+Card reordering with persisted layout · rules engine (condition→action,
+wattline-style) · Prometheus `/metrics` exporter + MQTT publish (Home
+Assistant) · obstruction-map time-lapse · multi-dish support · daemon-run speed
+test fallback · CSV/JSON export buttons · public REST docs page.
 
 ---
 

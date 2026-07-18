@@ -128,12 +128,20 @@ func TestStaticServingIsUnauthenticatedAndIframeSafe(t *testing.T) {
 		t.Fatalf("index code=%d body=%s", index.Code, index.Body.String())
 	}
 	app := request(handler, http.MethodGet, "/app.js", "")
-	if app.Code != http.StatusOK || !bytes.Contains(app.Body.Bytes(), []byte("Customize dashboard")) || !bytes.Contains(app.Body.Bytes(), []byte("starwatch.dashboard.cards.v1")) {
-		t.Fatalf("app code=%d missing dashboard drawer assets", app.Code)
+	if app.Code != http.StatusOK || !bytes.Contains(app.Body.Bytes(), []byte("dashboard-model.js")) {
+		t.Fatalf("app code=%d missing dashboard shell import", app.Code)
 	}
 	logic := request(handler, http.MethodGet, "/logic.js", "")
-	if logic.Code != http.StatusOK || !bytes.Contains(logic.Body.Bytes(), []byte("normalizeCardPreferences")) || !bytes.Contains(logic.Body.Bytes(), []byte("clientMutationPayload")) {
+	if logic.Code != http.StatusOK || !bytes.Contains(logic.Body.Bytes(), []byte("clientMutationPayload")) {
 		t.Fatalf("logic code=%d missing dashboard/client mutation logic", logic.Code)
+	}
+	dashboard := request(handler, http.MethodGet, "/dashboard-model.js", "")
+	if dashboard.Code != http.StatusOK || !bytes.Contains(dashboard.Body.Bytes(), []byte("DASHBOARD_SECTIONS")) {
+		t.Fatalf("dashboard model code=%d missing dashboard section model", dashboard.Code)
+	}
+	shell := request(handler, http.MethodGet, "/dashboard.js", "")
+	if shell.Code != http.StatusOK || !bytes.Contains(shell.Body.Bytes(), []byte("Customize Overview")) || !bytes.Contains(shell.Body.Bytes(), []byte("starwatch.overview.cards")) {
+		t.Fatalf("dashboard shell code=%d missing overview customization assets", shell.Code)
 	}
 	cards := request(handler, http.MethodGet, "/cards.js", "")
 	if cards.Code != http.StatusOK || !bytes.Contains(cards.Body.Bytes(), []byte("Client management")) {
