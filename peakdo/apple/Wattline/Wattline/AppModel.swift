@@ -990,6 +990,7 @@ final class AppModel {
         connectionOperationKey = nil
         if let session {
             await connectedLifecycleBarrier()
+            guard isCurrent(key) else { return }
             await session.receive(.connected(key.scope))
         }
         guard isCurrent(key) else { return }

@@ -360,7 +360,7 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertTrue(hasConnectedContext)
     }
 
-    func testReturnToScanDuringDirectConnectedLifecycleCannotReattachOldBrokerContext() async throws {
+    func testReturnToScanAtDirectLifecycleBarrierDoesNotPoisonReplacementSessionScope() async throws {
         let transport = ControlledConnectionTransport()
         let lifecycle = BrokerPublicationBarrier()
         let suiteName = "WattlineTests.\(UUID().uuidString)"
@@ -395,6 +395,26 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertNil(model.lastClockSync, "stale direct completion must not reattach the old broker context")
         XCTAssertEqual(model.route, .scan)
         XCTAssertEqual(model.connectionStatus, .disconnected(nil))
+
+        let replacement = DiscoveredDevice(
+            id: UUID(),
+            localName: "Replacement",
+            rssi: -42,
+            mode: .application
+        )
+        let replacementIdentity = makeIdentity(id: replacement.id, features: 0x1234)
+        model.choose(replacement)
+        try await waitUntil { await transport.connectCount == 2 }
+        await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
+        try await waitUntil {
+            await MainActor.run { model.connectionStatus == .connected }
+        }
+        let replacementScope = await transport.scope(at: 1)
+        await transport.emit(.handshakeCompleted(replacementIdentity, scope: replacementScope))
+
+        try await waitUntil {
+            await MainActor.run { model.state.identity == replacementIdentity }
+        }
     }
 
     func testReturnToScanRejectsLateScopedConnectedAndHandshake() async throws {
