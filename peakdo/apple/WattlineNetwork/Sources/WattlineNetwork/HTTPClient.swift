@@ -19,6 +19,38 @@ public final class HTTPClient: RouterHTTPClient, @unchecked Sendable {
         self.session = session
     }
 
+    /// Production construction from validated host metadata. HTTPS endpoints
+    /// always use certificate fingerprint pinning; HTTP relies on the host
+    /// validator's LAN/VPN or explicit insecure-WAN policy.
+    public convenience init(
+        endpoint: RouterEndpoint,
+        configuration: URLSessionConfiguration = .ephemeral
+    ) throws {
+        var components = URLComponents()
+        components.scheme = endpoint.scheme.lowercased()
+        components.host = endpoint.host
+        components.port = endpoint.port
+        guard let baseURL = components.url else { throw RouterHostValidationError.invalidAddress }
+
+        if endpoint.scheme.caseInsensitiveCompare("https") == .orderedSame {
+            guard let expectedFingerprint = endpoint.certificateFingerprint else {
+                throw RouterHostValidationError.missingCertificateFingerprint
+            }
+#if canImport(Security) && !canImport(FoundationNetworking)
+            let session = URLSession(
+                configuration: configuration,
+                delegate: RouterTLSPinningDelegate(expectedFingerprint: expectedFingerprint),
+                delegateQueue: nil
+            )
+            self.init(baseURL: baseURL, session: session)
+#else
+            throw NetworkError.unsupported("HTTPS certificate pinning is unavailable on this platform")
+#endif
+        } else {
+            self.init(baseURL: baseURL, session: URLSession(configuration: configuration))
+        }
+    }
+
     public func get(_ path: String, token: String) async throws -> (Data, HTTPURLResponse) {
         try await request("GET", path, body: nil, token: token)
     }

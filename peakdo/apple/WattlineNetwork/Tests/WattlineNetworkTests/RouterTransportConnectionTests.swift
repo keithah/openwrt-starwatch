@@ -827,6 +827,33 @@ final class RouterTransportConnectionTests: XCTestCase {
         }
     }
 
+    func testEstablishedStreamUnauthorizedIsTerminalInsteadOfRetryingForever() async throws {
+        let server = FakeRouterServer()
+        server.setResponse(data: statusData(), for: "/api/v1/status")
+        let clock = TestRouterClock(now: .seconds(50), origin: origin)
+        let transport = makeTransport(server: server, clock: clock)
+        let recorder = DeviceEventRecorder(stream: transport.events)
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStreamCount(1)
+
+        server.setResponse(data: Data(), statusCode: 401, for: "/api/v1/events")
+        XCTAssertTrue(server.fail(NetworkError.streamEnded))
+        await clock.waitForSleepCount(1)
+        await clock.advance(by: .seconds(1))
+
+        let events = try await recorder.waitForCount(4)
+        XCTAssertEqual(events[2], .reconnecting(scope))
+        guard case let .disconnected(disconnectedScope, failure) = events[3] else {
+            return XCTFail("expected terminal authorization event")
+        }
+        XCTAssertEqual(disconnectedScope, scope)
+        XCTAssertEqual(failure?.message, "Router authorization expired")
+        for _ in 0..<100 { await Task.yield() }
+        let sleepCount = await clock.sleepDurations.count
+        XCTAssertEqual(sleepCount, 1, "401 must not enter an infinite retry loop")
+    }
+
     private func makeTransport(
         server: FakeRouterServer,
         clock: TestRouterClock? = nil,

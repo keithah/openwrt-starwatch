@@ -418,6 +418,12 @@ actor RouterConnection {
                         ifEstablished: expectedGeneration,
                         scope: scope
                     ) == true
+                },
+                publishUnauthorized: { [weak self] in
+                    await self?.yieldUnauthorized(
+                        ifEstablished: expectedGeneration,
+                        scope: scope
+                    ) == true
                 }
             )
         }
@@ -432,7 +438,8 @@ actor RouterConnection {
         beforeSnapshotYield: @escaping @Sendable () async -> Void,
         isCurrent: @escaping @Sendable () async -> Bool,
         publishSnapshot: @escaping @Sendable (RouterSnapshotDTO, DeviceTimestamp) async throws -> Bool,
-        publishReconnecting: @escaping @Sendable () async -> Bool
+        publishReconnecting: @escaping @Sendable () async -> Bool,
+        publishUnauthorized: @escaping @Sendable () async -> Bool
     ) async {
         var consecutiveFailures = 0
 
@@ -469,6 +476,9 @@ actor RouterConnection {
                 }
                 throw NetworkError.streamEnded
             } catch is CancellationError {
+                return
+            } catch NetworkError.unauthorized {
+                _ = await publishUnauthorized()
                 return
             } catch {
                 guard await publishReconnecting() else { return }
@@ -528,6 +538,24 @@ actor RouterConnection {
         guard isEstablished(expectedGeneration, scope: scope) else { return false }
         connectionIsReconnecting = true
         output.yield(.reconnecting(scope))
+        return true
+    }
+
+    private func yieldUnauthorized(
+        ifEstablished expectedGeneration: UInt64,
+        scope: DeviceConnectionScope
+    ) -> Bool {
+        guard isEstablished(expectedGeneration, scope: scope) else { return false }
+        establishedGeneration = nil
+        establishedScope = nil
+        lastTelemetryTimestamp = nil
+        connectionIsReconnecting = false
+        streamTask = nil
+        cancelAllReconciliations()
+        output.yield(.disconnected(
+            scope,
+            TransportFailure(message: "Router authorization expired")
+        ))
         return true
     }
 
