@@ -53,4 +53,9 @@ done <"$tmp/filenames"
 
 cmp -s "$root/install.sh" "$pages/install.sh"
 
+if make -C "$root" OUT="$out" signed-feed-artifact >"$tmp/unsigned.log" 2>&1; then
+	echo 'signed artifact unexpectedly succeeded without a signing key' >&2
+	exit 1
+fi
+
 echo 'feed artifact tests passed'

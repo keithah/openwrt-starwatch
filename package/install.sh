@@ -5,6 +5,10 @@ set -eu
 feed_url='https://keithah.github.io/openwrt-starwatch'
 target_root="${STARWATCH_ROOT:-/}"
 feeds_file="$target_root/etc/opkg/customfeeds.conf"
+keys_dir="$target_root/etc/opkg/keys"
+feed_key_file="$keys_dir/f6c72c675c844b91"
+feed_key='untrusted comment: Starwatch opkg feed
+RWT2xyxnXIRLkZzbs1HvD+48GPkSqoNPCZVCOw49GUdTg2O7Cv9LzMtx'
 
 fail() {
 	printf '%s\n' "starwatch installer: $*" >&2
@@ -23,6 +27,7 @@ if ! printf '%s\n' "$architectures" | awk '$2 == "aarch64_cortex-a53" { found = 
 fi
 
 [ -d "$target_root/etc/opkg" ] || fail "missing $target_root/etc/opkg"
+[ -d "$keys_dir" ] || fail "missing $keys_dir"
 [ -f "$feeds_file" ] || : >"$feeds_file"
 
 if [ -e "$target_root/etc/config/glconfig" ] || [ -e "$target_root/usr/lib/oui-httpd" ]; then
@@ -35,7 +40,12 @@ fi
 
 feeds_dir=$(dirname "$feeds_file")
 tmp_file=$(mktemp "$feeds_dir/.customfeeds.conf.XXXXXX")
-trap 'rm -f "$tmp_file"' 0 HUP INT TERM
+key_tmp=$(mktemp "$keys_dir/.starwatch-key.XXXXXX")
+trap 'rm -f "$tmp_file" "$key_tmp"' 0 HUP INT TERM
+
+printf '%s\n' "$feed_key" >"$key_tmp"
+chmod 0644 "$key_tmp"
+mv "$key_tmp" "$feed_key_file"
 
 # This feed is managed exclusively by this installer. Keep every other feed
 # line byte-for-byte while replacing all previous managed entries with one.

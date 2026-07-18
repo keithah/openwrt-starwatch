@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' 0
 
 make_case() {
 	case_dir="$tmp/$1"
-	mkdir -p "$case_dir/bin" "$case_dir/root/etc/opkg"
+	mkdir -p "$case_dir/bin" "$case_dir/root/etc/opkg/keys"
 	printf '%s\n' "${2:-}" >"$case_dir/root/etc/opkg/customfeeds.conf"
 	: >"$case_dir/log"
 	cat >"$case_dir/bin/id" <<'EOF'
@@ -130,6 +130,7 @@ mkdir -p "$tmp/glconfig/root/etc/config"
 run_case glconfig MOCK_ARCHES='arch aarch64_cortex-a53 10'
 has_line "$tmp/glconfig/root/etc/opkg/customfeeds.conf" "src/gz starwatch $feed"
 has_line "$tmp/glconfig/log" 'opkg install starwatchd gl-app-starwatch'
+cmp -s "$root/starwatch-feed.pub" "$tmp/glconfig/root/etc/opkg/keys/f6c72c675c844b91"
 
 ouih_feeds='src/gz old https://old.example
 src/gz starwatch https://old.feed
@@ -144,6 +145,7 @@ has_line "$tmp/ouih/root/etc/opkg/customfeeds.conf" 'src/gz keep https://keep.ex
 has_line "$tmp/ouih/log" 'opkg install starwatchd gl-app-starwatch'
 
 make_case generic "$base_feeds"
+: >"$tmp/generic/root/etc/opkg/keys/unrelated-key"
 chmod 0644 "$tmp/generic/root/etc/opkg/customfeeds.conf"
 generic_arches='arch all 1
 arch aarch64_cortex-a53 10'
@@ -152,6 +154,8 @@ has_line "$tmp/generic/log" 'opkg update'
 has_line "$tmp/generic/log" 'opkg install starwatchd luci-app-starwatch'
 if has_text "$tmp/generic/log" 'force-downgrade' || has_text "$tmp/generic/log" 'force-reinstall'; then exit 1; fi
 [ "$(ls -ld "$tmp/generic/root/etc/opkg/customfeeds.conf" | awk '{ print $1 }')" = '-rw-r--r--' ]
+[ -f "$tmp/generic/root/etc/opkg/keys/unrelated-key" ]
+cmp -s "$root/starwatch-feed.pub" "$tmp/generic/root/etc/opkg/keys/f6c72c675c844b91"
 
 # A second run must replace rather than append the managed feed.
 run_case generic MOCK_ARCHES='arch aarch64_cortex-a53 10'

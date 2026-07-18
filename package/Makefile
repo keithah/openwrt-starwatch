@@ -11,11 +11,14 @@ BIN := $(OUT)/starwatchd-bin
 STARWATCHD_IPK := $(OUT)/starwatchd_$(VERSION)_$(ARCH).ipk
 LUCI_IPK := $(OUT)/luci-app-starwatch_$(VERSION)_all.ipk
 GLAPP_IPK := $(OUT)/gl-app-starwatch_$(VERSION)_all.ipk
+USIGN ?= usign
+SIGNING_KEY ?=
+VERIFY_KEY ?= starwatch-feed.pub
 
 # Reject destinations which could turn the pages cleanup into a root or source
 # tree cleanup.  This is evaluated while make reads the file, before it can
 # build feed prerequisites or run any staging recipe.
-ifneq ($(filter feed-artifact,$(MAKECMDGOALS)),)
+ifneq ($(filter feed-artifact signed-feed-artifact,$(MAKECMDGOALS)),)
 ifeq ($(strip $(OUT)),)
 $(error feed-artifact requires a non-empty OUT)
 endif
@@ -27,7 +30,7 @@ $(error feed-artifact refuses OUT=$(OUT))
 endif
 endif
 
-.PHONY: all clean test bin ipk-starwatchd ipk-luci ipk-glapp feed feed-artifact
+.PHONY: all clean test bin ipk-starwatchd ipk-luci ipk-glapp feed feed-artifact signed-feed-artifact
 
 all: ipk-starwatchd ipk-luci ipk-glapp
 
@@ -50,6 +53,15 @@ feed-artifact: feed
 	rm -rf $(OUT)/pages
 	mkdir -p $(OUT)/pages
 	cp $(OUT)/Packages $(OUT)/Packages.gz $(STARWATCHD_IPK) $(LUCI_IPK) $(GLAPP_IPK) install.sh $(OUT)/pages/
+
+# Deployable feeds retain OpenWrt's global signature checks. The public key is
+# pinned by install.sh; the private key is supplied only by GitHub Actions.
+signed-feed-artifact: feed-artifact
+	test -n "$(SIGNING_KEY)"
+	command -v "$(USIGN)" >/dev/null
+	"$(USIGN)" -S -m $(OUT)/pages/Packages -s "$(SIGNING_KEY)" -x $(OUT)/pages/Packages.sig
+	cp starwatch-feed.pub $(OUT)/pages/
+	"$(USIGN)" -V -m $(OUT)/pages/Packages -p "$(VERIFY_KEY)" -x $(OUT)/pages/Packages.sig
 
 bin:
 	mkdir -p $(OUT)
