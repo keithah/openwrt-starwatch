@@ -237,11 +237,20 @@ final class AppModel {
     private var brokerReconnectTask: Task<Void, Never>?
     private var restartTimeoutTask: Task<Void, Never>?
     private var restartRecoveryTask: Task<Void, Never>?
+    private struct RestartDisconnectKey: Equatable {
+        let generation: UInt
+        let scope: DeviceConnectionScope
+    }
+    private struct RestartDisconnectWaiter {
+        let key: RestartDisconnectKey
+        let continuation: CheckedContinuation<Bool, Never>
+        let timeoutTask: Task<Void, Never>
+    }
     // Set only by the scoped disconnect event caused by the current restart.
     // This prevents a connected fast-path (or an unrelated write error) from
     // being mistaken for successful restart recovery.
-    private var restartDisconnectObserved: (generation: UInt, peripheralID: UUID)?
-    private var restartDisconnectWaiter: (generation: UInt, peripheralID: UUID, continuation: CheckedContinuation<Bool, Never>)?
+    private var restartDisconnectObserved: RestartDisconnectKey?
+    private var restartDisconnectWaiter: RestartDisconnectWaiter?
     private var connectionOperationKey: ConnectionOperationKey?
     private var activeConnectionScope: DeviceConnectionScope?
     private var retiredConnectionScopeIDs: Set<UUID> = []
@@ -455,49 +464,76 @@ final class AppModel {
     }
 
     func restartDevice() async {
-        guard let peripheralID = selectedPeripheralID else { return }
+        guard let peripheralID = selectedPeripheralID,
+              let scope = activeConnectionScope,
+              scope.peripheralID == peripheralID
+        else { return }
         let generation = transportGeneration
+        let disconnectKey = RestartDisconnectKey(generation: generation, scope: scope)
         restartTimeoutTask?.cancel()
         restartRecoveryTask?.cancel()
         restartDisconnectObserved = nil
         cancelRestartDisconnectWaiter()
         maintenanceState = .restarting
+        var writeFailure: Error?
         do {
             _ = try await deviceOperationBroker.perform(.restart, generation: generation)
         } catch {
-            let observed = await awaitRestartDisconnect(generation: generation, peripheralID: peripheralID)
-            guard observed else {
-                maintenanceState = .restartFailed(String(describing: error))
-                return
-            }
+            writeFailure = error
+        }
+        let observed = await awaitRestartDisconnect(disconnectKey)
+        guard observed else {
+            maintenanceState = .restartFailed(
+                writeFailure.map(String.init(describing:)) ?? "Restart timed out. Try again."
+            )
+            return
         }
         restartRecoveryTask = Task { [weak self] in
-            await self?.recoverRestart(peripheralID: peripheralID, generation: generation)
+            await self?.recoverRestart(disconnectKey)
         }
     }
 
-    private func awaitRestartDisconnect(generation: UInt, peripheralID: UUID) async -> Bool {
-        if restartDisconnectObserved?.generation == generation,
-           restartDisconnectObserved?.peripheralID == peripheralID { return true }
+    private func awaitRestartDisconnect(_ key: RestartDisconnectKey) async -> Bool {
+        if restartDisconnectObserved == key { return true }
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            restartDisconnectWaiter = (generation, peripheralID, continuation)
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(1))
+            let timeoutTask = Task { [weak self, maintenanceClock] in
+                do {
+                    try await maintenanceClock.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
                 await MainActor.run {
-                    guard let self,
-                          let waiter = self.restartDisconnectWaiter,
-                          waiter.generation == generation,
-                          waiter.peripheralID == peripheralID else { return }
-                    self.restartDisconnectWaiter = nil
-                    waiter.continuation.resume(returning: false)
+                    self?.resolveRestartDisconnect(key, observed: false)
                 }
             }
+            restartDisconnectWaiter = RestartDisconnectWaiter(
+                key: key,
+                continuation: continuation,
+                timeoutTask: timeoutTask
+            )
         }
+    }
+
+    private func resolveRestartDisconnect(_ key: RestartDisconnectKey, observed: Bool) {
+        guard let waiter = restartDisconnectWaiter, waiter.key == key else { return }
+        restartDisconnectWaiter = nil
+        waiter.timeoutTask.cancel()
+        waiter.continuation.resume(returning: observed)
+    }
+
+    private func observeRestartDisconnect(scope: DeviceConnectionScope, generation: UInt) {
+        guard maintenanceState == .restarting,
+              selectedPeripheralID == scope.peripheralID
+        else { return }
+        let key = RestartDisconnectKey(generation: generation, scope: scope)
+        restartDisconnectObserved = key
+        resolveRestartDisconnect(key, observed: true)
     }
 
     private func cancelRestartDisconnectWaiter() {
         guard let waiter = restartDisconnectWaiter else { return }
         restartDisconnectWaiter = nil
+        waiter.timeoutTask.cancel()
         waiter.continuation.resume(returning: false)
     }
 
@@ -505,7 +541,9 @@ final class AppModel {
         await restartDevice()
     }
 
-    private func recoverRestart(peripheralID: UUID, generation: UInt) async {
+    private func recoverRestart(_ disconnectKey: RestartDisconnectKey) async {
+        let generation = disconnectKey.generation
+        let peripheralID = disconnectKey.scope.peripheralID
         let deadline = (await maintenanceClock.now) + .seconds(30)
         while !Task.isCancelled,
               transportGeneration == generation,
@@ -514,8 +552,7 @@ final class AppModel {
             // Do not let withConnection reuse the still-connected context. A
             // fresh reconnect is valid only after the expected disconnect event
             // for this exact generation/peripheral has arrived.
-            guard restartDisconnectObserved?.generation == generation,
-                  restartDisconnectObserved?.peripheralID == peripheralID else {
+            guard restartDisconnectObserved == disconnectKey else {
                 do { try await maintenanceClock.sleep(for: .seconds(1)) }
                 catch { return }
                 continue
@@ -535,7 +572,12 @@ final class AppModel {
             } catch is CancellationError {
                 return
             } catch {
-                do { try await maintenanceClock.sleep(for: .seconds(1)) }
+                let retryNow = await maintenanceClock.now
+                guard retryNow < deadline else {
+                    maintenanceState = .restartFailed("Restart timed out. Try again.")
+                    return
+                }
+                do { try await maintenanceClock.sleep(for: min(.seconds(1), deadline - retryNow)) }
                 catch { return }
             }
         }
@@ -924,8 +966,14 @@ final class AppModel {
                       self.transportGeneration == generation
                 else { return }
                 guard self.acceptsTransportEvent(event, generation: generation) else { continue }
+                if case .disconnected = event {
+                    await self.deviceOperationBroker.markDisconnected(generation: generation)
+                }
                 await session.receive(event)
                 guard self.transportGeneration == generation else { return }
+                if case let .disconnected(scope, _) = event {
+                    self.observeRestartDisconnect(scope: scope, generation: generation)
+                }
                 await self.receive(event, generation: generation)
             }
         }
@@ -1152,19 +1200,8 @@ final class AppModel {
             selectedPeripheralID = id
             connectionStatus = .reconnecting
             route = .connected
-        case let .disconnected(scope, failure):
-            await deviceOperationBroker.markDisconnected(generation: generation)
+        case let .disconnected(_, failure):
             flushPendingTelemetryPersistence()
-            if maintenanceState == .restarting,
-               selectedPeripheralID == scope.peripheralID {
-                restartDisconnectObserved = (generation, scope.peripheralID)
-                if let waiter = restartDisconnectWaiter,
-                   waiter.generation == generation,
-                   waiter.peripheralID == scope.peripheralID {
-                    restartDisconnectWaiter = nil
-                    waiter.continuation.resume(returning: true)
-                }
-            }
             connectionStatus = .disconnected(failure?.message)
             if otaRecoveryPeripheralID != nil {
                 route = .scan
