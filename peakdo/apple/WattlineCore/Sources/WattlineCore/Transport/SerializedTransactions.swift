@@ -9,9 +9,14 @@ public actor SerializedTransactions {
         let predecessor = tail
         let task = Task {
             await predecessor?.value
+            try Task.checkCancellation()
             return try await operation()
         }
         tail = Task { _ = try? await task.value }
-        return try await task.value
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 }

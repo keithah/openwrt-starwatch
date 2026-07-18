@@ -14,6 +14,33 @@ actor RouterConnection {
         case routerDisconnected
     }
 
+    private struct PendingReconciliation {
+        let generation: UInt64
+        let scope: DeviceConnectionScope
+        let reconciler: MutationReconciler
+        let continuation: AsyncThrowingStream<CommandOutcome, Error>.Continuation
+        let timeoutTask: Task<Void, Never>
+    }
+
+    private struct PowerLimitResponse: Decodable {
+        struct Value: Decodable { let level: Int }
+        let global: Value
+        let input: Value
+        let output: Value
+        let runtime: Value
+
+        func level(for type: PowerLimitType) -> Int {
+            switch type {
+            case .global: global.level
+            case .input: input.level
+            case .output: output.level
+            case .runtime: runtime.level
+            }
+        }
+    }
+
+    private struct BypassThresholdResponse: Decodable { let volts: Double }
+
     private let endpoint: RouterEndpoint
     private let credentials: any RouterCredentialProvider
     private let client: any RouterHTTPClient
@@ -31,6 +58,8 @@ actor RouterConnection {
     private var lastTelemetryTimestamp: DeviceTimestamp?
     private var statusTask: Task<StatusContext, Error>?
     private var streamTask: Task<Void, Never>?
+    private var pendingReconciliations: [UUID: PendingReconciliation] = [:]
+    private var connectionIsReconnecting = false
 
     init(
         endpoint: RouterEndpoint,
@@ -57,6 +86,10 @@ actor RouterConnection {
     deinit {
         statusTask?.cancel()
         streamTask?.cancel()
+        for pending in pendingReconciliations.values {
+            pending.timeoutTask.cancel()
+            pending.continuation.finish(throwing: CancellationError())
+        }
         output.finish()
     }
 
@@ -148,6 +181,7 @@ actor RouterConnection {
             establishedGeneration = requestedGeneration
             establishedScope = scope
             lastTelemetryTimestamp = nil
+            connectionIsReconnecting = !context.status.connected
             output.yield(.handshakeCompleted(mapping.identity(context.status.device), scope: scope))
             output.yield(context.status.connected ? .connected(scope) : .reconnecting(scope))
             startEventLoop(
@@ -186,6 +220,7 @@ actor RouterConnection {
         statusTask?.cancel()
         statusTask = nil
         pendingScope = nil
+        cancelAllReconciliations()
         guard let establishedScope else { return }
         retireEstablishedScope(establishedScope)
     }
@@ -205,7 +240,145 @@ actor RouterConnection {
         establishedGeneration = nil
         establishedScope = nil
         lastTelemetryTimestamp = nil
+        connectionIsReconnecting = false
+        cancelAllReconciliations()
         output.yield(.disconnected(scope, nil))
+    }
+
+    func perform(_ command: DeviceCommand, request: RouterRequest) async throws -> CommandOutcome {
+        guard let context = establishedContext() else {
+            throw NetworkError.transport("Router device is not connected")
+        }
+
+        switch request.confirmation {
+        case let .telemetry(reconciler, timeout):
+            let waiter = registerReconciliation(
+                reconciler: reconciler,
+                timeout: timeout,
+                generation: context.generation,
+                scope: context.scope
+            )
+            do {
+                _ = try await execute(
+                    request,
+                    generation: context.generation,
+                    scope: context.scope
+                )
+            } catch {
+                if request.ignoresResponseResult,
+                   !(error is CancellationError),
+                   error as? NetworkError != .unauthorized {
+                    // The router/device bypass result is not authoritative; telemetry is.
+                } else {
+                    cancelReconciliation(waiter.id, error: error)
+                    throw error
+                }
+            }
+            return try await awaitReconciliation(waiter)
+
+        case let .powerLimit(type):
+            let responseData = try await execute(
+                request,
+                generation: context.generation,
+                scope: context.scope
+            )
+            let confirmedData: Data
+            if request.method == "GET" {
+                confirmedData = responseData
+            } else {
+                confirmedData = try await execute(
+                    RouterRequest(method: "GET", path: "/api/v1/device/usbc-limit"),
+                    generation: context.generation,
+                    scope: context.scope
+                )
+            }
+            return try powerLimitOutcome(data: confirmedData, type: type)
+
+        case .disconnect:
+            do {
+                _ = try await execute(
+                    request,
+                    generation: context.generation,
+                    scope: context.scope,
+                    allowReconnectingGeneration: true
+                )
+                return .sent
+            } catch {
+                if isReconnectSuccess(context: context) { return .sent }
+                throw error
+            }
+
+        case .none, .bypassThreshold, .scheduleMutation:
+            _ = try await execute(
+                request,
+                generation: context.generation,
+                scope: context.scope
+            )
+            return .sent
+        }
+    }
+
+    func setBypassThreshold(_ request: RouterRequest) async throws -> Double {
+        guard let context = establishedContext() else {
+            throw NetworkError.transport("Router device is not connected")
+        }
+        _ = try await execute(request, generation: context.generation, scope: context.scope)
+        let data = try await execute(
+            RouterRequest(method: "GET", path: "/api/v1/device/bypass-threshold"),
+            generation: context.generation,
+            scope: context.scope
+        )
+        return try Self.decode(BypassThresholdResponse.self, from: data, token: "").volts
+    }
+
+    func schedules(_ request: RouterRequest) async throws -> [RouterSchedule] {
+        guard let context = establishedContext() else {
+            throw NetworkError.transport("Router device is not connected")
+        }
+        let data = try await execute(request, generation: context.generation, scope: context.scope)
+        return try Self.decode([RouterSchedule].self, from: data, token: "")
+    }
+
+    func upsertSchedule(_ request: RouterRequest) async throws -> RouterSchedule {
+        guard let context = establishedContext() else {
+            throw NetworkError.transport("Router device is not connected")
+        }
+        let data = try await execute(request, generation: context.generation, scope: context.scope)
+        return try Self.decode(RouterSchedule.self, from: data, token: "")
+    }
+
+    func deleteSchedule(_ request: RouterRequest) async throws {
+        guard let context = establishedContext() else {
+            throw NetworkError.transport("Router device is not connected")
+        }
+        _ = try await execute(request, generation: context.generation, scope: context.scope)
+    }
+
+    func refreshTelemetry() async throws {
+        guard let context = establishedContext() else {
+            throw NetworkError.transport("Router device is not connected")
+        }
+        let data = try await execute(
+            RouterRequest(method: "GET", path: "/api/v1/telemetry"),
+            generation: context.generation,
+            scope: context.scope
+        )
+        let snapshot = try Self.decode(RouterSnapshotDTO.self, from: data, token: "")
+        guard snapshot.connected else { throw RouterMappingError.disconnectedSnapshot }
+        let observedAt = await clock.now
+        let mapping = RouterMapping(
+            peripheralID: endpoint.peripheralID,
+            timestampOrigin: await clock.sampleTimestampOrigin()
+        )
+        guard try yieldSnapshotEvents(
+            snapshot,
+            mapping: mapping,
+            observedAt: observedAt,
+            ifEstablished: context.generation,
+            scope: context.scope
+        ) else {
+            throw CancellationError()
+        }
     }
 
     private func startEventLoop(
@@ -343,6 +516,8 @@ actor RouterConnection {
         if let timestamp = Self.telemetryTimestamp(in: events) {
             lastTelemetryTimestamp = timestamp
         }
+        connectionIsReconnecting = false
+        reconcilePendingOperations(with: events, generation: expectedGeneration, scope: scope)
         return true
     }
 
@@ -351,6 +526,7 @@ actor RouterConnection {
         scope: DeviceConnectionScope
     ) -> Bool {
         guard isEstablished(expectedGeneration, scope: scope) else { return false }
+        connectionIsReconnecting = true
         output.yield(.reconnecting(scope))
         return true
     }
@@ -365,6 +541,159 @@ actor RouterConnection {
             }
         }
         return nil
+    }
+
+    private typealias EstablishedContext = (generation: UInt64, scope: DeviceConnectionScope)
+    private typealias ReconciliationWaiter = (
+        id: UUID,
+        stream: AsyncThrowingStream<CommandOutcome, Error>
+    )
+
+    private func establishedContext() -> EstablishedContext? {
+        guard let generation = establishedGeneration, let scope = establishedScope else { return nil }
+        return (generation, scope)
+    }
+
+    private func registerReconciliation(
+        reconciler: MutationReconciler,
+        timeout: Duration,
+        generation: UInt64,
+        scope: DeviceConnectionScope
+    ) -> ReconciliationWaiter {
+        let id = UUID()
+        let pair = AsyncThrowingStream<CommandOutcome, Error>.makeStream()
+        let timeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+                await self?.timeoutReconciliation(id)
+            } catch {}
+        }
+        pendingReconciliations[id] = PendingReconciliation(
+            generation: generation,
+            scope: scope,
+            reconciler: reconciler,
+            continuation: pair.continuation,
+            timeoutTask: timeoutTask
+        )
+        return (id, pair.stream)
+    }
+
+    private func awaitReconciliation(_ waiter: ReconciliationWaiter) async throws -> CommandOutcome {
+        try await withTaskCancellationHandler {
+            var iterator = waiter.stream.makeAsyncIterator()
+            guard let outcome = try await iterator.next() else { throw CancellationError() }
+            return outcome
+        } onCancel: {
+            Task { [weak self] in
+                await self?.cancelReconciliation(waiter.id, error: CancellationError())
+            }
+        }
+    }
+
+    private func reconcilePendingOperations(
+        with events: [DeviceEvent],
+        generation: UInt64,
+        scope: DeviceConnectionScope
+    ) {
+        let updates: [TelemetryUpdate] = events.compactMap { event in
+            switch event {
+            case let .dc(status, _): .dc(status)
+            case let .typeC(status, _): .typeC(status)
+            default: nil
+            }
+        }
+        guard !updates.isEmpty else { return }
+        let matched = pendingReconciliations.compactMap { id, pending -> UUID? in
+            guard pending.generation == generation, pending.scope == scope,
+                  updates.contains(where: pending.reconciler.matches) else { return nil }
+            return id
+        }
+        for id in matched {
+            guard let pending = pendingReconciliations.removeValue(forKey: id) else { continue }
+            pending.timeoutTask.cancel()
+            pending.continuation.yield(.sent)
+            pending.continuation.finish()
+        }
+    }
+
+    private func timeoutReconciliation(_ id: UUID) {
+        cancelReconciliation(id, error: NetworkError.timeout)
+    }
+
+    private func cancelReconciliation(_ id: UUID, error: Error) {
+        guard let pending = pendingReconciliations.removeValue(forKey: id) else { return }
+        pending.timeoutTask.cancel()
+        pending.continuation.finish(throwing: error)
+    }
+
+    private func cancelAllReconciliations() {
+        let values = pendingReconciliations.values
+        pendingReconciliations.removeAll()
+        for pending in values {
+            pending.timeoutTask.cancel()
+            pending.continuation.finish(throwing: CancellationError())
+        }
+    }
+
+    private func execute(
+        _ request: RouterRequest,
+        generation: UInt64,
+        scope: DeviceConnectionScope,
+        allowReconnectingGeneration: Bool = false
+    ) async throws -> Data {
+        let credential: RouterCredential
+        do {
+            credential = try await credentials.credential(for: endpoint)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NetworkError.unauthorized
+        }
+        try Task.checkCancellation()
+
+        do {
+            let (data, response) = try await client.request(
+                request.method,
+                request.path,
+                body: request.body,
+                token: credential.token
+            )
+            try Task.checkCancellation()
+            let validated = try Self.validate(data: data, response: response, token: credential.token)
+            guard isEstablished(generation, scope: scope)
+                    || (allowReconnectingGeneration && isReconnectSuccess(context: (generation, scope)))
+            else { throw CancellationError() }
+            return validated
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            throw Self.normalized(error, token: credential.token)
+        }
+    }
+
+    private func isReconnectSuccess(context: EstablishedContext) -> Bool {
+        establishedGeneration == context.generation
+            && establishedScope == context.scope
+            && connectionIsReconnecting
+    }
+
+    private func powerLimitOutcome(data: Data, type: PowerLimitType) throws -> CommandOutcome {
+        let response = try Self.decode(PowerLimitResponse.self, from: data, token: "")
+        let level = response.level(for: type)
+        let command = DeviceCommand.getPowerLimit(type)
+        let frame: Data
+        if level < 0 {
+            frame = Data([0x02, 0x80, 0xFF])
+        } else {
+            guard level <= Int(UInt8.max) else {
+                throw NetworkError.decode("Power-limit level is out of range")
+            }
+            frame = Data([0x02, 0x80, 0x00, UInt8(level)])
+        }
+        return .reply(try command.validate(frame))
     }
 
     private static func validate(

@@ -315,8 +315,8 @@ final class RouterTransportConnectionTests: XCTestCase {
         try await states.waitUntil { $0.connection == .live && $0.battery?.level == 40 }
 
         do {
-            _ = try await session.perform(DeviceCommand.setDC(true))
-            XCTFail("expected Task 5 command placeholder")
+            _ = try await session.perform(DeviceCommand.shutdown)
+            XCTFail("expected unsupported shutdown")
         } catch {}
         let stateAfterError = await session.state
         let operationError = try XCTUnwrap(stateAfterError.lastError)
@@ -814,16 +814,16 @@ final class RouterTransportConnectionTests: XCTestCase {
         XCTAssertFalse(server.pushPayload(snapshotData(level: 88)))
     }
 
-    func testManualScanIsNoOpAndCommandsAreClearlyUnsupported() async throws {
+    func testManualScanIsNoOpAndCommandsRequireAConnection() async throws {
         let transport = makeTransport(server: FakeRouterServer())
 
         try await transport.startScan()
         await transport.stopScan()
         do {
             _ = try await transport.perform(DeviceCommand.setDC(true))
-            XCTFail("expected Task 5 command placeholder")
+            XCTFail("expected disconnected command failure")
         } catch {
-            XCTAssertEqual(error as? NetworkError, .unsupported("Router commands are Task 5"))
+            XCTAssertEqual(error as? NetworkError, .transport("Router device is not connected"))
         }
     }
 
