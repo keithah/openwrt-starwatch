@@ -67,6 +67,7 @@ actor RouterConnection {
     private var streamTask: Task<Void, Never>?
     private var pendingReconciliations: [UUID: PendingReconciliation] = [:]
     private var pendingDisconnectGraces: [UUID: PendingDisconnectGrace] = [:]
+    private var reconnectDisarmContext: EstablishedContext?
     private var connectionIsReconnecting = false
 
     init(
@@ -115,6 +116,7 @@ actor RouterConnection {
 
         generation &+= 1
         let requestedGeneration = generation
+        reconnectDisarmContext = nil
         statusTask?.cancel()
         pendingScope = scope
         if let establishedScope, establishedScope != scope {
@@ -229,6 +231,7 @@ actor RouterConnection {
 
     func disconnect() {
         generation &+= 1
+        reconnectDisarmContext = nil
         statusTask?.cancel()
         statusTask = nil
         pendingScope = nil
@@ -254,6 +257,7 @@ actor RouterConnection {
         establishedScope = nil
         lastTelemetryTimestamp = nil
         connectionIsReconnecting = false
+        reconnectDisarmContext = nil
         cancelAllReconciliations()
         cancelAllDisconnectGraces()
         output.yield(.disconnected(scope, nil))
@@ -308,7 +312,10 @@ actor RouterConnection {
             }
             return try powerLimitOutcome(data: confirmedData, type: type)
 
-        case .disconnect:
+        case let .disconnect(policy):
+            if policy == .successThenDisarmReconnect {
+                reconnectDisarmContext = context
+            }
             do {
                 _ = try await execute(
                     request,
@@ -318,12 +325,27 @@ actor RouterConnection {
                 )
                 return .sent
             } catch {
-                if Task.isCancelled { throw CancellationError() }
-                if error as? NetworkError == .unauthorized { throw error }
-                if isReconnectSuccess(context: context) { return .sent }
-                if try await waitForReconnectTransition(context: context, timeout: .seconds(2)) {
+                if Task.isCancelled {
+                    clearReconnectDisarm(ifMatching: context)
+                    throw CancellationError()
+                }
+                if error as? NetworkError == .unauthorized {
+                    clearReconnectDisarm(ifMatching: context)
+                    throw error
+                }
+                if isReconnectSuccess(context: context) {
+                    retireAfterExpectedDisconnect(ifRequested: context)
                     return .sent
                 }
+                do {
+                    if try await waitForReconnectTransition(context: context, timeout: .seconds(2)) {
+                        return .sent
+                    }
+                } catch {
+                    clearReconnectDisarm(ifMatching: context)
+                    throw error
+                }
+                clearReconnectDisarm(ifMatching: context)
                 throw error
             }
 
@@ -432,10 +454,11 @@ actor RouterConnection {
                         scope: scope
                     )
                 },
-                publishReconnecting: { [weak self] in
+                publishReconnecting: { [weak self] authoritativeDeviceDisconnect in
                     await self?.yieldReconnecting(
                         ifEstablished: expectedGeneration,
-                        scope: scope
+                        scope: scope,
+                        authoritativeDeviceDisconnect: authoritativeDeviceDisconnect
                     ) == true
                 },
                 publishUnauthorized: { [weak self] in
@@ -457,7 +480,7 @@ actor RouterConnection {
         beforeSnapshotYield: @escaping @Sendable () async -> Void,
         isCurrent: @escaping @Sendable () async -> Bool,
         publishSnapshot: @escaping @Sendable (RouterSnapshotDTO, DeviceTimestamp) async throws -> Bool,
-        publishReconnecting: @escaping @Sendable () async -> Bool,
+        publishReconnecting: @escaping @Sendable (Bool) async -> Bool,
         publishUnauthorized: @escaping @Sendable () async -> Bool
     ) async {
         var consecutiveFailures = 0
@@ -499,8 +522,17 @@ actor RouterConnection {
             } catch NetworkError.unauthorized {
                 _ = await publishUnauthorized()
                 return
+            } catch RecoverableStreamState.routerDisconnected {
+                guard await publishReconnecting(true) else { return }
+                let delay = backoff.delay(forFailure: consecutiveFailures)
+                consecutiveFailures += 1
+                do {
+                    try await clock.sleep(for: delay)
+                } catch {
+                    return
+                }
             } catch {
-                guard await publishReconnecting() else { return }
+                guard await publishReconnecting(false) else { return }
                 let delay = backoff.delay(forFailure: consecutiveFailures)
                 consecutiveFailures += 1
                 do {
@@ -552,12 +584,19 @@ actor RouterConnection {
 
     private func yieldReconnecting(
         ifEstablished expectedGeneration: UInt64,
-        scope: DeviceConnectionScope
+        scope: DeviceConnectionScope,
+        authoritativeDeviceDisconnect: Bool
     ) -> Bool {
         guard isEstablished(expectedGeneration, scope: scope) else { return false }
         connectionIsReconnecting = true
-        output.yield(.reconnecting(scope))
         completeDisconnectGraces(generation: expectedGeneration, scope: scope, succeeded: true)
+        if authoritativeDeviceDisconnect,
+           reconnectDisarmContext?.generation == expectedGeneration,
+           reconnectDisarmContext?.scope == scope {
+            retireEstablishedScope(scope)
+            return false
+        }
+        output.yield(.reconnecting(scope))
         return true
     }
 
@@ -600,6 +639,18 @@ actor RouterConnection {
     private func establishedContext() -> EstablishedContext? {
         guard let generation = establishedGeneration, let scope = establishedScope else { return nil }
         return (generation, scope)
+    }
+
+    private func clearReconnectDisarm(ifMatching context: EstablishedContext) {
+        guard reconnectDisarmContext?.generation == context.generation,
+              reconnectDisarmContext?.scope == context.scope else { return }
+        reconnectDisarmContext = nil
+    }
+
+    private func retireAfterExpectedDisconnect(ifRequested context: EstablishedContext) {
+        guard reconnectDisarmContext?.generation == context.generation,
+              reconnectDisarmContext?.scope == context.scope else { return }
+        retireEstablishedScope(context.scope)
     }
 
     private func registerReconciliation(

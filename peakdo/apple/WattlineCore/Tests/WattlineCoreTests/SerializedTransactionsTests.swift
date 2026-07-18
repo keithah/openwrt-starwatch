@@ -9,7 +9,7 @@ final class SerializedTransactionsTests: XCTestCase {
             try await transactions.enqueue {
                 await probe.record(.firstStarted)
                 do {
-                    try await Task.sleep(for: .milliseconds(200))
+                    try await Task.sleep(for: .seconds(5))
                     return 1
                 } catch is CancellationError {
                     await probe.record(.firstCancelled)
@@ -39,7 +39,7 @@ final class SerializedTransactionsTests: XCTestCase {
             try await transactions.enqueue {
                 await probe.record(.firstStarted)
                 do {
-                    try await Task.sleep(for: .milliseconds(200))
+                    try await Task.sleep(for: .seconds(5))
                     return 1
                 } catch is CancellationError {
                     await probe.record(.firstCancelled)
@@ -54,14 +54,6 @@ final class SerializedTransactionsTests: XCTestCase {
                 return 2
             }
         }
-        await Task.yield()
-        let third = Task {
-            try await transactions.enqueue {
-                await probe.record(.third)
-                return 3
-            }
-        }
-
         first.cancel()
 
         do {
@@ -70,6 +62,13 @@ final class SerializedTransactionsTests: XCTestCase {
         } catch is CancellationError {
         } catch {
             XCTFail("expected CancellationError, received \(error)")
+        }
+        await probe.waitUntilContains(.second)
+        let third = Task {
+            try await transactions.enqueue {
+                await probe.record(.third)
+                return 3
+            }
         }
         let secondValue = try await second.value
         let thirdValue = try await third.value

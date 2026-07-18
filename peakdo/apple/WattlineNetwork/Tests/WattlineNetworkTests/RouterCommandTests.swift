@@ -302,6 +302,35 @@ final class RouterCommandExecutionTests: XCTestCase {
         XCTAssertEqual(body?["action"], "restart")
     }
 
+    func testShutdownRetiresConnectionWithoutReconnectingOrResubscribing() async throws {
+        let server = commandServer()
+        let clock = ControlledCommandClock(origin: origin)
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: server,
+            events: server,
+            clock: clock,
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        let recorder = CommandEventRecorder(transport.events)
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStream()
+        addTeardownBlock { await transport.disconnect() }
+
+        let outcome = try await transport.perform(.shutdown)
+        XCTAssertEqual(outcome, .sent)
+        XCTAssertEqual(server.eventStreamCount, 1)
+
+        XCTAssertTrue(server.push(Data(#"{"connected":false}"#.utf8)))
+        try await recorder.waitUntil { $0 == .disconnected(scope, nil) }
+        XCTAssertFalse(recorder.events.contains(.reconnecting(scope)))
+
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(server.eventStreamCount, 1)
+    }
+
     func testRestartWriteErrorWhileStreamDisconnectsIsSuccess() async throws {
         let client = GatedRestartHTTPClient(status: statusBody())
         let events = CommandRouterServer()
@@ -562,8 +591,10 @@ private final class CommandRouterServer: RouterHTTPClient, RouterEventStream, @u
     private var queued: [String: [Response]] = [:]
     private var storedRequests: [Request] = []
     private var eventContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+    private var storedEventStreamCount = 0
 
     var requests: [Request] { lock.withLock { storedRequests } }
+    var eventStreamCount: Int { lock.withLock { storedEventStreamCount } }
 
     func enqueue(method: String, path: String, statusCode: Int = 200, body: String = #"{"ok":true}"#) {
         lock.withLock {
@@ -599,7 +630,10 @@ private final class CommandRouterServer: RouterHTTPClient, RouterEventStream, @u
 
     func events(path: String, token: String) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
-            lock.withLock { eventContinuation = continuation }
+            lock.withLock {
+                storedEventStreamCount += 1
+                eventContinuation = continuation
+            }
         }
     }
 
