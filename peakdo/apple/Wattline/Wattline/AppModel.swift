@@ -989,8 +989,10 @@ final class AppModel {
         activeConnectionScope = key.scope
         connectionOperationKey = nil
         if let session {
+            await connectedLifecycleBarrier()
             await session.receive(.connected(key.scope))
         }
+        guard isCurrent(key) else { return }
 
         let context = prepareBrokerContext(
             peripheralID: key.peripheralID,

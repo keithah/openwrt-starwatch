@@ -48,9 +48,11 @@ final class SettingsOperationTests: XCTestCase {
         try await eventually { model.state.pendingMutations.contains { $0.reconciler == .bypass(true) } }
         XCTAssertEqual(model.state.dc, off, "A nonstandard bypass reply must not mutate telemetry")
 
-        let stillOff = try DCPortStatus(frame: Data(repeating: 0, count: 9))
-        await transport.emit(.dc(stillOff, timestamp: .seconds(1)))
-        try await eventually { model.state.dc == stillOff }
+        var nonmatchingFrame = Data(repeating: 0, count: 9)
+        nonmatchingFrame[0] = 1
+        let nonmatching = try DCPortStatus(frame: nonmatchingFrame)
+        await transport.emit(.dc(nonmatching, timestamp: .seconds(1)))
+        try await eventually { model.state.dc == nonmatching }
         XCTAssertTrue(model.state.pendingMutations.contains { $0.reconciler == .bypass(true) }, "Only matching telemetry should reconcile bypass")
 
         var onFrame = Data(repeating: 0, count: 9)

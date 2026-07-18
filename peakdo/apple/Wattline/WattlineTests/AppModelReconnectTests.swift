@@ -360,6 +360,43 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertTrue(hasConnectedContext)
     }
 
+    func testReturnToScanDuringDirectConnectedLifecycleCannotReattachOldBrokerContext() async throws {
+        let transport = ControlledConnectionTransport()
+        let lifecycle = BrokerPublicationBarrier()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport },
+            connectedLifecycleBarrier: { await lifecycle.waitIfHeld() }
+        )
+        let device = DiscoveredDevice(
+            id: UUID(),
+            localName: "Link-Power 2",
+            rssi: -40,
+            mode: .application
+        )
+
+        model.requestBluetoothAfterPriming()
+        model.choose(device)
+        try await waitUntil { await transport.connectCount == 1 }
+        await lifecycle.holdNext()
+        await transport.succeedConnect(at: 0, deliverConnectedEvent: false)
+        try await waitUntil { await lifecycle.isBlocked }
+
+        model.returnToScan()
+        await model.syncClock()
+        XCTAssertNil(model.lastClockSync, "returning to scan must detach the old broker context")
+        await lifecycle.release()
+        await model.waitForSupersededLifecycleOperation()
+
+        await model.syncClock()
+        XCTAssertNil(model.lastClockSync, "stale direct completion must not reattach the old broker context")
+        XCTAssertEqual(model.route, .scan)
+        XCTAssertEqual(model.connectionStatus, .disconnected(nil))
+    }
+
     func testReturnToScanRejectsLateScopedConnectedAndHandshake() async throws {
         let transport = ControlledConnectionTransport()
         let suiteName = "WattlineTests.\(UUID().uuidString)"
@@ -1328,6 +1365,8 @@ private actor BrokerPublicationBarrier {
     private var shouldHold = false
     private var blocked = false
     private var continuation: CheckedContinuation<Void, Never>?
+
+    var isBlocked: Bool { blocked }
 
     func holdNext() { shouldHold = true }
 
