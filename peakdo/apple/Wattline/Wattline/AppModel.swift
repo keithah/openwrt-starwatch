@@ -321,6 +321,7 @@ final class AppModel {
 
     #if DEBUG
     var hasSnapshotCoordinatorForTesting: Bool { snapshotCoordinator != nil }
+    var restartOperationIDForTesting: UUID? { restartOperationID }
 
     func waitForSnapshotFanOutForTesting() async {
         await snapshotFlushTask?.value

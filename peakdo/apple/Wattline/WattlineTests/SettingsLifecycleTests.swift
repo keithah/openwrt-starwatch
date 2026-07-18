@@ -22,7 +22,6 @@ final class SettingsLifecycleTests: XCTestCase {
         )
         let model = try await makeConnectedModel(transport, clock: clock)
         let firstFinished = CompletionProbe()
-        let secondStarted = CompletionProbe()
         let secondFinished = CompletionProbe()
 
         let first = Task {
@@ -30,14 +29,28 @@ final class SettingsLifecycleTests: XCTestCase {
             await firstFinished.mark()
         }
         try await waitUntil { await transport.restartPerformCount == 1 }
+        let firstOperationID = try XCTUnwrap(model.restartOperationIDForTesting)
 
         let second = Task {
-            await secondStarted.mark()
             await model.restartDevice()
             await secondFinished.mark()
         }
-        try await waitUntil { await secondStarted.isMarked }
-        await Task.yield()
+        do {
+            try await waitUntil {
+                guard let currentOperationID = model.restartOperationIDForTesting else { return false }
+                return currentOperationID != firstOperationID
+            }
+        } catch {
+            await transport.releaseRestartPerform(1)
+            _ = try? await waitUntil { await transport.restartPerformCount == 2 }
+            await transport.releaseRestartPerform(2)
+            _ = try? await waitUntil { await transport.pendingDisconnectScope != nil }
+            await transport.releasePendingDisconnect()
+            first.cancel()
+            second.cancel()
+            throw error
+        }
+        XCTAssertEqual(model.maintenanceState, .restarting)
 
         await transport.releaseRestartPerform(1)
         try await waitUntil { await transport.restartPerformCount == 2 }
