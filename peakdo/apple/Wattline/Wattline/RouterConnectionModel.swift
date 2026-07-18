@@ -42,22 +42,29 @@ final class RouterConnectionModel {
     ) throws -> RouterEnrollmentClient
 
     private(set) var savedHosts: [RouterHostMetadata] = []
+    private(set) var discoveredRouters: [DiscoveredRouter] = []
+    private(set) var discoveryError: String?
     private(set) var loadError: String?
     private var routerIdentities: [UUID: DeviceIdentitySnapshot] = [:]
+    private var discoveryGeneration: UInt64 = 0
+    private var discoveryTask: Task<Void, Never>?
 
     private let hostStore: RouterHostStore
     private let credentialStore: RouterCredentialStore
+    private let discovery: RouterDiscovery?
     private let enrollmentClientFactory: EnrollmentClientFactory
     private let transportFactory: TransportFactory
 
     init(
         hostStore: RouterHostStore,
         credentialStore: RouterCredentialStore,
+        discovery: RouterDiscovery? = nil,
         enrollmentClientFactory: @escaping EnrollmentClientFactory,
         transportFactory: @escaping TransportFactory
     ) {
         self.hostStore = hostStore
         self.credentialStore = credentialStore
+        self.discovery = discovery
         self.enrollmentClientFactory = enrollmentClientFactory
         self.transportFactory = transportFactory
     }
@@ -68,6 +75,7 @@ final class RouterConnectionModel {
         return RouterConnectionModel(
             hostStore: hosts,
             credentialStore: credentials,
+            discovery: RouterDiscovery(source: NWBrowserRouterDiscoverySource()),
             enrollmentClientFactory: { endpoint in
                 let session = try RouterURLSessionFactory.make(endpoint: endpoint)
                 let baseURL = try RouterURLSessionFactory.baseURL(for: endpoint)
@@ -90,6 +98,29 @@ final class RouterConnectionModel {
                 )
             )
         }
+    }
+
+    func startDiscovery() {
+        guard discoveryTask == nil, let discovery else { return }
+        discoveryGeneration &+= 1
+        let generation = discoveryGeneration
+        discoveryError = nil
+        discoveryTask = Task { [weak self] in
+            for await routers in discovery.routers() {
+                guard !Task.isCancelled,
+                      let self,
+                      self.discoveryGeneration == generation
+                else { return }
+                self.discoveredRouters = routers
+            }
+        }
+    }
+
+    func stopDiscovery() {
+        discoveryGeneration &+= 1
+        discoveryTask?.cancel()
+        discoveryTask = nil
+        discoveredRouters = []
     }
 
     func reloadSavedHosts() async {
