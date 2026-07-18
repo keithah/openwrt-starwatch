@@ -7,6 +7,21 @@ import XCTest
 @testable import WattlineNetwork
 
 final class RouterTransportConnectionTests: XCTestCase {
+    func testOriginalPublicInitializerRemainsAnExplicitABISymbol() {
+        let constructor: (
+            RouterEndpoint,
+            any RouterCredentialProvider,
+            any RouterHTTPClient,
+            any RouterEventStream,
+            any RouterConnectionClock,
+            RouterReconnectBackoff
+        ) -> RouterTransport = RouterTransport.init(
+            endpoint:credentials:client:events:clock:backoff:
+        )
+
+        _ = constructor
+    }
+
     private let endpoint = RouterEndpoint(
         scheme: "http",
         host: "wattline-router.local",

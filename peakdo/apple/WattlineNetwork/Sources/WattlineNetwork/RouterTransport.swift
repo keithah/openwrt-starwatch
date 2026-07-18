@@ -161,7 +161,26 @@ public actor RouterTransport: DeviceTransport {
 
     public init(
         endpoint: RouterEndpoint,
-        accessLevel: RouterAccessLevel = .client,
+        credentials: any RouterCredentialProvider,
+        client: any RouterHTTPClient,
+        events eventSource: any RouterEventStream,
+        clock: any RouterConnectionClock,
+        backoff: RouterReconnectBackoff
+    ) {
+        self.init(
+            endpoint: endpoint,
+            accessLevel: .client,
+            credentials: credentials,
+            client: client,
+            events: eventSource,
+            clock: clock,
+            backoff: backoff
+        )
+    }
+
+    public init(
+        endpoint: RouterEndpoint,
+        accessLevel: RouterAccessLevel,
         credentials: any RouterCredentialProvider,
         client: any RouterHTTPClient,
         events eventSource: any RouterEventStream,
