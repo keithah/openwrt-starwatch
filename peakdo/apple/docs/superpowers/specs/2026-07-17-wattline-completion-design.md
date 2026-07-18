@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Branch:** `codex/wattline-phase-2`
-**Status:** Approved conversational design; awaiting written-spec review
+**Status:** Approved 2026-07-17; implementation plans prepared
 
 ## 1. Objective
 
