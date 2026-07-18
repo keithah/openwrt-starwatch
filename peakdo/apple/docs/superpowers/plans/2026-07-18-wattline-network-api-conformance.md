@@ -37,7 +37,7 @@
 - Produces: `RouterDeviceDTO`, `RouterAPIFailureDTO`, `RouterAPIErrorCode`, and canonical `NetworkError.api(status:code:message:)`.
 - Changes: connection bootstrap route from `/api/v1/status` to `/api/v1/device`.
 
-- [ ] **Step 1: Add exact failing identity and error tests**
+- [x] **Step 1: Add exact failing identity and error tests**
 
 Use the canonical router fixtures:
 
@@ -48,7 +48,7 @@ let failureJSON = #"{"error":{"code":"capability_unsupported","message":"Operati
 
 Assert that mapping preserves MAC, both firmware revisions, raw features, CID, and `.ota`; connection requests exactly `GET /api/v1/device`; `409` maps to `.api(status: 409, code: .capabilityUnsupported, message: "Operation is not supported")`; `401 unauthorized` retains the dedicated `.unauthorized` case; unknown additive reply fields decode successfully.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -58,7 +58,7 @@ swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterMappingTe
 
 Expected: FAIL because `RouterDeviceDTO`, canonical route selection, OTA identity mapping, and canonical API-error decoding do not exist.
 
-- [ ] **Step 3: Implement the canonical DTO and error decoder**
+- [x] **Step 3: Implement the canonical DTO and error decoder**
 
 Add focused wire types:
 
@@ -93,7 +93,7 @@ public enum RouterAPIErrorCode: String, Equatable, Sendable {
 
 Decode the canonical envelope centrally from every non-2xx HTTP response. Preserve `.unauthorized` for code `unauthorized`; preserve unknown status/code/message without reflecting secrets. Change `RouterConnection.connect` to `GET /api/v1/device` and map `mode == "ota"` to `.ota`, otherwise require `"app"`.
 
-- [ ] **Step 4: Run focused tests and the Network suite GREEN**
+- [x] **Step 4: Run focused tests and the Network suite GREEN**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterMappingTests|RouterTransportConnectionTests|HTTPAndSSEClientTests'
@@ -102,7 +102,7 @@ swift test --package-path peakdo/apple/WattlineNetwork
 
 Expected: all tests pass; existing `/status` assertions are migrated to `/device`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/WattlineNetwork
@@ -123,7 +123,7 @@ git commit -m "fix: conform router identity and errors to canonical API"
 - Consumes: Task 1 typed API failures.
 - Produces: canonical `RouterRequest` mappings and working `synchronizeDeviceTime()` / `readDeviceTimeIfSupported()`.
 
-- [ ] **Step 1: Replace legacy-route expectations with failing canonical tests**
+- [x] **Step 1: Replace legacy-route expectations with failing canonical tests**
 
 Assert exact requests:
 
@@ -140,7 +140,7 @@ XCTAssertEqual(shutdown.body, Data(#"{"confirm":true}"#.utf8))
 
 Add execution tests proving boolean responses do not complete before SSE telemetry; Type-C matches `mode`; bypass waits 10 seconds; limit PUT/DELETE responses are converted directly from `{"type":"output","level":4,"watts":100}`; runtime mutation remains unsupported; clock `available:false` returns nil; clock sync sends a zero-byte body; restart/shutdown preserve disconnect behavior. Assert no request path equals `/device/action`, `/device/usbc-limit`, `/device/bypass-threshold`, or `/device/schedules`.
 
-- [ ] **Step 2: Run command tests and verify RED**
+- [x] **Step 2: Run command tests and verify RED**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterCommandMapperTests|RouterCommandExecutionTests|RouterCapabilitiesTests'
@@ -148,7 +148,7 @@ swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterCommandMa
 
 Expected: FAIL on legacy method/path/body behavior and unsupported clock methods.
 
-- [ ] **Step 3: Implement minimal canonical mapping and execution**
+- [x] **Step 3: Implement minimal canonical mapping and execution**
 
 Use path-specific JSON bodies and per-type limit replies. Remove schedule and bypass-threshold endpoints from `RouterEndpointCapability` and supported surfaces for this pass. Implement:
 
@@ -168,14 +168,14 @@ func readDeviceTimeIfSupported() async throws -> Date? {
 
 Clock decoding accepts exactly `available`, nullable `device_time`, `system_time`, and nullable `drift_seconds`. A paired-client transport profile does not advertise clock controls; an explicitly configured administrator profile may call them.
 
-- [ ] **Step 4: Run command tests and all Network tests GREEN**
+- [x] **Step 4: Run command tests and all Network tests GREEN**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterCommandMapperTests|RouterCommandExecutionTests|RouterCapabilitiesTests'
 swift test --package-path peakdo/apple/WattlineNetwork
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/WattlineNetwork
@@ -192,7 +192,7 @@ git commit -m "fix: use canonical wattlined control routes"
 **Interfaces:**
 - Produces: validated `DiscoveredRouter.endpoint`, exact v1 TXT parsing, and daemon default ports.
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Create records containing resolved host and port plus exact TXT keys:
 
@@ -212,7 +212,7 @@ RouterServiceRecord(
 
 Assert HTTPS and the normalized pin for 64-hex `tls`; HTTP for `tls=none`; invalid `api`, `auth`, MAC, CID, feature mask, fingerprint, missing resolved authority, and obsolete `fingerprint`-only records are rejected; duplicates merge by normalized MAC. Assert `router.lan` → HTTP 8377, `https://router.lan` → 8378, and explicit ports remain unchanged.
 
-- [ ] **Step 2: Run discovery tests and verify RED**
+- [x] **Step 2: Run discovery tests and verify RED**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterDiscoveryTests|RouterHostStoreTests'
@@ -220,18 +220,18 @@ swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterDiscovery
 
 Expected: FAIL because records lack resolved authority, read the obsolete key, and default to 80/443.
 
-- [ ] **Step 3: Implement strict TXT parsing and router defaults**
+- [x] **Step 3: Implement strict TXT parsing and router defaults**
 
 Extend `RouterServiceRecord` with `host` and `port`. Extend `DiscoveredRouter` with `model`, `cid`, `features`, and `endpoint`. Parse only `api=1`, `auth=pin`, and `tls`; normalize a valid pin or recognize literal `none`. Update the Network.framework source to resolve services before publishing records and cancel superseded resolution work. Change manual defaults to 8377/8378 while preserving explicit ports.
 
-- [ ] **Step 4: Run focused and full Network tests GREEN**
+- [x] **Step 4: Run focused and full Network tests GREEN**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter 'RouterDiscoveryTests|RouterHostStoreTests'
 swift test --package-path peakdo/apple/WattlineNetwork
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/WattlineNetwork
@@ -251,7 +251,7 @@ git commit -m "fix: match wattlined discovery and default ports"
 **Interfaces:**
 - Produces: `RouterPairingPayload.parse(_:)`, `RouterEnrollmentClient.enroll(pin:label:expectedDeviceID:expectedFingerprint:)`, and atomic `RouterConnectionModel.enroll(...)`.
 
-- [ ] **Step 1: Add failing pure and fake-HTTP tests**
+- [x] **Step 1: Add failing pure and fake-HTTP tests**
 
 Test the documented QR:
 
@@ -264,7 +264,7 @@ XCTAssertEqual(payload.pin, "123456")
 
 Reject wrong scheme, version, missing required fields, malformed six-digit PIN, invalid port/MAC/pin, duplicate required query keys, and TLS without HTTPS. For enrollment, assert exact unauthenticated `POST /api/v1/pair`, JSON body, required 201, response correlation, TLS-pin match, `.invalidOrExpiredPIN` mapping, no Authorization header, and token redaction. App-level tests assert token-save then host-save, rollback deletes the token on metadata failure, and no write occurs when validation fails.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter RouterEnrollmentTests
@@ -273,7 +273,7 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
 
 Expected: FAIL because pairing/QR types and unauthenticated HTTP support do not exist.
 
-- [ ] **Step 3: Implement pairing without secret leakage**
+- [x] **Step 3: Implement pairing without secret leakage**
 
 Add a dedicated unauthenticated request seam:
 
@@ -285,7 +285,7 @@ public protocol RouterEnrollmentHTTPClient: Sendable {
 
 Have `HTTPClient` conform without adding Authorization. Decode the exact 201 response, validate device/pin/base URL correlation, and return a result that holds the secret only in memory with redacted descriptions. `RouterConnectionModel.enroll` saves Keychain first and host metadata second, deleting the Keychain entry if metadata persistence fails.
 
-- [ ] **Step 4: Run focused, Network, and app tests GREEN**
+- [x] **Step 4: Run focused, Network, and app tests GREEN**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter RouterEnrollmentTests
@@ -293,7 +293,7 @@ swift test --package-path peakdo/apple/WattlineNetwork
 xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=Wattline-Tests-2' CODE_SIGNING_ALLOWED=NO -only-testing:WattlineTests/RouterAppWiringTests
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/WattlineNetwork peakdo/apple/Wattline/Wattline/RouterConnectionModel.swift peakdo/apple/Wattline/WattlineTests/RouterAppWiringTests.swift
@@ -313,11 +313,11 @@ git commit -m "feat: add wattlined PIN enrollment contract"
 - Consumes: canonical endpoint profile and identity from Tasks 1–4.
 - Produces: structurally correct router capability gating and accurate historical planning documentation.
 
-- [ ] **Step 1: Add failing app wiring and source-audit tests**
+- [x] **Step 1: Add failing app wiring and source-audit tests**
 
 Assert the default router profile exposes ordinary granular actions and limits but not schedules, bypass threshold, OTA, or administrator clock controls. Feed an identity with all feature bits and prove unsupported/deferred features are removed from `DeviceCapabilities`. Add a source assertion that app-used production strings contain canonical routes and do not contain the four deprecated route strings.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 ```bash
 xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'platform=iOS Simulator,name=Wattline-Tests-2' CODE_SIGNING_ALLOWED=NO -only-testing:WattlineTests/RouterAppWiringTests
@@ -325,11 +325,11 @@ xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattli
 
 Expected: FAIL because `connectViaRouter` defaults to every historical endpoint capability.
 
-- [ ] **Step 3: Implement the production profile and correct stale docs**
+- [x] **Step 3: Implement the production profile and correct stale docs**
 
 Replace `Set(RouterEndpointCapability.allCases)` with a named canonical client profile. Ensure capability gating removes deferred schedules and administrator-only controls structurally. Update the 2026-07-17 network design/plan to point at the 2026-07-18 conformance spec and mark compatibility-route/PIN/TXT descriptions as superseded rather than leaving false statements as current guidance.
 
-- [ ] **Step 4: Run complete verification**
+- [x] **Step 4: Run complete verification**
 
 ```bash
 swift test --package-path peakdo/apple/WattlineCore
@@ -344,7 +344,7 @@ git diff --check
 
 Expected: every suite passes; both audits return no forbidden matches. Real router/Bonjour/QR/TLS/VPN/physical-command checks are reported as external.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add peakdo/apple/Wattline peakdo/apple/docs/superpowers

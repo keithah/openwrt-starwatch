@@ -15,7 +15,8 @@ public struct SettingsComposition: Equatable, Sendable {
 
     public init(
         capabilities: DeviceCapabilities,
-        isApplicationMode: Bool
+        isApplicationMode: Bool,
+        supportsManualClock: Bool = true
     ) {
         var rows: [SettingsRow] = [.deviceInfo]
         guard isApplicationMode else {
@@ -23,7 +24,7 @@ public struct SettingsComposition: Equatable, Sendable {
             return
         }
 
-        rows.append(.clock)
+        if supportsManualClock { rows.append(.clock) }
         if capabilities.hasDCPort && capabilities.hasDCControl {
             rows.append(.dcPort)
         }

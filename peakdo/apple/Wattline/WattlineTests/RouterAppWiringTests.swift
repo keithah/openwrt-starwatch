@@ -33,14 +33,16 @@ final class RouterAppWiringTests: XCTestCase {
     }
 
     func testRouterEndpointCapabilitiesRemoveUnsupportedSurfacesStructurally() {
+        XCTAssertEqual(RouterConnectionModel.canonicalClientEndpoints, [.controls, .usbCLimit])
+
         let resolved = RouterConnectionModel.capabilities(
             for: identity(mac: "DC:04:5A:EB:72:2B", cid: 0x0302),
-            endpoints: [.controls]
+            endpoints: RouterConnectionModel.canonicalClientEndpoints
         )
 
         XCTAssertTrue(resolved.hasDCControl)
         XCTAssertTrue(resolved.hasUSBOutputControl)
-        XCTAssertFalse(resolved.hasPowerLimits)
+        XCTAssertTrue(resolved.hasPowerLimits)
         XCTAssertFalse(resolved.hasScheduler)
     }
 
@@ -171,6 +173,7 @@ final class RouterAppWiringTests: XCTestCase {
         try await waitUntil { await transport.connectCount == 1 }
 
         XCTAssertEqual(model.activeTransportKind, .router)
+        XCTAssertFalse(model.supportsManualClockControls)
         XCTAssertEqual(routerFactoryCount, 1)
         XCTAssertEqual(bluetoothFactoryCount, 0, "manual router selection must not instantiate CBCentralManager/BLETransport")
         let connectCount = await transport.connectCount

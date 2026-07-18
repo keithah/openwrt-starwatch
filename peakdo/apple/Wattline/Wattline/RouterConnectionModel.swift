@@ -28,6 +28,11 @@ struct AppDeviceConnectionRecord: Identifiable, Equatable, Sendable {
 @MainActor
 @Observable
 final class RouterConnectionModel {
+    static let canonicalClientEndpoints: Set<RouterEndpointCapability> = [
+        .controls,
+        .usbCLimit,
+    ]
+
     typealias TransportFactory = @MainActor (
         _ endpoint: RouterEndpoint,
         _ credentials: any RouterCredentialProvider
@@ -75,6 +80,7 @@ final class RouterConnectionModel {
             let baseURL = try RouterURLSessionFactory.baseURL(for: endpoint)
             return RouterTransport(
                 endpoint: endpoint,
+                accessLevel: .client,
                 credentials: credentials,
                 client: HTTPClient(baseURL: baseURL, session: session),
                 events: SSEClient(baseURL: baseURL, session: session),

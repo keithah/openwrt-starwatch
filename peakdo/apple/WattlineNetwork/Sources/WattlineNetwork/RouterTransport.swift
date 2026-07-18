@@ -144,15 +144,24 @@ public struct RouterReconnectBackoff: Equatable, Sendable {
     }
 }
 
+/// PIN enrollment issues a managed client credential. Administrator routes are
+/// opt-in because the router never returns its bootstrap credential to clients.
+public enum RouterAccessLevel: String, Equatable, Sendable {
+    case client
+    case administrator
+}
+
 public actor RouterTransport: DeviceTransport {
     public nonisolated let events: AsyncStream<DeviceEvent>
 
     private let connection: RouterConnection
+    private let accessLevel: RouterAccessLevel
     private let transactions = SerializedTransactions()
     private let commandMapper = RouterCommandMapper()
 
     public init(
         endpoint: RouterEndpoint,
+        accessLevel: RouterAccessLevel = .client,
         credentials: any RouterCredentialProvider,
         client: any RouterHTTPClient,
         events eventSource: any RouterEventStream,
@@ -161,6 +170,7 @@ public actor RouterTransport: DeviceTransport {
     ) {
         self.init(
             endpoint: endpoint,
+            accessLevel: accessLevel,
             credentials: credentials,
             client: client,
             events: eventSource,
@@ -172,6 +182,7 @@ public actor RouterTransport: DeviceTransport {
 
     init(
         endpoint: RouterEndpoint,
+        accessLevel: RouterAccessLevel = .client,
         credentials: any RouterCredentialProvider,
         client: any RouterHTTPClient,
         events eventSource: any RouterEventStream,
@@ -181,6 +192,7 @@ public actor RouterTransport: DeviceTransport {
     ) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
         events = pair.stream
+        self.accessLevel = accessLevel
         connection = RouterConnection(
             endpoint: endpoint,
             credentials: credentials,
@@ -223,13 +235,15 @@ public actor RouterTransport: DeviceTransport {
     }
 
     public func synchronizeDeviceTime() async throws {
+        guard accessLevel == .administrator else { return }
         try await transactions.enqueue { [connection] in
             try await connection.executeBodyless("POST", "/api/v1/device/clock/sync")
         }
     }
 
     public func readDeviceTimeIfSupported() async throws -> Date? {
-        try await transactions.enqueue { [connection] in
+        guard accessLevel == .administrator else { return nil }
+        return try await transactions.enqueue { [connection] in
             try await connection.readDeviceTime()
         }
     }

@@ -1,5 +1,16 @@
 # Wattline Optional LAN/VPN Transport — Design
 
+> **Superseded API details (2026-07-18):** This document records the original
+> network-transport architecture, but its route, Bonjour TXT, and enrollment
+> details predate the canonical `wattlined` v1 contract. The current authority
+> for implemented app-used HTTP behavior is
+> `2026-07-18-wattline-network-api-conformance-design.md`, derived from
+> `~/src/openwrt-wattline/docs/api.md` and the router handlers/tests. In
+> particular, `/device`, granular control/limit routes, exact `tls` TXT parsing,
+> and public `POST /pair` QR/PIN enrollment replace the compatibility-route and
+> asynchronous-pairing descriptions below. Deferred router features remain
+> deferred.
+
 ## Scope
 
 Add an optional router-backed source for the Wattline iOS and macOS apps. Bluetooth remains the primary transport; Demo remains available everywhere. The first version uses explicit user selection of a discovered or manually entered router and does not perform automatic failover.

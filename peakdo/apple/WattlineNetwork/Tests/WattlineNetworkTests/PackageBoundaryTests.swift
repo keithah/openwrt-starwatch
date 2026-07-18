@@ -61,6 +61,48 @@ final class PackageBoundaryTests: XCTestCase {
         }
     }
 
+    func testProductionNetworkSourcesUseOnlyCanonicalAppRoutes() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // WattlineNetworkTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // WattlineNetwork
+        let sourceRoot = packageRoot.appendingPathComponent("Sources/WattlineNetwork")
+        let enumerator = try XCTUnwrap(
+            FileManager.default.enumerator(at: sourceRoot, includingPropertiesForKeys: nil)
+        )
+        var source = ""
+        var auditedFileCount = 0
+        for case let file as URL in enumerator where file.pathExtension == "swift" {
+            auditedFileCount += 1
+            source += try String(contentsOf: file)
+        }
+
+        for route in [
+            "/api/v1/device",
+            "/api/v1/events",
+            "/api/v1/device/dc",
+            "/api/v1/device/usbc/output",
+            "/api/v1/device/dc/bypass",
+            "/api/v1/device/usbc/limit/",
+            "/api/v1/device/restart",
+            "/api/v1/device/shutdown",
+            "/api/v1/device/clock",
+            "/api/v1/pair",
+        ] {
+            XCTAssertTrue(source.contains(route), "missing canonical app route \(route)")
+        }
+        for deprecatedRoute in [
+            "/api/v1/status",
+            "/api/v1/device/action",
+            "/api/v1/device/usbc-limit",
+            "/api/v1/device/bypass-threshold",
+            "/api/v1/device/schedules",
+        ] {
+            XCTAssertFalse(source.contains(deprecatedRoute), "deprecated route remains: \(deprecatedRoute)")
+        }
+        XCTAssertGreaterThan(auditedFileCount, 0)
+    }
+
     private func forbiddenNetworkingTokens(in contents: String) -> [String] {
         forbiddenNetworkingTokenPatterns.filter(contents.contains)
     }

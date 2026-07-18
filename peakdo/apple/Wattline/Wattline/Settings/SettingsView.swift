@@ -130,7 +130,8 @@ struct SettingsView: View {
     private var composition: SettingsComposition {
         SettingsComposition(
             capabilities: model.capabilities,
-            isApplicationMode: model.state.identity?.mode == .application
+            isApplicationMode: model.state.identity?.mode == .application,
+            supportsManualClock: model.supportsManualClockControls
         )
     }
 

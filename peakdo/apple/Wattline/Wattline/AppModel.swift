@@ -166,6 +166,10 @@ final class AppModel {
         return String(format: "Drift %.1fs", drift)
     }
 
+    var supportsManualClockControls: Bool {
+        activeTransportKind != .router
+    }
+
     var lowBatteryEnabled: Bool { persistence.lowBatteryEnabled }
     var lowBatteryThreshold: Int { persistence.lowBatteryThreshold }
     var systemSurfacePreferences: SystemSurfacePreferences { persistence.systemSurfacePreferences }
@@ -422,7 +426,7 @@ final class AppModel {
 
     func connectViaRouter(
         _ host: RouterHostMetadata,
-        endpoints: Set<RouterEndpointCapability> = Set(RouterEndpointCapability.allCases)
+        endpoints: Set<RouterEndpointCapability> = RouterConnectionModel.canonicalClientEndpoints
     ) {
         do {
             let routerTransport = try routerConnections.makeTransport(for: host)

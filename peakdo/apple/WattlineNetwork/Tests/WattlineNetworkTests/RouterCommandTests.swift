@@ -223,7 +223,7 @@ final class RouterCommandExecutionTests: XCTestCase {
         server.enqueue(method: "GET", path: "/api/v1/device/clock", body: #"{"available":false,"device_time":null,"system_time":"2026-07-17T20:00:02Z","drift_seconds":null}"#)
         server.enqueue(method: "GET", path: "/api/v1/device/clock", body: #"{"available":true,"device_time":"2026-07-17T20:00:00Z","system_time":"2026-07-17T20:00:02Z","drift_seconds":-2}"#)
         server.enqueue(method: "POST", path: "/api/v1/device/clock/sync", body: #"{"synced":true,"system_time":"2026-07-17T20:00:02Z"}"#)
-        let transport = makeTransport(server)
+        let transport = makeTransport(server, accessLevel: .administrator)
         try await connect(transport, server)
 
         let deviceTime = try await transport.readDeviceTimeIfSupported()
@@ -234,6 +234,21 @@ final class RouterCommandExecutionTests: XCTestCase {
         let clockRequests = server.requests.filter { $0.path.contains("/device/clock") }
         XCTAssertEqual(clockRequests.map(\.method), ["GET", "GET", "POST"])
         XCTAssertTrue(clockRequests.allSatisfy { $0.body == nil })
+    }
+
+    func testPairedClientProfileDoesNotCallAdministratorClockRoutes() async throws {
+        let server = commandServer()
+        let transport = makeTransport(server, accessLevel: .client)
+        try await connect(transport, server)
+
+        let deviceTime = try await transport.readDeviceTimeIfSupported()
+        XCTAssertNil(deviceTime)
+        try await transport.synchronizeDeviceTime()
+
+        XCTAssertTrue(
+            server.requests.allSatisfy { !$0.path.contains("/device/clock") },
+            "a PIN-enrolled client must not call administrator-only clock routes"
+        )
     }
 
     func testRouterErrorsAndUnsupportedCommandsAreClear() async throws {
@@ -510,9 +525,13 @@ final class RouterCommandExecutionTests: XCTestCase {
         Data(#"{"id":"DC:04:5A:EB:72:2B","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":770,"features_raw":16496,"features":{},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"app","connection":{"connected":true,"phase":"ready","reconnect":"armed"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}"#.utf8)
     }
 
-    private func makeTransport(_ server: CommandRouterServer) -> RouterTransport {
+    private func makeTransport(
+        _ server: CommandRouterServer,
+        accessLevel: RouterAccessLevel = .client
+    ) -> RouterTransport {
         RouterTransport(
             endpoint: endpoint,
+            accessLevel: accessLevel,
             credentials: credentials,
             client: server,
             events: server,

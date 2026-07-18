@@ -49,6 +49,17 @@ final class SettingsCompositionTests: XCTestCase {
         XCTAssertEqual(value.rows, [.deviceInfo])
     }
 
+    func testAdministratorClockControlIsStructurallyAbsentForPairedRouterClient() {
+        let value = SettingsComposition(
+            capabilities: DeviceCapabilities(features: [.batteryCapacity]),
+            isApplicationMode: true,
+            supportsManualClock: false
+        )
+
+        XCTAssertFalse(value.rows.contains(.clock))
+        XCTAssertTrue(value.rows.contains(.systemSurfaces))
+    }
+
     private func composition(features: FeatureFlags) -> SettingsComposition {
         SettingsComposition(
             capabilities: DeviceCapabilities(features: features),

@@ -1,5 +1,14 @@
 # Wattline Optional LAN/VPN Transport Implementation Plan
 
+> **Superseded API tasks (2026-07-18):** This plan remains as milestone history,
+> but its compatibility-route, TXT `fingerprint`, and pairing assumptions are no
+> longer implementation guidance. The corrective execution plan is
+> `2026-07-18-wattline-network-api-conformance.md`, based on the canonical router
+> contract in `~/src/openwrt-wattline/docs/api.md`. Tasks completed under this
+> older plan must be interpreted through that conformance plan; unsupported or
+> deferred schedules, bypass threshold, OTA, rules, settings, token admin,
+> BLE-device pairing, and expert controls are not app-advertised.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an optional bearer-authenticated LAN/VPN router transport while keeping Bluetooth primary, Demo available, and WattlineCore free of networking.
