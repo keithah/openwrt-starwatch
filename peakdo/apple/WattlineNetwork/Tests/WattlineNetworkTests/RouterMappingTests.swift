@@ -22,43 +22,48 @@ final class RouterMappingTests: XCTestCase {
         )
     }
 
-    func testDecodesShippedStatusIdentityAndMapsCapabilities() throws {
+    func testDecodesCanonicalDeviceIdentityAndMapsOTAMode() throws {
         let data = Data(#"""
         {
-            "connected": true,
-            "device": {
-                "model": "BP4SL3V2",
-                "hw_rev": "2.1",
-                "firmware": "1.4.9",
-                "mac": "DC:04:5A:EB:72:2B",
-                "cid": 770,
-                "features": 16496
-            },
-            "rules": []
+            "id": "DC:04:5A:EB:72:2B",
+            "model": "BP4SL3V2",
+            "hardware_revision": "V2",
+            "application_firmware": "1.4.9",
+            "ota_firmware": "1.0.3",
+            "cid": 773,
+            "features_raw": 32767,
+            "features": {"display": true},
+            "available": {"current_time": true, "ota": true, "dc": true, "usbc": true},
+            "mode": "ota",
+            "connection": {"connected": true, "phase": "bootloader", "reconnect": "bootloader"},
+            "commands": {"active": [], "recent": []},
+            "magic_dns_name": "wattline.example.ts.net",
+            "future_additive_field": true
         }
         """#.utf8)
 
-        let status = try JSONDecoder().decode(RouterStatusDTO.self, from: data)
-        XCTAssertTrue(status.connected)
-        XCTAssertEqual(status.device.model, "BP4SL3V2")
-        XCTAssertEqual(status.device.hardwareRevision, "2.1")
-        XCTAssertEqual(status.device.firmware, "1.4.9")
-        XCTAssertEqual(status.device.mac, "DC:04:5A:EB:72:2B")
-        XCTAssertEqual(status.device.cid, 770)
-        XCTAssertEqual(status.device.features, 16496)
+        let device = try JSONDecoder().decode(RouterDeviceDTO.self, from: data)
+        XCTAssertEqual(device.model, "BP4SL3V2")
+        XCTAssertEqual(device.hardwareRevision, "V2")
+        XCTAssertEqual(device.applicationFirmware, "1.4.9")
+        XCTAssertEqual(device.otaFirmware, "1.0.3")
+        XCTAssertEqual(device.id, "DC:04:5A:EB:72:2B")
+        XCTAssertEqual(device.cid, 773)
+        XCTAssertEqual(device.featuresRaw, 32767)
+        XCTAssertTrue(device.available.currentTime)
 
-        let identity = mapping.identity(status.device)
+        let identity = try mapping.identity(device)
         XCTAssertEqual(identity.peripheralID, peripheralID)
         XCTAssertNil(identity.advertisedName)
-        XCTAssertEqual(identity.mode, .application)
+        XCTAssertEqual(identity.mode, .ota)
         XCTAssertEqual(identity.modelNumber, "BP4SL3V2")
-        XCTAssertEqual(identity.hardwareRevision, "2.1")
-        XCTAssertNil(identity.otaFirmwareRevision)
+        XCTAssertEqual(identity.hardwareRevision, "V2")
+        XCTAssertEqual(identity.otaFirmwareRevision, "1.0.3")
         XCTAssertEqual(identity.appFirmwareRevision, "1.4.9")
         XCTAssertEqual(identity.macAddress, "DC:04:5A:EB:72:2B")
-        XCTAssertEqual(identity.cid, 770)
-        XCTAssertEqual(identity.rawFeatures, 16496)
-        XCTAssertEqual(identity.capabilities.features.rawValue, 16496)
+        XCTAssertEqual(identity.cid, 773)
+        XCTAssertEqual(identity.rawFeatures, 32767)
+        XCTAssertEqual(identity.capabilities.features.rawValue, 0, "OTA mode must not expose app controls")
     }
 
     func testDecodesAndMapsFullTelemetryWithoutChangingValues() throws {

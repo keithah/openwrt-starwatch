@@ -17,6 +17,7 @@ public struct RouterTimestampOrigin: Equatable, Sendable {
 
 public enum RouterMappingError: Error, Equatable, Sendable {
     case disconnectedSnapshot
+    case invalidDeviceMode(String)
     case invalidPowerFlow(Int8)
     case invalidTypeCPortMode(UInt8)
     case coreTelemetry(String)
@@ -31,24 +32,32 @@ public struct RouterMapping: Sendable {
         self.timestampOrigin = timestampOrigin
     }
 
-    public func identity(_ identity: RouterIdentityDTO) -> DeviceIdentitySnapshot {
-        let features = FeatureFlags(rawValue: identity.features)
-        return DeviceIdentitySnapshot(
-            peripheralID: peripheralID,
-            advertisedName: nil,
-            mode: .application,
-            modelNumber: identity.model,
-            hardwareRevision: identity.hardwareRevision,
-            otaFirmwareRevision: nil,
-            appFirmwareRevision: identity.firmware,
-            cid: identity.cid,
-            rawFeatures: identity.features,
-            macAddress: identity.mac,
-            capabilities: CapabilityResolver.resolve(
+    public func identity(_ identity: RouterDeviceDTO) throws -> DeviceIdentitySnapshot {
+        let mode: DeviceMode = switch identity.mode {
+        case "app": .application
+        case "ota": .ota
+        default: throw RouterMappingError.invalidDeviceMode(identity.mode)
+        }
+        let features = FeatureFlags(rawValue: identity.featuresRaw)
+        let capabilities = mode == .ota
+            ? DeviceCapabilities(features: [])
+            : CapabilityResolver.resolve(
                 features: features,
                 cid: identity.cid,
                 model: identity.model
             )
+        return DeviceIdentitySnapshot(
+            peripheralID: peripheralID,
+            advertisedName: nil,
+            mode: mode,
+            modelNumber: identity.model,
+            hardwareRevision: identity.hardwareRevision,
+            otaFirmwareRevision: identity.otaFirmware,
+            appFirmwareRevision: identity.applicationFirmware,
+            cid: identity.cid,
+            rawFeatures: identity.featuresRaw,
+            macAddress: identity.id,
+            capabilities: capabilities
         )
     }
 

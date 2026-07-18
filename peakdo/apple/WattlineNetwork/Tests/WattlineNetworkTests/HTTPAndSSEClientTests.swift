@@ -30,6 +30,25 @@ final class HTTPAndSSEClientTests: XCTestCase {
         catch { XCTAssertEqual(error as? NetworkError, .httpStatus(503, "down")) }
     }
 
+    func testHTTPClientDecodesCanonicalAPIErrorEnvelope() async {
+        URLProtocolFixture.response = .init(
+            status: 409,
+            body: Data(#"{"error":{"code":"capability_unsupported","message":"Operation is not supported","details":{}}}"#.utf8)
+        )
+        let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        do {
+            _ = try await client.get("/api/v1/device", token: "secret-token")
+            XCTFail("expected canonical API error")
+        } catch {
+            XCTAssertEqual(
+                error as? NetworkError,
+                .api(status: 409, code: .capabilityUnsupported, message: "Operation is not supported")
+            )
+            XCTAssertFalse(String(describing: error).contains("secret-token"))
+        }
+    }
+
     func testHTTPClientMapsUnauthorizedWithoutExposingToken() async {
         URLProtocolFixture.response = .init(
             status: 401,

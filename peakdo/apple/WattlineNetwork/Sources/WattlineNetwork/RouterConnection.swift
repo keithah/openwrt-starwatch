@@ -6,7 +6,7 @@ import WattlineCore
 
 actor RouterConnection {
     private struct StatusContext: Sendable {
-        let status: RouterStatusDTO
+        let device: RouterDeviceDTO
         let timestampOrigin: RouterTimestampOrigin
     }
 
@@ -143,7 +143,7 @@ actor RouterConnection {
 
             do {
                 let (data, response) = try await client.get(
-                    "/api/v1/status",
+                    "/api/v1/device",
                     token: credential.token
                 )
                 try Task.checkCancellation()
@@ -152,14 +152,14 @@ actor RouterConnection {
                     response: response,
                     token: credential.token
                 )
-                let status = try Self.decode(
-                    RouterStatusDTO.self,
+                let device = try Self.decode(
+                    RouterDeviceDTO.self,
                     from: statusData,
                     token: credential.token
                 )
                 let timestampOrigin = await clock.sampleTimestampOrigin()
                 try Task.checkCancellation()
-                return StatusContext(status: status, timestampOrigin: timestampOrigin)
+                return StatusContext(device: device, timestampOrigin: timestampOrigin)
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as URLError where error.code == .cancelled {
@@ -195,9 +195,9 @@ actor RouterConnection {
             establishedGeneration = requestedGeneration
             establishedScope = scope
             lastTelemetryTimestamp = nil
-            connectionIsReconnecting = !context.status.connected
-            output.yield(.handshakeCompleted(mapping.identity(context.status.device), scope: scope))
-            output.yield(context.status.connected ? .connected(scope) : .reconnecting(scope))
+            connectionIsReconnecting = !context.device.connection.connected
+            output.yield(.handshakeCompleted(try mapping.identity(context.device), scope: scope))
+            output.yield(context.device.connection.connected ? .connected(scope) : .reconnecting(scope))
             startEventLoop(
                 generation: requestedGeneration,
                 scope: scope,
@@ -869,12 +869,12 @@ actor RouterConnection {
         response: HTTPURLResponse,
         token: String
     ) throws -> Data {
-        if response.statusCode == 401 {
-            throw NetworkError.unauthorized
-        }
         guard (200..<300).contains(response.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw NetworkError.httpStatus(response.statusCode, redact(body, token: token))
+            throw RouterHTTPErrorMapper.error(
+                status: response.statusCode,
+                data: data,
+                token: token
+            )
         }
         return data
     }
@@ -918,6 +918,12 @@ actor RouterConnection {
                 return NetworkError.unsupported(redact(message, token: token))
             case let .transport(message):
                 return NetworkError.transport(redact(message, token: token))
+            case let .api(status, code, message):
+                return NetworkError.api(
+                    status: status,
+                    code: code,
+                    message: redact(message, token: token)
+                )
             case .invalidURL, .unauthorized, .streamEnded, .timeout:
                 return networkError
             }

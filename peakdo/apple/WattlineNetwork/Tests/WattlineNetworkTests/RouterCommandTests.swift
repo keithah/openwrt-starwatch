@@ -530,12 +530,12 @@ final class RouterCommandExecutionTests: XCTestCase {
 
     private func commandServer() -> CommandRouterServer {
         let server = CommandRouterServer()
-        server.enqueue(method: "GET", path: "/api/v1/status", body: #"{"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"2.1","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":770,"features":16496}}"#)
+        server.enqueue(method: "GET", path: "/api/v1/device", body: String(decoding: statusBody(), as: UTF8.self))
         return server
     }
 
     private func statusBody() -> Data {
-        Data(#"{"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"2.1","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":770,"features":16496}}"#.utf8)
+        Data(#"{"id":"DC:04:5A:EB:72:2B","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":770,"features_raw":16496,"features":{},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"app","connection":{"connected":true,"phase":"ready","reconnect":"armed"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}"#.utf8)
     }
 
     private func makeTransport(_ server: CommandRouterServer) -> RouterTransport {
@@ -758,7 +758,7 @@ private actor CommandCancellationHTTPClient: RouterHTTPClient {
     }
 
     func request(_ method: String, _ path: String, body: Data?, token: String) async throws -> (Data, HTTPURLResponse) {
-        if path == "/api/v1/status" { return response(status, path: path) }
+        if path == "/api/v1/device" { return response(status, path: path) }
         commandStarted = true
         do {
             try await Task.sleep(for: .seconds(60))
@@ -827,7 +827,7 @@ private actor GatedRestartHTTPClient: RouterHTTPClient {
     }
 
     func request(_ method: String, _ path: String, body: Data?, token: String) async throws -> (Data, HTTPURLResponse) {
-        if path == "/api/v1/status" { return response(status, path: path) }
+        if path == "/api/v1/device" { return response(status, path: path) }
         restartStarted = true
         await withCheckedContinuation { restartContinuation = $0 }
         throw URLError(.cancelled)

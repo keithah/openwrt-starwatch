@@ -1,26 +1,49 @@
 import Foundation
 
-public struct RouterStatusDTO: Codable, Equatable, Sendable {
-    public let connected: Bool
-    public let device: RouterIdentityDTO
-}
-
-public struct RouterIdentityDTO: Codable, Equatable, Sendable {
+public struct RouterDeviceDTO: Decodable, Equatable, Sendable {
+    public let id: String
     public let model: String
     public let hardwareRevision: String
-    public let firmware: String
-    public let mac: String
+    public let applicationFirmware: String
+    public let otaFirmware: String
     public let cid: UInt16
-    public let features: UInt32
+    public let featuresRaw: UInt32
+    public let available: RouterAvailabilityDTO
+    public let mode: String
+    public let connection: RouterDeviceConnectionDTO
+    public let magicDNSName: String
 
     private enum CodingKeys: String, CodingKey {
+        case id
         case model
-        case hardwareRevision = "hw_rev"
-        case firmware
-        case mac
+        case hardwareRevision = "hardware_revision"
+        case applicationFirmware = "application_firmware"
+        case otaFirmware = "ota_firmware"
         case cid
-        case features
+        case featuresRaw = "features_raw"
+        case available
+        case mode
+        case connection
+        case magicDNSName = "magic_dns_name"
     }
+}
+
+public struct RouterAvailabilityDTO: Decodable, Equatable, Sendable {
+    public let currentTime: Bool
+    public let ota: Bool
+    public let dc: Bool
+    public let usbc: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case currentTime = "current_time"
+        case ota, dc, usbc
+    }
+}
+
+public struct RouterDeviceConnectionDTO: Decodable, Equatable, Sendable {
+    public let connected: Bool
+    public let phase: String
+    public let reconnect: String
 }
 
 public struct RouterBatteryDTO: Codable, Equatable, Sendable {

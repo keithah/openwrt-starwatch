@@ -78,7 +78,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testCredentialsAreInjectedTransientlyAndDescriptionsAreRedacted() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let provider = RecordingCredentialProvider(token: "test-token")
         let credential = RouterCredential(token: "test-token")
         let transport = RouterTransport(
@@ -104,9 +104,9 @@ final class RouterTransportConnectionTests: XCTestCase {
         XCTAssertFalse(String(reflecting: credential).contains("test-token"))
     }
 
-    func testConnectAuthenticatesStatusThenEmitsHandshakeAndConnected() async throws {
+    func testConnectAuthenticatesCanonicalDeviceThenEmitsHandshakeAndConnected() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let transport = makeTransport(server: server)
         let recorder = DeviceEventRecorder(stream: transport.events)
         let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
@@ -124,7 +124,7 @@ final class RouterTransportConnectionTests: XCTestCase {
         XCTAssertEqual(values[1], .connected(scope))
 
         try await server.waitForEventStreamCount(1)
-        XCTAssertEqual(server.requests.map(\.path), ["/api/v1/status", "/api/v1/events"])
+        XCTAssertEqual(server.requests.map(\.path), ["/api/v1/device", "/api/v1/events"])
         XCTAssertEqual(server.requests.map(\.authorization), ["Bearer test-token", "Bearer test-token"])
         await transport.disconnect()
     }
@@ -179,7 +179,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testInitialSSESnapshotUsesInjectedTimestampOriginForTelemetry() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let clock = TestRouterClock(now: .seconds(900), origin: origin)
         let transport = makeTransport(server: server, clock: clock)
         let recorder = DeviceEventRecorder(stream: transport.events)
@@ -200,7 +200,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testInvalidUTF8JSONIsRejectedWithoutPublishingTelemetry() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let transport = makeTransport(server: server)
         let recorder = DeviceEventRecorder(stream: transport.events)
         let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
@@ -223,7 +223,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testStreamLossMarksTelemetryStaleThenReconnectsSuccessfully() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let clock = TestRouterClock(now: .seconds(50), origin: origin)
         let transport = makeTransport(
             server: server,
@@ -263,7 +263,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testRecoverableStreamLossDoesNotRetireScopeInDeviceSession() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let clock = TestRouterClock(now: .seconds(50), origin: origin)
         let transport = makeTransport(
             server: server,
@@ -301,7 +301,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testSubsequentTelemetryDoesNotClearDeviceSessionOperationError() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let transport = makeTransport(server: server)
         addTeardownBlock { await transport.disconnect() }
         let session = DeviceSession(transport: transport, clock: sessionClock())
@@ -329,7 +329,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testConnectedFalseSnapshotReconnectsBeforeLaterTelemetryRestoresLive() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let clock = TestRouterClock(now: .seconds(50), origin: origin)
         let transport = makeTransport(
             server: server,
@@ -364,7 +364,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testReconnectBackoffCapsAtLastConfiguredDelay() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let clock = TestRouterClock(now: .zero, origin: origin)
         let transport = makeTransport(
             server: server,
@@ -624,7 +624,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testCallerCancellationAfterStatusAwaitDoesNotCommitLifecycle() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let output = AsyncStream<DeviceEvent>.makeStream()
         let recorder = DeviceEventRecorder(stream: output.stream)
         let gate = PostStatusAwaitGate()
@@ -783,7 +783,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testConnectionDeallocationCancelsStreamAndFinishesOutput() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let output = AsyncStream<DeviceEvent>.makeStream()
         let completion = EventStreamCompletionProbe(stream: output.stream)
         var connection: RouterConnection? = RouterConnection(
@@ -829,7 +829,7 @@ final class RouterTransportConnectionTests: XCTestCase {
 
     func testEstablishedStreamUnauthorizedIsTerminalInsteadOfRetryingForever() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: statusData(), for: "/api/v1/status")
+        server.setResponse(data: statusData(), for: "/api/v1/device")
         let clock = TestRouterClock(now: .seconds(50), origin: origin)
         let transport = makeTransport(server: server, clock: clock)
         let recorder = DeviceEventRecorder(stream: transport.events)
@@ -923,7 +923,7 @@ final class RouterTransportConnectionTests: XCTestCase {
     }
 
     private func statusData() -> Data {
-        Data(#"{"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"2.1","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":770,"features":16496}}"#.utf8)
+        Data(#"{"id":"DC:04:5A:EB:72:2B","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":770,"features_raw":16496,"features":{},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"app","connection":{"connected":true,"phase":"ready","reconnect":"armed"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}"#.utf8)
     }
 
     private func snapshotData(level: UInt8, updatedAt: String? = nil) -> Data {
@@ -974,10 +974,10 @@ final class FakeRouterServerContractTests: XCTestCase {
 
     func testResponsesAreConfiguredPerStatusAndEventsPath() async throws {
         let server = FakeRouterServer()
-        server.setResponse(data: Data("status".utf8), statusCode: 200, for: "/api/v1/status")
+        server.setResponse(data: Data("status".utf8), statusCode: 200, for: "/api/v1/device")
         server.setResponse(data: Data("events-down".utf8), statusCode: 503, for: "/api/v1/events")
 
-        let (data, response) = try await server.get("/api/v1/status", token: "token")
+        let (data, response) = try await server.get("/api/v1/device", token: "token")
         XCTAssertEqual(data, Data("status".utf8))
         XCTAssertEqual(response.statusCode, 200)
 
