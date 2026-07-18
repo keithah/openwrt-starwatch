@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Stops retained dish samples from being republished as live after the terminal
-  becomes unreachable. WAN-only mode now explicitly clears the live dish source
-  while preserving separately labeled router/WAN history.
+- Makes dashboard telemetry strictly dish-gRPC sourced, with no router-counter
+  or WAN-probe fallback. When the terminal is unreachable, the dashboard shows
+  an explicit Starlink-disconnected state and hides every current-data card.
 
 ## 0.1.0 — 2026-07-17
 

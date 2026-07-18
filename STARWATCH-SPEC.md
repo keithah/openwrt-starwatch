@@ -64,7 +64,7 @@ No Starlink account, no cloud API, no telemetry leaves the router. Everything wo
 1. **Local-only.** The daemon's only network peers: the dish, the LAN, and user-configured alert endpoints (webhook/ntfy). Nothing else, ever.
 2. **Honest telemetry.** Field availability varies by dish model/firmware (confirmed by Starbar's docs and starlink-grpc-tools issues). Unavailable fields render as "—/unavailable", never as zero or an estimate.
 3. **Read loudly, write carefully.** Polling is relentless; controls are explicit, confirmed, and logged (§5.3).
-4. **Degrade gracefully.** No dish reachable → WAN-only mode. No mwan3 → hide failover card. Unknown dish model → show what parses, flag what doesn't (§11).
+4. **Degrade gracefully.** No dish reachable → explicit Starlink-disconnected UI with no current-data cards. No mwan3 → hide failover card. Unknown dish model → show what parses, flag what doesn't (§11).
 
 ---
 
@@ -132,7 +132,7 @@ config alerts
 |---|---|---|---|
 | **A (primary)** | Dish in **bypass mode** → OpenWrt WAN gets CGNAT/public IP | Needs a host route: `192.168.100.1/32` out the WAN interface | Full functionality. Package `postinst` offers the route via a UCI static-route entry if missing (well-known community requirement; documented in starlink-grpc-tools setup guidance) |
 | **B** | OpenWrt **behind the Starlink router** (double NAT) | The host route must use the Starlink WAN gateway: `192.168.100.1/32 via <wan-gateway>`; an interface-only route can select the wrong uplink on multi-WAN routers | Full dish telemetry; additionally the Starlink router's own gRPC on port 9000 is polled for clients, ping health, configuration, radios, diagnostics, and interfaces. Curated writes follow the guarded `API.md` contract: client blocking is schedule-based, transmit power uses real `TX_POWER_LEVEL_*` enums, and whole-network writes remain gated on credential readback. The package derives the `wan` gateway and emits it in the UCI route; link-scope is reserved for bypass/direct-DHCP setups with no gateway |
-| **C** | No dish reachable (probe fails) | — | **WAN-only mode:** dashboard shows WAN health cards + outage log from probes; dish cards show a setup hint. Daemon retries discovery every 60 s |
+| **C** | No dish reachable (probe fails) | — | Dashboard shows one explicit **Starlink disconnected** state and no current-data cards or WAN substitute telemetry. Settings and historical Events remain available. Daemon retries discovery every 60 s |
 
 Detection is automatic at startup and on failure: try `get_device_info` at `dish_addr`; classify topology; expose it in `/api/status` and the UI header.
 
@@ -337,13 +337,13 @@ The dashboard uses seven hash-routed sections behind an expandable icon rail.
 Overview card visibility and compact density are browser-local preferences;
 cards still auto-hide when their data source is absent.
 
-**Status header** — dish state dot + word (Online / Obstructed / Outage / Searching / Unreachable / WAN-only), uptime, current down/up rate, latency, topology badge. This is the "big Speedify toggle" position, minus the toggle (nothing to toggle — monitoring is always on).
+**Status header** — dish state dot + word (Online / Obstructed / Outage / Searching / STARLINK DISCONNECTED), uptime, current down/up rate, and latency sourced only from dish gRPC. When disconnected, the metric strip is absent and the stream badge reads `WAITING FOR DISH`. This is the "big Speedify toggle" position, minus the toggle (nothing to toggle — monitoring is always on).
 
 ### 10.4 Card inventory
 
 | Card | Contents | Source |
 |---|---|---|
-| **Live graphs** | Tabbed like Speedify (Throughput / Latency / Loss / Power), uPlot scrolling, span picker 15 m · 3 h · 24 h · 7 d · 30 d; dish-side vs router-side throughput as separate labeled series | §4.1, §8 |
+| **Live graphs** | Tabbed like Speedify (Throughput / Latency / Loss / Power), uPlot scrolling, span picker 15 m · 3 h · 24 h · 7 d · 30 d; strictly dish-gRPC throughput, latency, loss, and power series with no router/WAN fallback | §4.1, §8 |
 | **Obstruction** | Fraction obstructed, time obstructed, sky-map render (SNR grid as polar plot), "clear map" action | `obstruction_stats`, `dish_get_obstruction_map` |
 | **Outage timeline** | Merged three-source timeline bars with cause tooltips + table of recent outages with durations | §6.3 |
 | **Alignment** | Compass-style azimuth/elevation/tilt readout | boresight fields |
@@ -362,7 +362,7 @@ cards still auto-hide when their data source is absent.
 
 | Situation | Behavior |
 |---|---|
-| Dish unreachable at startup or WAN is not Starlink | Topology C: WAN-only mode, retry every 60 s, setup hint card (check WAN, bypass mode, or host route); never append retained dish values as live samples |
+| Dish unreachable at startup or WAN is not Starlink | Topology C: show `STARLINK DISCONNECTED` and `WAITING FOR DISH`, hide all current-data cards and header metrics, keep Settings and historical Events reachable, and retry every 60 s; never append retained dish or WAN values as live telemetry |
 | Dish rebooting (user-initiated) | Expected-outage window: `dish_unreachable` alert suppressed for 5 min after our own reboot command |
 | Unknown/new dish model | Parse what's present; unavailable-field machinery (§4.2) handles the rest; hardware card shows raw `hardware_version` string |
 | Router clock wrong at boot (common: no RTC) | History writes deferred until time is sane (year ≥ 2025 or NTP synced); dish `get_history` backfill re-anchors sample times |
