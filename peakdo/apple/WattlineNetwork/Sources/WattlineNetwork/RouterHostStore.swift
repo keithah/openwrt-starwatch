@@ -66,7 +66,7 @@ public enum RouterHostValidator {
         guard scheme == "http" || scheme == "https" else {
             throw RouterHostValidationError.invalidScheme
         }
-        let port = components.port ?? (scheme == "https" ? 443 : 80)
+        let port = components.port ?? (scheme == "https" ? 8378 : 8377)
         guard (1...65_535).contains(port) else { throw RouterHostValidationError.invalidPort }
         if reachability == .wan, scheme == "http", !allowsInsecureWAN {
             throw RouterHostValidationError.insecureWANRequiresOptIn

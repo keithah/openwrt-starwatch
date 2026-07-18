@@ -3,20 +3,32 @@ import XCTest
 @testable import WattlineNetwork
 
 final class RouterDiscoveryTests: XCTestCase {
-    func testParsesTXTIdentityAndFingerprintAndDeduplicatesMACFormats() async throws {
-        let fingerprint = String(repeating: "AB", count: 32)
+    func testParsesExactV1TXTAndResolvedAuthorityAndDeduplicatesMACFormats() async throws {
+        let fingerprint = String(repeating: "ab", count: 32)
+        let requiredTXT: [String: Data] = [
+            "api": Data("1".utf8),
+            "auth": Data("pin".utf8),
+            "model": Data("BP4SL3V2".utf8),
+            "cid": Data("0305".utf8),
+            "features": Data("00000fff".utf8),
+            "tls": Data(fingerprint.utf8),
+        ]
         let source = DiscoverySourceFixture(snapshots: [[
             RouterServiceRecord(
                 serviceName: "wattline-one",
                 domain: "local.",
-                txt: ["id": Data("dc:04:5a:eb:72:2b".utf8), "fingerprint": Data(fingerprint.utf8)]
+                host: "wattline.local.",
+                port: 8378,
+                txt: requiredTXT.merging(["id": Data("dc:04:5a:eb:72:2b".utf8)]) { _, new in new }
             ),
             RouterServiceRecord(
                 serviceName: "wattline-duplicate",
                 domain: "local.",
-                txt: ["id": Data("DC-04-5A-EB-72-2B".utf8), "fingerprint": Data(fingerprint.lowercased().utf8)]
+                host: "wattline.local.",
+                port: 8378,
+                txt: requiredTXT.merging(["id": Data("DC-04-5A-EB-72-2B".utf8)]) { _, new in new }
             ),
-            RouterServiceRecord(serviceName: "invalid", domain: "local.", txt: [:]),
+            RouterServiceRecord(serviceName: "invalid", domain: "local.", host: nil, port: nil, txt: [:]),
         ]])
         let discovery = RouterDiscovery(source: source)
 
@@ -26,10 +38,57 @@ final class RouterDiscoveryTests: XCTestCase {
 
         XCTAssertEqual(routers.count, 1)
         XCTAssertEqual(routers[0].deviceID, "DC045AEB722B")
-        XCTAssertEqual(routers[0].certificateFingerprint, fingerprint)
+        XCTAssertEqual(routers[0].certificateFingerprint, fingerprint.uppercased())
         XCTAssertEqual(routers[0].serviceName, "wattline-duplicate")
+        XCTAssertEqual(routers[0].model, "BP4SL3V2")
+        XCTAssertEqual(routers[0].cid, 0x0305)
+        XCTAssertEqual(routers[0].features, 0x0000_0fff)
+        XCTAssertEqual(routers[0].endpoint.scheme, "https")
+        XCTAssertEqual(routers[0].endpoint.host, "wattline.local")
+        XCTAssertEqual(routers[0].endpoint.port, 8378)
         let requestedServiceTypes = source.requestedServiceTypes
         XCTAssertEqual(requestedServiceTypes, ["_wattline._tcp"])
+    }
+
+    func testRejectsInvalidV1TXTAndObsoleteFingerprintKey() {
+        let base: [String: Data] = [
+            "api": Data("1".utf8), "auth": Data("pin".utf8),
+            "id": Data("DC:04:5A:EB:72:2B".utf8), "model": Data(),
+            "cid": Data("0305".utf8), "features": Data("00000fff".utf8),
+            "tls": Data("none".utf8),
+        ]
+        let invalidOverrides: [[String: Data]] = [
+            ["api": Data("2".utf8)], ["auth": Data("token".utf8)],
+            ["id": Data("not-a-mac".utf8)], ["cid": Data("305".utf8)],
+            ["features": Data("00000FFF".utf8)], ["tls": Data("bad".utf8)],
+        ]
+        var records = invalidOverrides.enumerated().map { index, values in
+            RouterServiceRecord(
+                serviceName: "invalid-\(index)", domain: "local.",
+                host: "wattline.local", port: 8377,
+                txt: base.merging(values) { _, new in new }
+            )
+        }
+        var obsolete = base
+        obsolete["tls"] = nil
+        obsolete["fingerprint"] = Data(String(repeating: "ab", count: 32).utf8)
+        records.append(RouterServiceRecord(
+            serviceName: "obsolete", domain: "local.",
+            host: "wattline.local", port: 8378, txt: obsolete
+        ))
+        records.append(RouterServiceRecord(
+            serviceName: "unresolved", domain: "local.", host: nil, port: nil, txt: base
+        ))
+        for missingKey in ["model", "cid", "features"] {
+            var missing = base
+            missing[missingKey] = nil
+            records.append(RouterServiceRecord(
+                serviceName: "missing-\(missingKey)", domain: "local.",
+                host: "wattline.local", port: 8377, txt: missing
+            ))
+        }
+
+        XCTAssertTrue(RouterDiscovery.parseAndDeduplicate(records).isEmpty)
     }
 }
 
@@ -95,6 +154,29 @@ final class RouterHostStoreTests: XCTestCase {
         XCTAssertEqual(host.reachability, .lan)
         XCTAssertEqual(host.host, "192.168.8.1")
         XCTAssertFalse(host.allowsInsecureWAN)
+    }
+
+    func testWattlinedDefaultPortsAndExplicitPorts() throws {
+        let http = try host("router.lan")
+        let explicitHTTP = try host("http://router.lan:9000")
+        let https = try host("https://router.lan", fingerprint: fingerprint)
+        let explicitHTTPS = try host("https://router.lan:9443", fingerprint: fingerprint)
+
+        XCTAssertEqual(http.port, 8377)
+        XCTAssertEqual(explicitHTTP.port, 9000)
+        XCTAssertEqual(https.port, 8378)
+        XCTAssertEqual(explicitHTTPS.port, 9443)
+    }
+
+    private func host(_ address: String, fingerprint: String? = nil) throws -> RouterHostMetadata {
+        try RouterHostValidator.validate(
+            address,
+            displayName: "Router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: nil,
+            certificateFingerprint: fingerprint
+        )
     }
 
     func testHTTPSWANRequiresPinAndRejectsFingerprintMismatch() throws {
