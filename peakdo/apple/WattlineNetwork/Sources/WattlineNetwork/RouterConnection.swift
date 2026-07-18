@@ -22,11 +22,13 @@ actor RouterConnection {
     private let backoff: RouterReconnectBackoff
     private let output: AsyncStream<DeviceEvent>.Continuation
     private let afterStatusAwait: @Sendable () async -> Void
+    private let beforeSnapshotYield: @Sendable () async -> Void
 
     private var generation: UInt64 = 0
     private var pendingScope: DeviceConnectionScope?
     private var establishedGeneration: UInt64?
     private var establishedScope: DeviceConnectionScope?
+    private var lastTelemetryTimestamp: DeviceTimestamp?
     private var statusTask: Task<StatusContext, Error>?
     private var streamTask: Task<Void, Never>?
 
@@ -38,7 +40,8 @@ actor RouterConnection {
         clock: any RouterConnectionClock,
         backoff: RouterReconnectBackoff,
         output: AsyncStream<DeviceEvent>.Continuation,
-        afterStatusAwait: @escaping @Sendable () async -> Void = {}
+        afterStatusAwait: @escaping @Sendable () async -> Void = {},
+        beforeSnapshotYield: @escaping @Sendable () async -> Void = {}
     ) {
         self.endpoint = endpoint
         self.credentials = credentials
@@ -48,6 +51,7 @@ actor RouterConnection {
         self.backoff = backoff
         self.output = output
         self.afterStatusAwait = afterStatusAwait
+        self.beforeSnapshotYield = beforeSnapshotYield
     }
 
     deinit {
@@ -111,6 +115,8 @@ actor RouterConnection {
                 return StatusContext(status: status, timestampOrigin: timestampOrigin)
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as URLError where error.code == .cancelled {
+                throw CancellationError()
             } catch {
                 throw Self.normalized(error, token: credential.token)
             }
@@ -141,6 +147,7 @@ actor RouterConnection {
             )
             establishedGeneration = requestedGeneration
             establishedScope = scope
+            lastTelemetryTimestamp = nil
             output.yield(.handshakeCompleted(mapping.identity(context.status.device), scope: scope))
             output.yield(context.status.connected ? .connected(scope) : .reconnecting(scope))
             startEventLoop(
@@ -155,6 +162,13 @@ actor RouterConnection {
             )
             throw CancellationError()
         } catch {
+            if Task.isCancelled {
+                cleanUpFailedConnect(
+                    generation: requestedGeneration,
+                    scope: scope
+                )
+                throw CancellationError()
+            }
             let wasSuperseded = !isCurrentConnect(requestedGeneration, scope: scope)
             cleanUpFailedConnect(
                 generation: requestedGeneration,
@@ -190,6 +204,7 @@ actor RouterConnection {
         streamTask = nil
         establishedGeneration = nil
         establishedScope = nil
+        lastTelemetryTimestamp = nil
         output.yield(.disconnected(scope, nil))
     }
 
@@ -203,36 +218,48 @@ actor RouterConnection {
         let eventSource = eventSource
         let clock = clock
         let backoff = backoff
-        let output = output
+        let beforeSnapshotYield = beforeSnapshotYield
         streamTask = Task { [weak self] in
             await Self.runEventLoop(
-                generation: expectedGeneration,
-                scope: scope,
-                mapping: mapping,
                 endpoint: endpoint,
                 credentials: credentials,
                 eventSource: eventSource,
                 clock: clock,
                 backoff: backoff,
-                output: output,
+                beforeSnapshotYield: beforeSnapshotYield,
                 isCurrent: { [weak self] in
                     await self?.isEstablished(expectedGeneration, scope: scope) == true
+                },
+                publishSnapshot: { [weak self] snapshot, observedAt in
+                    guard let self else { return false }
+                    return try await self.yieldSnapshotEvents(
+                        snapshot,
+                        mapping: mapping,
+                        observedAt: observedAt,
+                        ifEstablished: expectedGeneration,
+                        scope: scope
+                    )
+                },
+                publishReconnecting: { [weak self] in
+                    await self?.yieldReconnecting(
+                        ifEstablished: expectedGeneration,
+                        scope: scope
+                    ) == true
                 }
             )
         }
     }
 
     private static func runEventLoop(
-        generation: UInt64,
-        scope: DeviceConnectionScope,
-        mapping: RouterMapping,
         endpoint: RouterEndpoint,
         credentials: any RouterCredentialProvider,
         eventSource: any RouterEventStream,
         clock: any RouterConnectionClock,
         backoff: RouterReconnectBackoff,
-        output: AsyncStream<DeviceEvent>.Continuation,
-        isCurrent: @escaping @Sendable () async -> Bool
+        beforeSnapshotYield: @escaping @Sendable () async -> Void,
+        isCurrent: @escaping @Sendable () async -> Bool,
+        publishSnapshot: @escaping @Sendable (RouterSnapshotDTO, DeviceTimestamp) async throws -> Bool,
+        publishReconnecting: @escaping @Sendable () async -> Bool
     ) async {
         var consecutiveFailures = 0
 
@@ -263,22 +290,15 @@ actor RouterConnection {
                         throw RecoverableStreamState.routerDisconnected
                     }
                     let observedAt = await clock.now
-                    guard await isCurrent() else { return }
-                    for event in try mapping.events(
-                        snapshot: snapshot,
-                        scope: scope,
-                        observedAt: observedAt
-                    ) {
-                        output.yield(event)
-                    }
+                    await beforeSnapshotYield()
+                    guard try await publishSnapshot(snapshot, observedAt) else { return }
                     consecutiveFailures = 0
                 }
                 throw NetworkError.streamEnded
             } catch is CancellationError {
                 return
             } catch {
-                guard await isCurrent() else { return }
-                output.yield(.reconnecting(scope))
+                guard await publishReconnecting() else { return }
                 let delay = backoff.delay(forFailure: consecutiveFailures)
                 consecutiveFailures += 1
                 do {
@@ -302,6 +322,49 @@ actor RouterConnection {
         scope: DeviceConnectionScope
     ) -> Bool {
         establishedGeneration == expectedGeneration && establishedScope == scope
+    }
+
+    private func yieldSnapshotEvents(
+        _ snapshot: RouterSnapshotDTO,
+        mapping: RouterMapping,
+        observedAt: DeviceTimestamp,
+        ifEstablished expectedGeneration: UInt64,
+        scope: DeviceConnectionScope
+    ) throws -> Bool {
+        guard isEstablished(expectedGeneration, scope: scope) else { return false }
+        let events = try mapping.events(
+            snapshot: snapshot,
+            observedAt: observedAt,
+            notBefore: lastTelemetryTimestamp
+        )
+        for event in events {
+            output.yield(event)
+        }
+        if let timestamp = Self.telemetryTimestamp(in: events) {
+            lastTelemetryTimestamp = timestamp
+        }
+        return true
+    }
+
+    private func yieldReconnecting(
+        ifEstablished expectedGeneration: UInt64,
+        scope: DeviceConnectionScope
+    ) -> Bool {
+        guard isEstablished(expectedGeneration, scope: scope) else { return false }
+        output.yield(.reconnecting(scope))
+        return true
+    }
+
+    private static func telemetryTimestamp(in events: [DeviceEvent]) -> DeviceTimestamp? {
+        for event in events {
+            switch event {
+            case let .battery(_, timestamp), let .dc(_, timestamp), let .typeC(_, timestamp):
+                return timestamp
+            default:
+                continue
+            }
+        }
+        return nil
     }
 
     private static func validate(
@@ -334,20 +397,35 @@ actor RouterConnection {
         }
     }
 
-    private static func normalized(_ error: Error, token: String) -> NetworkError {
+    private static func normalized(_ error: Error, token: String) -> Error {
+        if error is CancellationError {
+            return CancellationError()
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cancelled:
+                return CancellationError()
+            case .timedOut:
+                return NetworkError.timeout
+            default:
+                return NetworkError.transport("URL error \(urlError.errorCode)")
+            }
+        }
         if let networkError = error as? NetworkError {
             switch networkError {
             case let .httpStatus(status, body):
-                return .httpStatus(status, redact(body, token: token))
+                return NetworkError.httpStatus(status, redact(body, token: token))
             case let .decode(message):
-                return .decode(redact(message, token: token))
+                return NetworkError.decode(redact(message, token: token))
             case let .unsupported(message):
-                return .unsupported(redact(message, token: token))
+                return NetworkError.unsupported(redact(message, token: token))
+            case let .transport(message):
+                return NetworkError.transport(redact(message, token: token))
             case .invalidURL, .unauthorized, .streamEnded, .timeout:
                 return networkError
             }
         }
-        return NetworkError.decode(redact(String(describing: error), token: token))
+        return NetworkError.transport(redact(String(describing: error), token: token))
     }
 
     private static func redact(_ value: String, token: String) -> String {

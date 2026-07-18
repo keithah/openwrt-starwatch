@@ -84,11 +84,10 @@ final class RouterMappingTests: XCTestCase {
         }
         """#)
 
-        let events = try mapping.events(snapshot: snapshot, scope: scope, observedAt: .seconds(999))
-        XCTAssertEqual(events.count, 4)
-        XCTAssertEqual(events[0], .connected(scope))
+        let events = try mapping.events(snapshot: snapshot, observedAt: .seconds(999))
+        XCTAssertEqual(events.count, 3)
 
-        guard case let .battery(battery, batteryTimestamp) = events[1] else {
+        guard case let .battery(battery, batteryTimestamp) = events[0] else {
             return XCTFail("expected battery event")
         }
         XCTAssertTrue(battery.enabled)
@@ -103,7 +102,7 @@ final class RouterMappingTests: XCTestCase {
         XCTAssertEqual(battery.remainingMinutes, 87)
         XCTAssertEqual(batteryTimestamp, .milliseconds(42_250))
 
-        guard case let .dc(dc, dcTimestamp) = events[2] else {
+        guard case let .dc(dc, dcTimestamp) = events[1] else {
             return XCTFail("expected DC event")
         }
         XCTAssertTrue(dc.enabled)
@@ -114,7 +113,7 @@ final class RouterMappingTests: XCTestCase {
         XCTAssertEqual(dc.bypassOn, true)
         XCTAssertEqual(dcTimestamp, batteryTimestamp)
 
-        guard case let .typeC(typeC, typeCTimestamp) = events[3] else {
+        guard case let .typeC(typeC, typeCTimestamp) = events[2] else {
             return XCTFail("expected Type-C event")
         }
         XCTAssertTrue(typeC.enabled)
@@ -143,17 +142,16 @@ final class RouterMappingTests: XCTestCase {
 
         XCTAssertNil(snapshot.dc)
         XCTAssertNil(snapshot.typeC)
-        let events = try mapping.events(snapshot: snapshot, scope: scope, observedAt: .seconds(77))
-        XCTAssertEqual(events.count, 2)
-        XCTAssertEqual(events[0], .connected(scope))
-        guard case let .battery(battery, timestamp) = events[1] else {
+        let events = try mapping.events(snapshot: snapshot, observedAt: .seconds(77))
+        XCTAssertEqual(events.count, 1)
+        guard case let .battery(battery, timestamp) = events[0] else {
             return XCTFail("expected only battery telemetry")
         }
         XCTAssertEqual(battery.status, .discharging)
         XCTAssertEqual(timestamp, .seconds(77))
     }
 
-    func testConnectedFalseMapsToDisconnectedLifecycleEvent() throws {
+    func testConnectedFalseIsRejectedInsteadOfCreatingTerminalLifecycle() throws {
         let snapshot = try decodeSnapshot(#"""
         {
             "connected": false,
@@ -165,8 +163,11 @@ final class RouterMappingTests: XCTestCase {
         }
         """#)
 
-        let events = try mapping.events(snapshot: snapshot, scope: scope, observedAt: .seconds(999))
-        XCTAssertEqual(events, [.disconnected(scope, nil)])
+        XCTAssertThrowsError(
+            try mapping.events(snapshot: snapshot, observedAt: .seconds(999))
+        ) { error in
+            XCTAssertEqual(error as? RouterMappingError, .disconnectedSnapshot)
+        }
     }
 
     func testUpdatedAtUsesInjectedOriginAndMissingTimestampUsesObservedAt() throws {
@@ -190,14 +191,47 @@ final class RouterMappingTests: XCTestCase {
         }
         """#)
 
-        let datedEvents = try mapping.events(snapshot: dated, scope: scope, observedAt: .seconds(999))
-        let undatedEvents = try mapping.events(snapshot: undated, scope: scope, observedAt: .milliseconds(7_125))
-        guard case let .dc(_, datedTimestamp) = datedEvents[1],
-              case let .dc(_, undatedTimestamp) = undatedEvents[1] else {
+        let datedEvents = try mapping.events(snapshot: dated, observedAt: .seconds(999))
+        let undatedEvents = try mapping.events(snapshot: undated, observedAt: .milliseconds(7_125))
+        guard case let .dc(_, datedTimestamp) = datedEvents[0],
+              case let .dc(_, undatedTimestamp) = undatedEvents[0] else {
             return XCTFail("expected DC telemetry")
         }
         XCTAssertEqual(datedTimestamp, .milliseconds(40_125))
         XCTAssertEqual(undatedTimestamp, .milliseconds(7_125))
+    }
+
+    func testUpdatedAtIsClampedAgainstFutureAndRegressingRouterClock() throws {
+        let future = try decodeSnapshot(#"""
+        {
+            "connected": true,
+            "dc": {"enabled": true, "status": -1, "volts": 20, "amps": -1, "watts": -20, "bypass": false},
+            "updated_at": "2025-07-17T08:00:20Z"
+        }
+        """#)
+        let regressed = try decodeSnapshot(#"""
+        {
+            "connected": true,
+            "dc": {"enabled": true, "status": -1, "volts": 20, "amps": -1, "watts": -20, "bypass": false},
+            "updated_at": "2025-07-17T07:59:59Z"
+        }
+        """#)
+
+        let first = try mapping.events(snapshot: future, observedAt: .seconds(50))
+        guard case let .dc(_, firstTimestamp) = first[0] else {
+            return XCTFail("expected first DC telemetry")
+        }
+        let second = try mapping.events(
+            snapshot: regressed,
+            observedAt: .seconds(51),
+            notBefore: firstTimestamp
+        )
+        guard case let .dc(_, secondTimestamp) = second[0] else {
+            return XCTFail("expected second DC telemetry")
+        }
+
+        XCTAssertEqual(firstTimestamp, .seconds(50), "future router time must not outrun receipt time")
+        XCTAssertEqual(secondTimestamp, firstTimestamp, "router clock rollback must not regress telemetry")
     }
 
     private func decodeSnapshot(_ json: String) throws -> RouterSnapshotDTO {

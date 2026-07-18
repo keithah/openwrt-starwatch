@@ -8,4 +8,5 @@ public enum NetworkError: Error, Equatable, Sendable {
     case streamEnded
     case unsupported(String)
     case timeout
+    case transport(String)
 }

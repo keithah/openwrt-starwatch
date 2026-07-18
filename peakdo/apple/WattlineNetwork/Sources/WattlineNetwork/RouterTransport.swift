@@ -157,6 +157,26 @@ public actor RouterTransport: DeviceTransport {
         clock: any RouterConnectionClock,
         backoff: RouterReconnectBackoff
     ) {
+        self.init(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: eventSource,
+            clock: clock,
+            backoff: backoff,
+            beforeSnapshotYield: {}
+        )
+    }
+
+    init(
+        endpoint: RouterEndpoint,
+        credentials: any RouterCredentialProvider,
+        client: any RouterHTTPClient,
+        events eventSource: any RouterEventStream,
+        clock: any RouterConnectionClock,
+        backoff: RouterReconnectBackoff,
+        beforeSnapshotYield: @escaping @Sendable () async -> Void
+    ) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
         events = pair.stream
         connection = RouterConnection(
@@ -166,7 +186,8 @@ public actor RouterTransport: DeviceTransport {
             events: eventSource,
             clock: clock,
             backoff: backoff,
-            output: pair.continuation
+            output: pair.continuation,
+            beforeSnapshotYield: beforeSnapshotYield
         )
     }
 

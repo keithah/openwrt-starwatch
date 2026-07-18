@@ -16,6 +16,7 @@ public struct RouterTimestampOrigin: Equatable, Sendable {
 }
 
 public enum RouterMappingError: Error, Equatable, Sendable {
+    case disconnectedSnapshot
     case invalidPowerFlow(Int8)
     case invalidTypeCPortMode(UInt8)
     case coreTelemetry(String)
@@ -53,15 +54,17 @@ public struct RouterMapping: Sendable {
 
     public func events(
         snapshot: RouterSnapshotDTO,
-        scope: DeviceConnectionScope,
-        observedAt: DeviceTimestamp
+        observedAt: DeviceTimestamp,
+        notBefore: DeviceTimestamp? = nil
     ) throws -> [DeviceEvent] {
         guard snapshot.connected else {
-            return [.disconnected(scope, nil)]
+            throw RouterMappingError.disconnectedSnapshot
         }
 
-        let timestamp = snapshot.updatedAt.map(timestampOrigin.timestamp(for:)) ?? observedAt
-        var events: [DeviceEvent] = [.connected(scope)]
+        let mappedTimestamp = snapshot.updatedAt.map(timestampOrigin.timestamp(for:)) ?? observedAt
+        let receiptBoundedTimestamp = min(mappedTimestamp, observedAt)
+        let timestamp = max(receiptBoundedTimestamp, notBefore ?? receiptBoundedTimestamp)
+        var events: [DeviceEvent] = []
         if let battery = snapshot.battery {
             events.append(.battery(try map(battery), timestamp: timestamp))
         }

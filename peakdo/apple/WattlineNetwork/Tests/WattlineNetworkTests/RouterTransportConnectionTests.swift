@@ -188,10 +188,9 @@ final class RouterTransportConnectionTests: XCTestCase {
         try await transport.connect(to: endpoint.peripheralID, scope: scope)
         try await server.waitForEventStreamCount(1)
         XCTAssertTrue(server.pushPayload(snapshotData(level: 74, updatedAt: "2025-07-17T08:00:02.250Z")))
-        let values = try await recorder.waitForCount(4)
+        let values = try await recorder.waitForCount(3)
 
-        XCTAssertEqual(values[2], .connected(scope))
-        guard case let .battery(battery, timestamp) = values[3] else {
+        guard case let .battery(battery, timestamp) = values[2] else {
             return XCTFail("expected initial SSE battery telemetry")
         }
         XCTAssertEqual(battery.level, 74)
@@ -237,11 +236,11 @@ final class RouterTransportConnectionTests: XCTestCase {
         try await transport.connect(to: endpoint.peripheralID, scope: scope)
         try await server.waitForEventStreamCount(1)
         XCTAssertTrue(server.pushPayload(snapshotData(level: 40)))
-        _ = try await recorder.waitForCount(4)
+        _ = try await recorder.waitForCount(3)
 
         XCTAssertTrue(server.fail(NetworkError.streamEnded))
-        let lost = try await recorder.waitForCount(5)
-        XCTAssertEqual(lost[4], .reconnecting(scope))
+        let lost = try await recorder.waitForCount(4)
+        XCTAssertEqual(lost[3], .reconnecting(scope))
         XCTAssertFalse(lost.contains { event in
             if case .disconnected = event { return true }
             return false
@@ -254,9 +253,8 @@ final class RouterTransportConnectionTests: XCTestCase {
         try await server.waitForEventStreamCount(2)
         XCTAssertTrue(server.pushPayload(snapshotData(level: 41)))
 
-        let reconnected = try await recorder.waitForCount(7)
-        XCTAssertEqual(reconnected[5], .connected(scope))
-        guard case let .battery(battery, _) = reconnected[6] else {
+        let reconnected = try await recorder.waitForCount(5)
+        guard case let .battery(battery, _) = reconnected[4] else {
             return XCTFail("expected telemetry after stream reconnect")
         }
         XCTAssertEqual(battery.level, 41)
@@ -295,13 +293,38 @@ final class RouterTransportConnectionTests: XCTestCase {
         await clock.advance(by: .seconds(1))
         try await server.waitForEventStreamCount(2)
         XCTAssertTrue(server.pushPayload(Data(#"{"connected":true}"#.utf8)))
-        try await states.waitUntil { $0.connection == .loading }
-        XCTAssertFalse(states.values.contains { $0.connection == .disconnected })
-
         XCTAssertTrue(server.pushPayload(snapshotData(level: 41)))
         try await states.waitUntil { $0.connection == .live && $0.battery?.level == 41 }
         await transport.disconnect()
         try await states.waitUntil { $0.connection == .disconnected }
+    }
+
+    func testSubsequentTelemetryDoesNotClearDeviceSessionOperationError() async throws {
+        let server = FakeRouterServer()
+        server.setResponse(data: statusData(), for: "/api/v1/status")
+        let transport = makeTransport(server: server)
+        addTeardownBlock { await transport.disconnect() }
+        let session = DeviceSession(transport: transport, clock: sessionClock())
+        let states = DeviceStateRecorder(stream: session.states)
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        await session.start()
+
+        try await transport.connect(to: endpoint.peripheralID, scope: scope)
+        try await server.waitForEventStreamCount(1)
+        XCTAssertTrue(server.pushPayload(snapshotData(level: 40)))
+        try await states.waitUntil { $0.connection == .live && $0.battery?.level == 40 }
+
+        do {
+            _ = try await session.perform(DeviceCommand.setDC(true))
+            XCTFail("expected Task 5 command placeholder")
+        } catch {}
+        let stateAfterError = await session.state
+        let operationError = try XCTUnwrap(stateAfterError.lastError)
+
+        XCTAssertTrue(server.pushPayload(snapshotData(level: 41)))
+        try await states.waitUntil { $0.connection == .live && $0.battery?.level == 41 }
+        let stateAfterTelemetry = await session.state
+        XCTAssertEqual(stateAfterTelemetry.lastError, operationError)
     }
 
     func testConnectedFalseSnapshotReconnectsBeforeLaterTelemetryRestoresLive() async throws {
@@ -331,9 +354,8 @@ final class RouterTransportConnectionTests: XCTestCase {
         await clock.advance(by: .seconds(1))
         try await server.waitForEventStreamCount(2)
         XCTAssertTrue(server.pushPayload(snapshotData(level: 42)))
-        let restored = try await recorder.waitForCount(5)
-        XCTAssertEqual(restored[3], .connected(scope))
-        guard case let .battery(battery, _) = restored[4] else {
+        let restored = try await recorder.waitForCount(4)
+        guard case let .battery(battery, _) = restored[3] else {
             return XCTFail("expected telemetry after connected=false reconnect")
         }
         XCTAssertEqual(battery.level, 42)
@@ -405,6 +427,57 @@ final class RouterTransportConnectionTests: XCTestCase {
         try await waitUntil(session: session) {
             $0.connection == .disconnected && $0.battery?.level == 33
         }
+    }
+
+    func testDecodedFrameCannotPublishAfterReplacementRetiresItsScope() async throws {
+        let client = GatedStatusClient(data: statusData())
+        let streams = LeakyEventStream()
+        let gate = PreSnapshotYieldGate()
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: streams,
+            clock: TestRouterClock(now: .seconds(70), origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)]),
+            beforeSnapshotYield: { await gate.waitIfArmed() }
+        )
+        addTeardownBlock { await transport.disconnect() }
+        let session = DeviceSession(transport: transport, clock: sessionClock())
+        let states = DeviceStateRecorder(stream: session.states)
+        let firstScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        await session.start()
+
+        try await establish(
+            transport: transport,
+            streams: streams,
+            scope: firstScope,
+            level: 11,
+            states: states
+        )
+
+        await gate.arm()
+        XCTAssertTrue(streams.pushPayload(snapshotData(level: 22), to: 0))
+        await gate.waitUntilEntered()
+
+        let secondScope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        try await transport.connect(to: endpoint.peripheralID, scope: secondScope)
+        try await states.waitUntil { $0.connection == .disconnected }
+        await streams.waitForStreamCount(2)
+
+        await gate.release()
+        await gate.waitUntilExited()
+        let staleFrameWasApplied = await waitForCondition {
+            states.values.contains { $0.connection == .live && $0.battery?.level == 22 }
+        }
+        XCTAssertFalse(staleFrameWasApplied)
+
+        XCTAssertTrue(streams.pushPayload(snapshotData(level: 33), to: 1))
+        try await states.waitUntil { $0.connection == .live && $0.battery?.level == 33 }
+        let firstDisconnect = try XCTUnwrap(states.values.firstIndex { $0.connection == .disconnected })
+        XCTAssertFalse(states.values.dropFirst(firstDisconnect).contains {
+            $0.connection == .live && $0.battery?.level == 22
+        })
     }
 
     func testFailedReplacementLeavesDeviceSessionDisconnectedWithoutNewScopeLifecycle() async throws {
@@ -628,6 +701,57 @@ final class RouterTransportConnectionTests: XCTestCase {
         await client.waitForCancellationCount(1)
     }
 
+    func testCallerCancellationRemainsCancellationWhenHTTPClientThrowsURLCancelled() async {
+        let client = URLSessionLikeCancellationClient()
+        let transport = RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: FakeRouterServer(),
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
+        )
+        addTeardownBlock { await transport.disconnect() }
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+        let endpointID = endpoint.peripheralID
+        let connection = Task {
+            try await transport.connect(to: endpointID, scope: scope)
+        }
+        await client.waitUntilStarted()
+
+        connection.cancel()
+
+        await assertCancellation(of: connection)
+    }
+
+    func testURLTimeoutMapsToNetworkTimeout() async {
+        let transport = makeTransport(client: URLFailureHTTPClient(code: .timedOut))
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+
+        do {
+            try await transport.connect(to: endpoint.peripheralID, scope: scope)
+            XCTFail("expected timeout")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .timeout)
+        }
+    }
+
+    func testOtherURLErrorsMapToTransportFailureInsteadOfDecode() async {
+        let code = URLError.notConnectedToInternet
+        let transport = makeTransport(client: URLFailureHTTPClient(code: code))
+        let scope = await transport.makeConnectionScope(for: endpoint.peripheralID)
+
+        do {
+            try await transport.connect(to: endpoint.peripheralID, scope: scope)
+            XCTFail("expected transport failure")
+        } catch {
+            XCTAssertEqual(
+                error as? NetworkError,
+                .transport("URL error \(code.rawValue)")
+            )
+        }
+    }
+
     func testReplacementConnectCancelsSupersededStatusAndCompletesNewConnect() async throws {
         let client = CancellationObservingStatusClient(data: statusData())
         let server = FakeRouterServer()
@@ -715,6 +839,17 @@ final class RouterTransportConnectionTests: XCTestCase {
             events: server,
             clock: clock ?? TestRouterClock(now: .seconds(50), origin: origin),
             backoff: backoff
+        )
+    }
+
+    private func makeTransport(client: any RouterHTTPClient) -> RouterTransport {
+        RouterTransport(
+            endpoint: endpoint,
+            credentials: credentials,
+            client: client,
+            events: FakeRouterServer(),
+            clock: TestRouterClock(now: .zero, origin: origin),
+            backoff: RouterReconnectBackoff(delays: [.seconds(1)])
         )
     }
 
@@ -1009,6 +1144,50 @@ private actor CancellationObservingStatusClient: RouterHTTPClient {
     }
 }
 
+private actor URLSessionLikeCancellationClient: RouterHTTPClient {
+    private var started = false
+
+    func get(_ path: String, token: String) async throws -> (Data, HTTPURLResponse) {
+        try await request("GET", path, body: nil, token: token)
+    }
+
+    func request(
+        _ method: String,
+        _ path: String,
+        body: Data?,
+        token: String
+    ) async throws -> (Data, HTTPURLResponse) {
+        started = true
+        do {
+            try await Task.sleep(for: .seconds(60))
+            throw NetworkError.timeout
+        } catch is CancellationError {
+            throw URLError(.cancelled)
+        }
+    }
+
+    func waitUntilStarted() async {
+        while !started { await Task.yield() }
+    }
+}
+
+private struct URLFailureHTTPClient: RouterHTTPClient {
+    let code: URLError.Code
+
+    func get(_ path: String, token: String) async throws -> (Data, HTTPURLResponse) {
+        throw URLError(code)
+    }
+
+    func request(
+        _ method: String,
+        _ path: String,
+        body: Data?,
+        token: String
+    ) async throws -> (Data, HTTPURLResponse) {
+        throw URLError(code)
+    }
+}
+
 private actor RecordingCredentialProvider: RouterCredentialProvider {
     private let token: String
     private(set) var requestedEndpoints: [RouterEndpoint] = []
@@ -1097,6 +1276,40 @@ private actor PostStatusAwaitGate {
     func release() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor PreSnapshotYieldGate {
+    private var armed = false
+    private var entered = false
+    private var exited = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func arm() {
+        armed = true
+        entered = false
+        exited = false
+    }
+
+    func waitIfArmed() async {
+        guard armed else { return }
+        armed = false
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+        exited = true
+    }
+
+    func waitUntilEntered() async {
+        while !entered { await Task.yield() }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func waitUntilExited() async {
+        while !exited { await Task.yield() }
     }
 }
 
