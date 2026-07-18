@@ -2,7 +2,7 @@ import {Component, h} from './vendor/preact.module.js';
 import htm from './vendor/htm.module.js';
 import {Metric} from './cards.js';
 import {deriveState, formatDuration, formatRate} from './logic.js';
-import {DASHBOARD_SECTIONS, normalizeOverviewPreferences, sectionDefinition} from './dashboard-model.js';
+import {DASHBOARD_SECTIONS, normalizeOverviewPreferences, sectionDefinition, starlinkConnected} from './dashboard-model.js';
 
 const html = htm.bind(h);
 const overviewKey = 'starwatch.overview.cards';
@@ -34,10 +34,16 @@ export function IconRail({section = 'overview', open = false, onNavigate}) {
 
 export function SectionHeader({section = 'overview', snapshot = {}, connection, onCustomize, fullscreen, onFullscreen, onMenu}) {
   const title = sectionDefinition(section).label;
-  const dish = snapshot.dish || {}, wan = snapshot.wan || {};
+  const dish = snapshot.dish || {};
+  const connected = starlinkConnected(snapshot);
   const number = value => Number.isFinite(Number(value)) ? Number(value).toFixed(1) : '—';
-  const liveLabel = connection === 'live' ? 'LIVE' : String(connection || 'connecting').toUpperCase();
-  return html`<header class=${`section-header state-${deriveState(snapshot).toLowerCase().replace(/[^a-z]+/g, '-')}`}><button class="rail-menu-toggle" type="button" aria-label="Open dashboard sections" onClick=${onMenu}>☰</button><div><span class="eyebrow">DASHBOARD / ${title}</span><h1>${title}</h1></div><div class="status-primary"><span class="state-dot"></span><div><span class="eyebrow">LINK STATE</span><strong>${deriveState(snapshot)}</strong></div></div><div class="header-metrics"><${Metric} label="Uptime" value=${formatDuration(dish.uptime_seconds)} availability=${snapshot.field_availability?.status}/><${Metric} label="Down" value=${formatRate(dish.downlink_throughput_bps ?? wan.router_down_bps)} availability=${snapshot.field_availability?.status}/><${Metric} label="Up" value=${formatRate(dish.uplink_throughput_bps ?? wan.router_up_bps)} availability=${snapshot.field_availability?.status}/><${Metric} label="Latency" value=${number(dish.latency_ms)} unit="ms" availability=${snapshot.field_availability?.status}/></div><div class="section-actions"><button class="header-customize" type="button" onClick=${onFullscreen} aria-pressed=${!!fullscreen} title=${fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>${fullscreen ? 'EXIT' : 'FULL'}</button><span class=${`badge connection-${connection}`}>${liveLabel}</span>${section === 'overview' && html`<button data-customize-overview class="header-customize" type="button" onClick=${onCustomize}>CUSTOMIZE</button>`}</div></header>`;
+  const liveLabel = connected ? (connection === 'live' ? 'LIVE' : String(connection || 'connecting').toUpperCase()) : 'WAITING FOR DISH';
+  const connectionClass = connected ? connection : 'polling';
+  return html`<header class=${`section-header state-${deriveState(snapshot).toLowerCase().replace(/[^a-z]+/g, '-')}`}><button class="rail-menu-toggle" type="button" aria-label="Open dashboard sections" onClick=${onMenu}>☰</button><div><span class="eyebrow">DASHBOARD / ${title}</span><h1>${title}</h1></div><div class="status-primary"><span class="state-dot"></span><div><span class="eyebrow">LINK STATE</span><strong>${deriveState(snapshot)}</strong></div></div>${connected && html`<div class="header-metrics"><${Metric} label="Uptime" value=${formatDuration(dish.uptime_seconds)} availability=${snapshot.field_availability?.status}/><${Metric} label="Down" value=${formatRate(dish.downlink_throughput_bps)} availability=${snapshot.field_availability?.status}/><${Metric} label="Up" value=${formatRate(dish.uplink_throughput_bps)} availability=${snapshot.field_availability?.status}/><${Metric} label="Latency" value=${number(dish.latency_ms)} unit="ms" availability=${snapshot.field_availability?.status}/></div>`}<div class="section-actions"><button class="header-customize" type="button" onClick=${onFullscreen} aria-pressed=${!!fullscreen} title=${fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>${fullscreen ? 'EXIT' : 'FULL'}</button><span class=${`badge connection-${connectionClass}`}>${liveLabel}</span>${connected && section === 'overview' && html`<button data-customize-overview class="header-customize" type="button" onClick=${onCustomize}>CUSTOMIZE</button>`}</div></header>`;
+}
+
+export function DisconnectedState() {
+  return html`<section class="card disconnected-state" role="status"><span class="eyebrow">TERMINAL</span><h2>Starlink disconnected</h2><p>No Starlink terminal is reachable over gRPC. Telemetry will resume automatically when the dish reconnects.</p></section>`;
 }
 
 export class CustomizePanel extends Component {

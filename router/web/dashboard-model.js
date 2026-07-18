@@ -19,6 +19,10 @@ export function starlinkConnected(snapshot = {}) {
   return snapshot.dish_reachable === true;
 }
 
+export function visibleDashboardCards(cards = [], snapshot = {}) {
+  return starlinkConnected(snapshot) ? cards : [];
+}
+
 const byID = new Map(DASHBOARD_SECTIONS.map(section => [section.id, section]));
 const overviewIDs = new Set(byID.get('overview').cards);
 

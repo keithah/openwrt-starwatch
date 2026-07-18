@@ -4,8 +4,8 @@ import {APIError, apiFetch, bootstrapToken, getHistory, LiveClient, storeToken} 
 import {GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCard, ControlsCard, SleepScheduleCard, SpeedCard, AlertsCard, HardwareCard, StarlinkRouterCard, ClientManagementCard} from './cards.js';
 import {TokenView, SettingsView, EventsView} from './views.js';
 import {clientMutationPayload, clientMutationShouldRetry, liveFrameValues, mergeLiveFrame, wifiMutationPayload, wifiMutationShouldRetry} from './logic.js';
-import {CustomizePanel, IconRail, loadOverviewPreferences, resetOverviewPreferences, saveOverviewPreferences, SectionHeader} from './dashboard.js';
-import {DISH_GRAPH_SERIES, dashboardSection, normalizeOverviewPreferences, sectionDefinition, visibleOverviewCards} from './dashboard-model.js';
+import {CustomizePanel, DisconnectedState, IconRail, loadOverviewPreferences, resetOverviewPreferences, saveOverviewPreferences, SectionHeader} from './dashboard.js';
+import {DISH_GRAPH_SERIES, dashboardSection, normalizeOverviewPreferences, sectionDefinition, starlinkConnected, visibleDashboardCards, visibleOverviewCards} from './dashboard-model.js';
 
 const html = htm.bind(h);
 
@@ -133,28 +133,32 @@ class App extends Component {
     return html`<div class=${`dashboard-shell${state.railOpen ? ' rail-drawer-open' : ''}`}><${IconRail} section=${section} open=${state.railOpen} onNavigate=${() => this.setState({railOpen:false,cardDrawerOpen:false})}/><div class="app-shell"><${SectionHeader} section=${section} snapshot=${state.snapshot} connection=${state.connection} fullscreen=${state.fullscreen} onFullscreen=${this.toggleFullscreen} onMenu=${() => this.setState({railOpen:true})} onCustomize=${() => this.setState({cardDrawerOpen:true})}/>${state.railOpen&&html`<button class="rail-scrim" type="button" aria-label="Close dashboard sections" onClick=${() => this.setState({railOpen:false})}/>`}${state.notice&&html`<button class="toast" onClick=${()=>this.setState({notice:''})}>${state.notice}<span>×</span></button>`}<main id="dashboard" class=${`dashboard dashboard-${section}${state.overviewPreferences.compact ? ' dashboard-compact' : ''}`}>${this.sectionContent(section, state)}</main>${state.cardDrawerOpen&&html`<${CustomizePanel} cards=${overviewCards} preferences=${state.overviewPreferences} onClose=${() => this.setState({cardDrawerOpen:false}, () => document.querySelector('[data-customize-overview]')?.focus())} onToggle=${this.toggleOverviewCard} onDensity=${this.toggleDensity} onReset=${this.resetOverview}/>`}</div></div>`;
   }
 
-  cardRegistry(state) { return [
-    {id:'live-telemetry',label:'Telemetry',available:true,render:()=>html`<${GraphCard} tab=${state.tab} span=${state.span} responses=${state.graphResponses} onTab=${this.setTab} onSpan=${this.setSpan} loading=${state.graphLoading} topology=${state.snapshot.topology} dishReachable=${state.snapshot.dish_reachable}/>`},
-    {id:'obstruction',label:'Obstruction',available:!!(state.snapshot.dish?.obstruction || state.grid),render:()=>html`<${ObstructionCard} snapshot=${state.snapshot} grid=${state.grid} onClear=${this.clearMap}/>`},
-    {id:'outage-timeline',label:'Outage timeline',available:true,render:()=>html`<${OutageCard} outages=${state.outages}/>`},
-    {id:'alignment',label:'Alignment',available:!!state.snapshot.dish?.alignment,render:()=>html`<${AlignmentCard} snapshot=${state.snapshot}/>`},
-    {id:'power',label:'Power',available:state.snapshot.dish?.power_w != null || !!state.powerResponses?.length,render:()=>html`<${PowerCard} snapshot=${state.snapshot} responses=${state.powerResponses}/>`},
-    {id:'wan-health',label:'WAN health',available:!!(state.wan?.available || state.wan?.mwan3),render:()=>html`<${WANCard} wan=${state.wan} assist=${state.assist} onRefreshAssist=${this.refreshAssist} onApplyAssist=${this.applyAssist}/>`},
-    {id:'dish-controls',label:'Dish controls',available:true,render:()=>html`<${ControlsCard} snapshot=${state.snapshot} onControl=${this.control}/>`},
-    {id:'sleep-schedule',label:'Sleep schedule',available:true,render:()=>html`<${SleepScheduleCard} snapshot=${state.snapshot} onControl=${this.control}/>`},
-    {id:'speed-test',label:'Speed test',available:true,render:()=>html`<${SpeedCard} speed=${state.speed} history=${state.speedHistory} onRun=${this.runSpeed} reachable=${state.snapshot.dish_reachable}/>`},
-    {id:'alerts',label:'Alerts',available:true,render:()=>html`<${AlertsCard} snapshot=${state.snapshot} events=${state.events}/>`},
-    {id:'hardware',label:'Hardware',available:!!state.snapshot.device_info,render:()=>html`<${HardwareCard} snapshot=${state.snapshot}/>`},
-    {id:'starlink-router',label:'Starlink router',available:!!state.router,render:()=>html`<${StarlinkRouterCard} router=${state.router} onMutate=${this.mutateRouterWifi}/>`},
-    {id:'client-management',label:'Client management',available:!!state.router,render:()=>html`<${ClientManagementCard} router=${state.router} onMutate=${this.mutateRouterClient}/>`},
-  ]; }
+  cardRegistry(state) {
+    const connected=starlinkConnected(state.snapshot);
+    return [
+      {id:'live-telemetry',label:'Telemetry',available:connected,render:()=>html`<${GraphCard} tab=${state.tab} span=${state.span} responses=${state.graphResponses} onTab=${this.setTab} onSpan=${this.setSpan} loading=${state.graphLoading}/>`},
+      {id:'obstruction',label:'Obstruction',available:connected&&!!(state.snapshot.dish?.obstruction || state.grid),render:()=>html`<${ObstructionCard} snapshot=${state.snapshot} grid=${state.grid} onClear=${this.clearMap}/>`},
+      {id:'outage-timeline',label:'Outage timeline',available:connected,render:()=>html`<${OutageCard} outages=${state.outages}/>`},
+      {id:'alignment',label:'Alignment',available:connected&&!!state.snapshot.dish?.alignment,render:()=>html`<${AlignmentCard} snapshot=${state.snapshot}/>`},
+      {id:'power',label:'Power',available:connected&&(state.snapshot.dish?.power_w != null || !!state.powerResponses?.length),render:()=>html`<${PowerCard} snapshot=${state.snapshot} responses=${state.powerResponses}/>`},
+      {id:'wan-health',label:'WAN health',available:connected&&!!(state.wan?.available || state.wan?.mwan3),render:()=>html`<${WANCard} wan=${state.wan} assist=${state.assist} onRefreshAssist=${this.refreshAssist} onApplyAssist=${this.applyAssist}/>`},
+      {id:'dish-controls',label:'Dish controls',available:connected,render:()=>html`<${ControlsCard} snapshot=${state.snapshot} onControl=${this.control}/>`},
+      {id:'sleep-schedule',label:'Sleep schedule',available:connected,render:()=>html`<${SleepScheduleCard} snapshot=${state.snapshot} onControl=${this.control}/>`},
+      {id:'speed-test',label:'Speed test',available:connected,render:()=>html`<${SpeedCard} speed=${state.speed} history=${state.speedHistory} onRun=${this.runSpeed} reachable=${state.snapshot.dish_reachable}/>`},
+      {id:'alerts',label:'Alerts',available:connected,render:()=>html`<${AlertsCard} snapshot=${state.snapshot} events=${state.events}/>`},
+      {id:'hardware',label:'Hardware',available:connected&&!!state.snapshot.device_info,render:()=>html`<${HardwareCard} snapshot=${state.snapshot}/>`},
+      {id:'starlink-router',label:'Starlink router',available:connected&&!!state.router,render:()=>html`<${StarlinkRouterCard} router=${state.router} onMutate=${this.mutateRouterWifi}/>`},
+      {id:'client-management',label:'Client management',available:connected&&!!state.router,render:()=>html`<${ClientManagementCard} router=${state.router} onMutate=${this.mutateRouterClient}/>`},
+    ];
+  }
   overviewCards(state) { return this.cardsForSection(state, 'overview'); }
   cardsForSection(state, section) { const byID=new Map(this.cardRegistry(state).map(card => [card.id, card])); return sectionDefinition(section).cards.map(id => byID.get(id)).filter(Boolean); }
-  sectionCards(state, section) { return this.cardsForSection(state, section).filter(card => card.available).map(card => card.render()); }
+  sectionCards(state, section) { return visibleDashboardCards(this.cardsForSection(state, section).filter(card => card.available), state.snapshot).map(card => card.render()); }
   sectionContent(section, state) {
     if (section === 'settings') return html`<${SettingsView} embedded=${true} config=${state.config} onSave=${this.saveConfig} onTest=${this.testAlert} onRegenerate=${this.regenerate} onCopyToken=${this.copyToken} newToken=${state.newToken} notice=${state.notice}/>`;
-    if (section === 'events') return html`<div class="card-grid">${this.sectionCards(state, section)}</div><${EventsView} embedded=${true} events=${state.events}/>`;
-    const cards = section === 'overview' ? visibleOverviewCards(this.overviewCards(state), state.overviewPreferences).filter(card => card.available).map(card => card.render()) : this.sectionCards(state, section);
+    if (section === 'events') return html`${starlinkConnected(state.snapshot)&&html`<div class="card-grid">${this.sectionCards(state, section)}</div>`}<${EventsView} embedded=${true} events=${state.events}/>`;
+    if (!starlinkConnected(state.snapshot)) return html`<${DisconnectedState}/>`;
+    const cards = section === 'overview' ? visibleDashboardCards(visibleOverviewCards(this.overviewCards(state), state.overviewPreferences).filter(card => card.available), state.snapshot).map(card => card.render()) : this.sectionCards(state, section);
     return html`<div class="card-grid">${cards}</div>`;
   }
 }

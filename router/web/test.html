@@ -11,7 +11,8 @@ import {
   mergeLiveFrame, liveFrameValues,
   clientMutationPayload, clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry,
 } from './logic.js';
-import {DISH_GRAPH_SERIES, dashboardSection, normalizeOverviewPreferences, starlinkConnected, visibleOverviewCards} from './dashboard-model.js';
+import {DISH_GRAPH_SERIES, dashboardSection, normalizeOverviewPreferences, starlinkConnected, visibleDashboardCards, visibleOverviewCards} from './dashboard-model.js';
+import {DisconnectedState, SectionHeader} from './dashboard.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 import {APIError} from './api.js';
 import {h, render} from './vendor/preact.module.js';
@@ -24,8 +25,8 @@ const assert = (name, condition) => {
 };
 
 try {
-  assert('WAN-only topology wins', deriveState({topology: 'wan-only'}) === 'WAN-only');
-  assert('unreachable full topology', deriveState({topology: 'full', dish_reachable: false}) === 'Unreachable');
+  assert('WAN-only topology is explicitly disconnected', deriveState({topology: 'wan-only'}) === 'STARLINK DISCONNECTED');
+  assert('unreachable full topology is explicitly disconnected', deriveState({topology: 'full', dish_reachable: false}) === 'STARLINK DISCONNECTED');
   assert('searching outage', deriveState({topology: 'full', dish_reachable: true, dish: {outage: {cause: 'NO_DOWNLINK'}}}) === 'Searching');
   assert('obstruction state', deriveState({topology: 'full', dish_reachable: true, dish: {obstruction: {currently_obstructed: true}}}) === 'Obstructed');
   assert('online state', deriveState({topology: 'full', dish_reachable: true, dish: {}}) === 'Online');
@@ -39,6 +40,34 @@ try {
   assert('power history is dish gRPC only', DISH_GRAPH_SERIES.power.join(',') === 'power_w');
   assert('WAN-only frame yields no telemetry values', Object.values(disconnectedValues).every(value => value == null));
   assert('strict reachability controls dashboard data', starlinkConnected({dish_reachable: true}) && !starlinkConnected({dish_reachable: false}) && !starlinkConnected({}));
+  const currentCards = [{id: 'telemetry'}, {id: 'wan-health'}];
+  assert('disconnected dashboard renders no current-data cards', visibleDashboardCards(currentCards, {dish_reachable: false}).length === 0);
+  assert('reachable dashboard restores current-data cards', visibleDashboardCards(currentCards, {dish_reachable: true}).length === 2);
+  const disconnectedUI = document.createElement('div');
+  document.body.append(disconnectedUI);
+  render(h(SectionHeader, {
+    section: 'overview',
+    snapshot: {
+      topology: 'wan-only',
+      dish_reachable: false,
+      dish: {downlink_throughput_bps: 999999},
+      wan: {router_down_bps: 888888},
+    },
+    connection: 'live',
+  }), disconnectedUI);
+  assert('disconnected header is explicit', disconnectedUI.textContent.includes('STARLINK DISCONNECTED'));
+  assert('disconnected header waits for dish', disconnectedUI.textContent.includes('WAITING FOR DISH'));
+  assert('disconnected header has no telemetry strip', !disconnectedUI.querySelector('.header-metrics'));
+  render(h(SectionHeader, {
+    section: 'overview',
+    snapshot: {topology: 'full', dish_reachable: true, dish: {}, wan: {router_down_bps: 888888}},
+    connection: 'live',
+  }), disconnectedUI);
+  assert('reachable header does not fall back to WAN counters', !disconnectedUI.textContent.includes('888.9 kb/s'));
+  render(h(DisconnectedState), disconnectedUI);
+  assert('disconnected panel mentions no WAN data', disconnectedUI.textContent.includes('Starlink disconnected') && !disconnectedUI.textContent.includes('WAN'));
+  render(null, disconnectedUI);
+  disconnectedUI.remove();
   const telemetryHost = document.createElement('div');
   document.body.append(telemetryHost);
   render(h(GraphCard, {tab: 'throughput', span: '15m', responses: [], onTab: () => {}, onSpan: () => {}}), telemetryHost);

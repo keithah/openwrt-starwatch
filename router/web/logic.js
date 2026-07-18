@@ -3,7 +3,7 @@ const DAY_MINUTES = 24 * 60;
 const wrapMinutes = value => ((Math.round(value) % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
 
 export function deriveState(snapshot = {}) {
-  if (snapshot.topology === 'wan-only') return 'WAN-only';
+  if (snapshot.topology === 'wan-only' || snapshot.dish_reachable === false) return 'STARLINK DISCONNECTED';
   if (!snapshot.dish_reachable) return 'Unreachable';
   const dish = snapshot.dish || {};
   const cause = String(dish.outage?.cause || '').toUpperCase();
