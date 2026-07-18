@@ -585,7 +585,37 @@ final class AppModel {
     }
 
     func retryRestart() async {
+        if case .restartFailed = maintenanceState,
+           let disconnectKey = restartDisconnectObserved,
+           disconnectKey.generation == transportGeneration,
+           selectedPeripheralID == disconnectKey.scope.peripheralID,
+           activeConnectionScope == nil {
+            let operationID = UUID()
+            restartRecoveryTask?.cancel()
+            restartOperationID = operationID
+            maintenanceState = .restarting
+            restartRecoveryTask = Task { [weak self] in
+                await self?.recoverRestart(disconnectKey, operationID: operationID)
+            }
+            return
+        }
         await restartDevice()
+    }
+
+    private func failRestartRecoveryIfCurrent(
+        _ message: String,
+        disconnectKey: RestartDisconnectKey,
+        operationID: UUID
+    ) async {
+        guard isCurrentRestart(operationID, key: disconnectKey) else { return }
+        if let attempt = brokerReconnectAttempt,
+           attempt.generation == disconnectKey.generation,
+           attempt.peripheralID == disconnectKey.scope.peripheralID {
+            await terminalizeBrokerReconnect(attempt, retireScope: true)
+        }
+        guard isCurrentRestart(operationID, key: disconnectKey) else { return }
+        restartOperationID = nil
+        maintenanceState = .restartFailed(message)
     }
 
     private func recoverRestart(_ disconnectKey: RestartDisconnectKey, operationID: UUID) async {
@@ -608,8 +638,11 @@ final class AppModel {
             let now = await maintenanceClock.now
             guard isCurrentRestart(operationID, key: disconnectKey) else { return }
             guard now < deadline else {
-                restartOperationID = nil
-                maintenanceState = .restartFailed("Restart timed out. Try again.")
+                await failRestartRecoveryIfCurrent(
+                    "Restart timed out. Try again.",
+                    disconnectKey: disconnectKey,
+                    operationID: operationID
+                )
                 return
             }
             do {
@@ -626,8 +659,11 @@ final class AppModel {
                 let retryNow = await maintenanceClock.now
                 guard isCurrentRestart(operationID, key: disconnectKey) else { return }
                 guard retryNow < deadline else {
-                    restartOperationID = nil
-                    maintenanceState = .restartFailed("Restart timed out. Try again.")
+                    await failRestartRecoveryIfCurrent(
+                        "Restart timed out. Try again.",
+                        disconnectKey: disconnectKey,
+                        operationID: operationID
+                    )
                     return
                 }
                 do { try await maintenanceClock.sleep(for: min(.seconds(1), deadline - retryNow)) }
@@ -640,8 +676,11 @@ final class AppModel {
               restartOperationID == operationID
         else { return }
         if maintenanceState == .restarting {
-            restartOperationID = nil
-            maintenanceState = .restartFailed("Restart timed out. Try again.")
+            await failRestartRecoveryIfCurrent(
+                "Restart timed out. Try again.",
+                disconnectKey: disconnectKey,
+                operationID: operationID
+            )
         }
     }
 
@@ -1031,6 +1070,10 @@ final class AppModel {
                       let self,
                       self.transportGeneration == generation
                 else { return }
+                let ownerControlsConnectedPresentation = self.ownerControlsConnectedPresentation(
+                    for: event,
+                    generation: generation
+                )
                 guard self.acceptsTransportEvent(event, generation: generation) else { continue }
                 if case .disconnected = event {
                     await self.deviceOperationBroker.markDisconnected(generation: generation)
@@ -1040,7 +1083,11 @@ final class AppModel {
                 if case let .disconnected(scope, _) = event {
                     self.observeRestartDisconnect(scope: scope, generation: generation)
                 }
-                await self.receive(event, generation: generation)
+                await self.receive(
+                    event,
+                    generation: generation,
+                    ownerControlsConnectedPresentation: ownerControlsConnectedPresentation
+                )
             }
         }
         return generation
@@ -1078,6 +1125,12 @@ final class AppModel {
     }
 
     private func invalidateBrokerContext() {
+        if let brokerReconnectScope {
+            retiredConnectionScopeIDs.insert(brokerReconnectScope.sessionID)
+            if activeConnectionScope == brokerReconnectScope {
+                activeConnectionScope = nil
+            }
+        }
         brokerContextLifecycle?.invalidate()
         brokerContextGeneration = nil
         brokerContextPeripheralID = nil
@@ -1089,6 +1142,9 @@ final class AppModel {
     }
 
     private func startBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
+        if let currentAttempt = brokerReconnectAttempt, currentAttempt != attempt {
+            await terminalizeBrokerReconnect(currentAttempt, retireScope: true)
+        }
         brokerReconnectTask?.cancel()
         let task = Task { [weak self] in
             await self?.requestBrokerReconnect(attempt)
@@ -1101,25 +1157,25 @@ final class AppModel {
     private func completeConnectionOperation(_ key: ConnectionOperationKey) async {
         guard connectionOperationKey == key, isCurrent(key) else { return }
         activeConnectionScope = key.scope
-        connectionOperationKey = nil
         if let session {
             await connectedLifecycleBarrier()
-            guard isCurrent(key) else { return }
+            guard connectionOperationKey == key, isCurrent(key) else { return }
             await session.receive(.connected(key.scope))
         }
-        guard isCurrent(key) else { return }
+        guard connectionOperationKey == key, isCurrent(key) else { return }
 
         let context = prepareBrokerContext(
             peripheralID: key.peripheralID,
             generation: key.transportGeneration
         )
         await publishBrokerContext(context)
-        guard isCurrent(key) else { return }
+        guard connectionOperationKey == key, isCurrent(key) else { return }
         await deviceOperationBroker.markConnected(
             peripheralID: key.peripheralID,
             generation: key.transportGeneration
         )
-        guard isCurrent(key) else { return }
+        guard connectionOperationKey == key, isCurrent(key) else { return }
+        connectionOperationKey = nil
         establishConnectedPresentation(scope: key.scope)
     }
 
@@ -1143,53 +1199,127 @@ final class AppModel {
 
         brokerReconnectAttempt = attempt
         let scope = await transport.makeConnectionScope(for: attempt.peripheralID)
-        guard brokerReconnectAttempt == attempt else { return }
+        guard isCurrentBrokerReconnect(attempt, scope: nil) else { return }
         brokerReconnectScope = scope
         let brokerContext = prepareBrokerContext(
             peripheralID: attempt.peripheralID,
             generation: attempt.generation
         )
         await publishBrokerContext(brokerContext)
-        guard brokerReconnectAttempt == attempt else { return }
+        guard isCurrentBrokerReconnect(attempt, scope: scope) else { return }
         connectionStatus = .reconnecting
         route = .connected
         do {
             try await transport.connect(to: attempt.peripheralID, scope: scope)
-            guard transportGeneration == attempt.generation,
-                  selectedPeripheralID == attempt.peripheralID,
-                  brokerReconnectAttempt == attempt,
-                  brokerReconnectScope == scope,
-                  !retiredConnectionScopeIDs.contains(scope.sessionID),
-                  activeConnectionScope == nil || activeConnectionScope == scope,
-                  !Task.isCancelled
-            else { return }
+            guard isCurrentBrokerReconnect(attempt, scope: scope) else { return }
             activeConnectionScope = scope
-            brokerReconnectAttempt = nil
-            brokerReconnectScope = nil
             await brokerCompletionBarrier()
-            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
-            guard transportGeneration == attempt.generation,
-                  selectedPeripheralID == attempt.peripheralID,
-                  activeConnectionScope == scope,
-                  !retiredConnectionScopeIDs.contains(scope.sessionID),
-                  !Task.isCancelled
+            guard isCurrentBrokerReconnect(attempt, scope: scope),
+                  activeConnectionScope == scope
             else {
-                await deviceOperationBroker.markDisconnected(generation: attempt.generation)
+                await terminalizeBrokerReconnect(attempt, retireScope: true)
                 return
             }
-            establishConnectedPresentation(scope: scope)
+            await deviceOperationBroker.handleConnectionEvent(.connected, attempt: attempt)
+            guard isCurrentBrokerReconnect(attempt, scope: scope),
+                  activeConnectionScope == scope
+            else { return }
+            let brokerIsReady = await deviceOperationBroker.hasConnectedContext
+            guard brokerIsReady,
+                  isCurrentBrokerReconnect(attempt, scope: scope),
+                  activeConnectionScope == scope
+            else { return }
             if let session {
                 await connectedLifecycleBarrier()
+                guard isCurrentBrokerReconnect(attempt, scope: scope),
+                      activeConnectionScope == scope
+                else {
+                    await terminalizeBrokerReconnect(attempt, retireScope: true)
+                    return
+                }
                 await session.receive(.connected(scope))
             }
-        } catch {
-            guard transportGeneration == attempt.generation,
-                  brokerReconnectAttempt == attempt
-            else { return }
-            connectionStatus = .disconnected(String(describing: error))
-            await deviceOperationBroker.handleConnectionEvent(.terminal, attempt: attempt)
+            guard isCurrentBrokerReconnect(attempt, scope: scope),
+                  activeConnectionScope == scope
+            else {
+                await terminalizeBrokerReconnect(attempt, retireScope: true)
+                return
+            }
+            brokerReconnectAttempt = nil
             brokerReconnectScope = nil
+            brokerReconnectTask = nil
+            establishConnectedPresentation(scope: scope)
+        } catch {
+            guard brokerReconnectAttempt == attempt else { return }
+            connectionStatus = .disconnected(String(describing: error))
+            await terminalizeBrokerReconnect(attempt, retireScope: true)
         }
+    }
+
+    private func isCurrentBrokerReconnect(
+        _ attempt: DeviceOperationBroker.ConnectionAttempt,
+        scope: DeviceConnectionScope?
+    ) -> Bool {
+        guard !Task.isCancelled,
+              transportGeneration == attempt.generation,
+              selectedPeripheralID == attempt.peripheralID,
+              brokerReconnectAttempt == attempt
+        else { return false }
+        guard let scope else { return brokerReconnectScope == nil }
+        return brokerReconnectScope == scope
+            && !retiredConnectionScopeIDs.contains(scope.sessionID)
+            && (activeConnectionScope == nil || activeConnectionScope == scope)
+    }
+
+    private func terminalizeBrokerReconnect(
+        _ attempt: DeviceOperationBroker.ConnectionAttempt,
+        retireScope: Bool
+    ) async {
+        guard brokerReconnectAttempt == attempt else { return }
+        let scope = brokerReconnectScope
+        brokerReconnectAttempt = nil
+        brokerReconnectScope = nil
+        let task = brokerReconnectTask
+        brokerReconnectTask = nil
+        if retireScope, let scope {
+            retiredConnectionScopeIDs.insert(scope.sessionID)
+            if activeConnectionScope == scope {
+                activeConnectionScope = nil
+            }
+        }
+        task?.cancel()
+        await deviceOperationBroker.handleConnectionEvent(.terminal, attempt: attempt)
+    }
+
+    private func ownerControlsConnectedPresentation(
+        for event: DeviceEvent,
+        generation: UInt
+    ) -> Bool {
+        guard case let .connected(scope) = event,
+              transportGeneration == generation
+        else { return false }
+        let directOwner = connectionOperationKey.map {
+            $0.transportGeneration == generation && $0.scope == scope
+        } ?? false
+        let reconnectOwner = brokerReconnectAttempt.map {
+            $0.generation == generation
+                && $0.peripheralID == scope.peripheralID
+                && brokerReconnectScope == scope
+        } ?? false
+        return directOwner || reconnectOwner
+    }
+
+    private func canPresentUnownedConnectedEvent(
+        scope: DeviceConnectionScope,
+        generation: UInt
+    ) -> Bool {
+        guard transportGeneration == generation,
+              !retiredConnectionScopeIDs.contains(scope.sessionID),
+              activeConnectionScope == scope,
+              selectedPeripheralID == scope.peripheralID
+                || otaRecoveryPeripheralID == scope.peripheralID
+        else { return false }
+        return !ownerControlsConnectedPresentation(for: .connected(scope), generation: generation)
     }
 
     private func acceptsTransportEvent(_ event: DeviceEvent, generation: UInt) -> Bool {
@@ -1239,7 +1369,11 @@ final class AppModel {
         return true
     }
 
-    private func receive(_ event: DeviceEvent, generation: UInt) async {
+    private func receive(
+        _ event: DeviceEvent,
+        generation: UInt,
+        ownerControlsConnectedPresentation: Bool = false
+    ) async {
         guard transportGeneration == generation else { return }
         switch event {
         case let .discovered(device):
@@ -1251,22 +1385,31 @@ final class AppModel {
         case let .connected(scope):
             let id = scope.peripheralID
             if otaRecoveryPeripheralID == id {
+                guard canPresentUnownedConnectedEvent(scope: scope, generation: generation) else { return }
                 connectionStatus = .disconnected(nil)
                 route = .scan
                 return
             }
+            guard !ownerControlsConnectedPresentation,
+                  canPresentUnownedConnectedEvent(scope: scope, generation: generation)
+            else { return }
             let brokerContext = prepareBrokerContext(peripheralID: id, generation: generation)
             await publishBrokerContext(brokerContext)
-            if brokerReconnectAttempt == nil && connectionOperationKey == nil {
-                await deviceOperationBroker.markConnected(peripheralID: id, generation: generation)
-            }
+            guard canPresentUnownedConnectedEvent(scope: scope, generation: generation) else { return }
+            await deviceOperationBroker.markConnected(peripheralID: id, generation: generation)
+            guard canPresentUnownedConnectedEvent(scope: scope, generation: generation) else { return }
             establishConnectedPresentation(scope: scope)
         case let .reconnecting(scope):
             let id = scope.peripheralID
             selectedPeripheralID = id
             connectionStatus = .reconnecting
             route = .connected
-        case let .disconnected(_, failure):
+        case let .disconnected(scope, failure):
+            if let attempt = brokerReconnectAttempt,
+               attempt.generation == generation,
+               attempt.peripheralID == scope.peripheralID {
+                await terminalizeBrokerReconnect(attempt, retireScope: false)
+            }
             flushPendingTelemetryPersistence()
             connectionStatus = .disconnected(failure?.message)
             if otaRecoveryPeripheralID != nil {

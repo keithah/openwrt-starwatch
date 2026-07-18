@@ -8,6 +8,13 @@ private func testScope(_ peripheralID: UUID, sessionID: UUID? = nil) -> DeviceCo
     DeviceConnectionScope(peripheralID: peripheralID, sessionID: sessionID ?? peripheralID)
 }
 
+private let reconnectEventBarrierDevice = DiscoveredDevice(
+    id: UUID(uuidString: "D27BD5AD-ECD0-49B2-BEE6-980936EBE66C")!,
+    localName: "Event barrier",
+    rssi: -100,
+    mode: .application
+)
+
 @MainActor
 final class AppModelReconnectTests: XCTestCase {
     func testPermissionDeniedAndRestrictedFailuresUseSettingsRecoveryPath() {
@@ -318,9 +325,7 @@ final class AppModelReconnectTests: XCTestCase {
 
     func testDirectConnectionPublishesBrokerReadinessBeforeConnectedPresentation() async throws {
         let transport = ControlledConnectionTransport()
-        let initialPublication = AsyncGate()
-        let completionPublication = AsyncGate()
-        let gate = AsyncGate()
+        let publication = AsyncCallBarrier()
         let suiteName = "WattlineTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
@@ -328,15 +333,9 @@ final class AppModelReconnectTests: XCTestCase {
         let model = AppModel(
             persistence: persistence,
             transportFactory: { transport },
-            brokerPublicationBarrier: {
-                if await transport.connectCount == 0 {
-                    await initialPublication.open()
-                    return
-                }
-                await completionPublication.open()
-                await gate.wait()
-            }
+            brokerPublicationBarrier: { await publication.waitIfHeld() }
         )
+        let broker = model.deviceOperationBroker
         let device = DiscoveredDevice(
             id: UUID(),
             localName: "Link-Power 2",
@@ -345,24 +344,90 @@ final class AppModelReconnectTests: XCTestCase {
         )
 
         model.requestBluetoothAfterPriming()
-        await initialPublication.wait()
         model.choose(device)
         try await waitUntil { await transport.connectCount == 1 }
+
+        await transport.emitConnected(at: 0)
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await waitUntil {
+            await MainActor.run {
+                model.discoveredDevices.contains {
+                    $0.id == reconnectEventBarrierDevice.id
+                }
+            }
+        }
+
+        XCTAssertNotEqual(
+            model.connectionStatus,
+            .connected,
+            "the direct connect owner must be the sole connected presenter"
+        )
+        let brokerReadyBeforeCompletion = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReadyBeforeCompletion)
+
+        await publication.holdNext()
         await transport.succeedConnect(at: 0, deliverConnectedEvent: false)
-        await completionPublication.wait()
+        try await waitUntil { await publication.isBlocked }
 
         XCTAssertNotEqual(model.connectionStatus, .connected)
-        await gate.open()
+        let brokerReadyWhileHeld = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReadyWhileHeld)
+        await publication.release()
         try await waitUntil {
-            await MainActor.run { model.connectionStatus == .connected }
+            let connected = await MainActor.run { model.connectionStatus == .connected }
+            guard connected else { return false }
+            return await broker.hasConnectedContext
         }
-        let hasConnectedContext = await model.deviceOperationBroker.hasConnectedContext
-        XCTAssertTrue(hasConnectedContext)
+    }
+
+    func testReturnToScanWhileConnectedEventPublicationIsHeldCannotResurrectStateOrBrokerOwnership() async throws {
+        let transport = ControlledConnectionTransport()
+        let publication = AsyncCallBarrier()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let model = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { transport },
+            brokerPublicationBarrier: { await publication.waitIfHeld() }
+        )
+        let broker = model.deviceOperationBroker
+        let id = UUID()
+
+        model.requestBluetoothAfterPriming()
+        model.choose(.init(id: id, localName: "Device", rssi: -40, mode: .application))
+        try await waitUntil { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0, deliverConnectedEvent: false)
+        try await waitUntil {
+            let connected = await MainActor.run { model.connectionStatus == .connected }
+            guard connected else { return false }
+            return await broker.hasConnectedContext
+        }
+
+        await publication.holdNext()
+        await transport.emitConnected(at: 0)
+        try await waitUntil { await publication.isBlocked }
+
+        model.returnToScan()
+        await publication.release()
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await waitUntil {
+            await MainActor.run {
+                model.discoveredDevices.contains {
+                    $0.id == reconnectEventBarrierDevice.id
+                }
+            }
+        }
+
+        XCTAssertEqual(model.route, .scan)
+        XCTAssertEqual(model.connectionStatus, .disconnected(nil))
+        let brokerReady = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReady)
     }
 
     func testReturnToScanAtDirectLifecycleBarrierDoesNotPoisonReplacementSessionScope() async throws {
         let transport = ControlledConnectionTransport()
-        let lifecycle = BrokerPublicationBarrier()
+        let lifecycle = AsyncCallBarrier()
         let suiteName = "WattlineTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
@@ -434,7 +499,10 @@ final class AppModelReconnectTests: XCTestCase {
         model.returnToScan()
         await transport.emit(.connected(scope))
         await transport.emit(.handshakeCompleted(makeIdentity(id: id, features: 0x7FFF), scope: scope))
-        try await Task.sleep(for: .milliseconds(50))
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
 
         XCTAssertEqual(model.route, .scan)
         XCTAssertEqual(model.connectionStatus, .disconnected(nil))
@@ -443,7 +511,7 @@ final class AppModelReconnectTests: XCTestCase {
 
     func testReturnToScanRejectsOldBrokerContextWhileDetachPublicationIsHeld() async throws {
         let fixture = makeFixture(onboardingComplete: false)
-        let publication = BrokerPublicationBarrier()
+        let publication = AsyncCallBarrier()
         let model = AppModel(
             persistence: fixture.persistence,
             transportFactory: { fixture.transport },
@@ -461,7 +529,7 @@ final class AppModelReconnectTests: XCTestCase {
         await publication.holdNext()
 
         model.returnToScan()
-        await publication.waitUntilBlocked()
+        try await eventually { await publication.isBlocked }
         let operationCount = OperationInvocationCounter()
         let result = Task {
             try await model.deviceOperationBroker.withConnection(to: peripheralID) { _ in
@@ -490,7 +558,7 @@ final class AppModelReconnectTests: XCTestCase {
         let suiteName = "WattlineTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
-        let publication = BrokerPublicationBarrier()
+        let publication = AsyncCallBarrier()
         let model = AppModel(
             persistence: AppPersistence(defaults: defaults),
             transportFactory: { transports.removeFirst() },
@@ -508,7 +576,7 @@ final class AppModelReconnectTests: XCTestCase {
         await publication.holdNext()
 
         model.requestBluetoothAfterPriming()
-        await publication.waitUntilBlocked()
+        try await eventually { await publication.isBlocked }
         let operationCount = OperationInvocationCounter()
 
         do {
@@ -590,7 +658,10 @@ final class AppModelReconnectTests: XCTestCase {
         let staleScope = await transport.scope(at: 0)
         await transport.emit(.connected(staleScope))
         await transport.emit(.disconnected(staleScope, TransportFailure(message: "stale A")))
-        try await Task.sleep(for: .milliseconds(50))
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
 
         XCTAssertEqual(persistence.lastSuccessfulPeripheralID, b)
         XCTAssertEqual(model.connectionStatus, .connected)
@@ -656,7 +727,7 @@ final class AppModelReconnectTests: XCTestCase {
 
         let reconnectedID = try await reconnect.value
         XCTAssertEqual(reconnectedID, id)
-        XCTAssertEqual(model.connectionStatus, .connected)
+        try await eventually { model.connectionStatus == .connected }
 
         let reconnectScope = await transport.scope(at: 1)
         await transport.emitConnected(at: 1)
@@ -667,7 +738,7 @@ final class AppModelReconnectTests: XCTestCase {
 
     func testBrokerReconnectTerminalDuringConnectedLifecycleDeliveryNeverStrandsWaiter() async throws {
         let transport = ControlledConnectionTransport()
-        let lifecycle = BrokerPublicationBarrier()
+        let lifecycle = AsyncCallBarrier()
         let invocationCount = OperationInvocationCounter()
         let suiteName = "WattlineTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -703,7 +774,7 @@ final class AppModelReconnectTests: XCTestCase {
         }
         try await eventually { await transport.connectCount == 2 }
         await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
-        await lifecycle.waitUntilBlocked()
+        try await eventually { await lifecycle.isBlocked }
 
         let reconnectScope = await transport.scope(at: 1)
         await transport.emit(.disconnected(reconnectScope, TransportFailure(message: "terminal during delivery")))
@@ -723,7 +794,7 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertNil(model.brokerReconnectAttempt)
 
         await lifecycle.release()
-        try await Task.sleep(for: .milliseconds(50))
+        try await eventually { await lifecycle.completedHoldCount == 1 }
         let countAfterRelease = await invocationCount.value
         XCTAssertEqual(countAfterRelease, 1)
         XCTAssertEqual(model.connectionStatus, .disconnected("terminal during delivery"))
@@ -731,7 +802,7 @@ final class AppModelReconnectTests: XCTestCase {
 
     func testBrokerReconnectTerminalDuringBrokerCompletionLeavesBrokerDisconnected() async throws {
         let transport = ControlledConnectionTransport()
-        let completionHop = BrokerPublicationBarrier()
+        let completionHop = AsyncCallBarrier()
         let invocationCount = OperationInvocationCounter()
         let suiteName = "WattlineTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -767,7 +838,7 @@ final class AppModelReconnectTests: XCTestCase {
         }
         try await eventually { await transport.connectCount == 2 }
         await transport.succeedConnect(at: 1, deliverConnectedEvent: false)
-        await completionHop.waitUntilBlocked()
+        try await eventually { await completionHop.isBlocked }
 
         let reconnectScope = await transport.scope(at: 1)
         await transport.emit(.disconnected(
@@ -780,24 +851,27 @@ final class AppModelReconnectTests: XCTestCase {
         await completionHop.release()
 
         switch await reconnect.value {
-        case let .success(reconnectedID):
-            XCTAssertEqual(reconnectedID, id)
+        case .success:
+            XCTFail("A reconnect invalidated during broker completion must not invoke its operation")
         case let .failure(error):
-            XCTFail("Reconnect waiter did not complete successfully: \(error)")
+            XCTAssertEqual(
+                error as? Wattline.DeviceOperationBroker.BrokerError,
+                .unavailable
+            )
         }
         let countAfterCompletion = await invocationCount.value
         let pendingAfterCompletion = await model.deviceOperationBroker.pendingConnectionCount
-        XCTAssertEqual(countAfterCompletion, 1)
+        XCTAssertEqual(countAfterCompletion, 0)
         XCTAssertEqual(pendingAfterCompletion, 0)
         try await eventually { await !model.deviceOperationBroker.hasConnectedContext }
         let brokerHasConnectedContext = await model.deviceOperationBroker.hasConnectedContext
         XCTAssertFalse(brokerHasConnectedContext)
         XCTAssertNil(model.brokerReconnectAttempt)
         XCTAssertEqual(model.connectionStatus, .disconnected("terminal during broker completion"))
-        try await Task.sleep(for: .milliseconds(50))
+        try await eventually { await completionHop.completedHoldCount == 1 }
         let finalInvocationCount = await invocationCount.value
         let finalPendingConnectionCount = await model.deviceOperationBroker.pendingConnectionCount
-        XCTAssertEqual(finalInvocationCount, 1)
+        XCTAssertEqual(finalInvocationCount, 0)
         XCTAssertEqual(finalPendingConnectionCount, 0)
         XCTAssertEqual(model.connectionStatus, .disconnected("terminal during broker completion"))
     }
@@ -831,7 +905,10 @@ final class AppModelReconnectTests: XCTestCase {
         try await eventually { await transport.connectCount == 3 }
 
         await transport.succeedConnect(at: 1)
-        try await Task.sleep(for: .milliseconds(50))
+        await transport.emit(.discovered(reconnectEventBarrierDevice))
+        try await eventually {
+            model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+        }
         let pendingConnectionCount = await model.deviceOperationBroker.pendingConnectionCount
         XCTAssertEqual(pendingConnectionCount, 1)
 
@@ -1062,7 +1139,10 @@ final class AppModelReconnectTests: XCTestCase {
                 model.connectionStatus == .disconnected("reconnectFailed")
             }
             await fixture.transport.releasePostThrowDisconnectIfNeeded()
-            try await Task.sleep(for: .milliseconds(25))
+            await fixture.transport.emit(.discovered(reconnectEventBarrierDevice))
+            try await eventually {
+                model.discoveredDevices.contains { $0.id == reconnectEventBarrierDevice.id }
+            }
 
             XCTAssertEqual(model.route, .scan, "ordering: \(ordering)")
             XCTAssertEqual(model.connectionStatus, .disconnected("reconnectFailed"), "ordering: \(ordering)")
@@ -1378,33 +1458,6 @@ private actor MutationTransport: DeviceTransport {
             return .reply(try command.validate(resumed))
         case .failure: throw Failure.expected
         }
-    }
-}
-
-private actor BrokerPublicationBarrier {
-    private var shouldHold = false
-    private var blocked = false
-    private var continuation: CheckedContinuation<Void, Never>?
-
-    var isBlocked: Bool { blocked }
-
-    func holdNext() { shouldHold = true }
-
-    func waitIfHeld() async {
-        guard shouldHold else { return }
-        shouldHold = false
-        blocked = true
-        await withCheckedContinuation { continuation = $0 }
-    }
-
-    func waitUntilBlocked() async {
-        while !blocked { await Task.yield() }
-    }
-
-    func release() {
-        blocked = false
-        continuation?.resume()
-        continuation = nil
     }
 }
 

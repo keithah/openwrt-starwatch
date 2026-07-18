@@ -174,6 +174,50 @@ final class SettingsLifecycleTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(model.reconnectAttemptsForTesting, 1)
     }
 
+    func testRestartReconnectOwnerAlonePresentsConnectedAfterBrokerReadiness() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(reconnectAfterRestart: true, deferReconnect: true)
+        let completion = AsyncCallBarrier()
+        let model = try await makeConnectedModel(
+            transport,
+            clock: clock,
+            brokerCompletionBarrier: { await completion.waitIfHeld() }
+        )
+        let broker = model.deviceOperationBroker
+
+        try await restartAfterReleasingDisconnect(model, transport: transport)
+        try await waitUntil { await transport.deferredReconnectScopes.count == 1 }
+        let deferredScopes = await transport.deferredReconnectScopes
+        let reconnectScope = try XCTUnwrap(deferredScopes.first)
+
+        await transport.emit(.connected(reconnectScope))
+        await transport.emit(.discovered(LifecycleTransport.eventBarrierDevice))
+        try await waitUntil {
+            model.discoveredDevices.contains { $0.id == LifecycleTransport.eventBarrierDevice.id }
+        }
+
+        XCTAssertNotEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(model.maintenanceState, .restarting)
+        let brokerReadyBeforeOwner = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReadyBeforeOwner)
+
+        await completion.holdNext()
+        await transport.releaseReconnect(scope: reconnectScope)
+        try await waitUntil { await completion.isBlocked }
+        XCTAssertNotEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(model.maintenanceState, .restarting)
+        let brokerReadyWhileHeld = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReadyWhileHeld)
+
+        await completion.release()
+        try await waitUntil {
+            guard model.connectionStatus == .connected,
+                  model.maintenanceState == .idle
+            else { return false }
+            return await broker.hasConnectedContext
+        }
+    }
+
     func testWriteErrorAfterExpectedDisconnectStillRecovers() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(reconnectAfterRestart: true, restartFailsAfterDisconnect: true, deferReconnect: true)
@@ -279,6 +323,61 @@ final class SettingsLifecycleTests: XCTestCase {
         XCTAssertEqual(model.route, .connected)
     }
 
+    func testRetryAfterRestartRecoveryTimeoutStartsFreshAttemptAndQuarantinesLateCompletion() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(reconnectAfterRestart: true, deferReconnect: true)
+        let model = try await makeConnectedModel(transport, clock: clock)
+        let broker = model.deviceOperationBroker
+
+        try await restartAfterReleasingDisconnect(model, transport: transport)
+        try await waitUntil { await transport.deferredReconnectScopes.count == 1 }
+        let initialDeferredScopes = await transport.deferredReconnectScopes
+        let oldScope = try XCTUnwrap(initialDeferredScopes.first)
+        try await waitUntil { await clock.sleeperCount == 1 }
+
+        await clock.advance(by: .seconds(30))
+        try await waitUntil {
+            if case .restartFailed = model.maintenanceState { return true }
+            return false
+        }
+
+        await model.retryRestart()
+        do {
+            try await waitUntil {
+                let pendingCount = await transport.deferredReconnectScopes.count
+                return pendingCount == 2 && model.reconnectAttemptsForTesting == 2
+            }
+        } catch {
+            await transport.releaseReconnect(scope: oldScope)
+            throw error
+        }
+        let reconnectScopes = await transport.deferredReconnectScopes
+        let freshScope = try XCTUnwrap(reconnectScopes.last)
+        XCTAssertNotEqual(oldScope, freshScope)
+        XCTAssertEqual(model.maintenanceState, .restarting)
+
+        await transport.releaseReconnect(scope: oldScope)
+        try await waitUntil { await transport.completedReconnectScopes.contains(oldScope) }
+        await transport.emit(.discovered(LifecycleTransport.eventBarrierDevice))
+        try await waitUntil {
+            model.discoveredDevices.contains { $0.id == LifecycleTransport.eventBarrierDevice.id }
+        }
+
+        XCTAssertNotEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(model.maintenanceState, .restarting)
+        let brokerReadyAfterStaleCompletion = await broker.hasConnectedContext
+        XCTAssertFalse(brokerReadyAfterStaleCompletion)
+
+        await transport.releaseReconnect(scope: freshScope)
+        try await waitUntil {
+            guard model.connectionStatus == .connected,
+                  model.maintenanceState == .idle
+            else { return false }
+            return await broker.hasConnectedContext
+        }
+        XCTAssertEqual(model.reconnectAttemptsForTesting, 2)
+    }
+
     func testLateOldScopeDisconnectCannotTerminateRecoveredSession() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(reconnectAfterRestart: true)
@@ -379,12 +478,21 @@ final class SettingsLifecycleTests: XCTestCase {
         XCTAssertEqual(model.connectionStatus, .disconnected(nil))
     }
 
-    private func makeConnectedModel(_ transport: LifecycleTransport, clock: any DeviceClock = ContinuousDeviceClock()) async throws -> AppModel {
+    private func makeConnectedModel(
+        _ transport: LifecycleTransport,
+        clock: any DeviceClock = ContinuousDeviceClock(),
+        brokerCompletionBarrier: @escaping AppModel.BrokerCompletionBarrier = {}
+    ) async throws -> AppModel {
         let suite = "WattlineTests.SettingsLifecycle.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         let persistence = AppPersistence(defaults: defaults)
-        let model = AppModel(persistence: persistence, transportFactory: { transport }, maintenanceClock: clock)
+        let model = AppModel(
+            persistence: persistence,
+            transportFactory: { transport },
+            brokerCompletionBarrier: brokerCompletionBarrier,
+            maintenanceClock: clock
+        )
         model.requestBluetoothAfterPriming()
         model.choose(DiscoveredDevice(id: LifecycleTransport.deviceID, localName: "Link-Power 2", rssi: -40, mode: .application))
         try await waitUntil {
@@ -416,6 +524,11 @@ final class SettingsLifecycleTests: XCTestCase {
 }
 
 private actor LifecycleTransport: DeviceTransport {
+    private struct DeferredReconnect {
+        let scope: DeviceConnectionScope
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     static let deviceID = UUID(uuidString: "2A7F650A-AB0A-4D25-90B1-9B71E4CF1A01")!
     static let eventBarrierDevice = DiscoveredDevice(
         id: UUID(uuidString: "1018C163-43F8-4204-A389-FB04A046A4E5")!,
@@ -439,11 +552,15 @@ private actor LifecycleTransport: DeviceTransport {
     private(set) var lastDisconnectPolicy: ExpectedDisconnectPolicy?
     private(set) var scopes: [DeviceConnectionScope] = []
     private var activeScope: DeviceConnectionScope?
-    private var reconnectWaiter: CheckedContinuation<Void, Never>?
+    private var deferredReconnects: [DeferredReconnect] = []
+    private(set) var completedReconnectScopes: [DeviceConnectionScope] = []
     private var restartPerformWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
     private(set) var pendingDisconnectScope: DeviceConnectionScope?
     private(set) var restartPerformCount = 0
-    var reconnectIsWaiting: Bool { reconnectWaiter != nil }
+    var reconnectIsWaiting: Bool { !deferredReconnects.isEmpty }
+    var deferredReconnectScopes: [DeviceConnectionScope] {
+        deferredReconnects.map(\.scope)
+    }
 
     init(reconnectAfterRestart: Bool, shutdownFails: Bool = false, restartFails: Bool = false, restartFailsAfterDisconnect: Bool = false, emitDisconnectAfterThrow: Bool = false, deferReconnect: Bool = false, deferRestartPerform: Bool = false) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
@@ -465,15 +582,27 @@ private actor LifecycleTransport: DeviceTransport {
     }
     func connect(to id: UUID, scope: DeviceConnectionScope) async throws {
         if connectedIDs.count > 0, deferReconnect {
-            await withCheckedContinuation { continuation in reconnectWaiter = continuation }
+            await withCheckedContinuation { continuation in
+                deferredReconnects.append(.init(scope: scope, continuation: continuation))
+            }
         }
         connectedIDs.append(id)
         if connectedIDs.count > 1 { restartConnectCount += 1 }
         activeScope = scope
         scopes.append(scope)
         continuation.yield(.connected(scope))
+        if connectedIDs.count > 1 {
+            completedReconnectScopes.append(scope)
+        }
     }
-    func releaseReconnect() { reconnectWaiter?.resume(); reconnectWaiter = nil }
+    func releaseReconnect() {
+        guard !deferredReconnects.isEmpty else { return }
+        deferredReconnects.removeFirst().continuation.resume()
+    }
+    func releaseReconnect(scope: DeviceConnectionScope) {
+        guard let index = deferredReconnects.firstIndex(where: { $0.scope == scope }) else { return }
+        deferredReconnects.remove(at: index).continuation.resume()
+    }
     func releaseRestartPerform(_ number: Int) {
         restartPerformWaiters.removeValue(forKey: number)?.resume()
     }

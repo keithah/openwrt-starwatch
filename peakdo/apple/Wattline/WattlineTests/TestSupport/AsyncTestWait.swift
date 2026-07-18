@@ -30,3 +30,30 @@ actor AsyncGate {
         pending.forEach { $0.resume() }
     }
 }
+
+actor AsyncCallBarrier {
+    private var shouldHoldNext = false
+    private var blocked = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var completedHoldCount = 0
+
+    var isBlocked: Bool { blocked }
+
+    func holdNext() {
+        shouldHoldNext = true
+    }
+
+    func waitIfHeld() async {
+        guard shouldHoldNext else { return }
+        shouldHoldNext = false
+        blocked = true
+        await withCheckedContinuation { continuation = $0 }
+        completedHoldCount += 1
+    }
+
+    func release() {
+        blocked = false
+        continuation?.resume()
+        continuation = nil
+    }
+}
