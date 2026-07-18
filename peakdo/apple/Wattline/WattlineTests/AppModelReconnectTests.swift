@@ -1238,7 +1238,14 @@ final class AppModelReconnectTests: XCTestCase {
         try await eventually { await fixture.transport.currentScope()?.peripheralID == id }
         let maybeScope = await fixture.transport.currentScope()
         let scope = try XCTUnwrap(maybeScope)
+        try await eventually {
+            guard model.connectionStatus == .connected else { return false }
+            return await model.deviceOperationBroker.hasConnectedContext
+        }
         await fixture.transport.emit(.handshakeCompleted(identity, scope: scope))
+        try await eventually {
+            model.state.identity?.peripheralID == id && model.knownDevices[id] != nil
+        }
         await fixture.transport.emit(.battery(firstBattery, timestamp: .seconds(1)))
         try await eventually { model.state.battery == firstBattery }
         observedAt = Date(timeIntervalSince1970: 1_001)
