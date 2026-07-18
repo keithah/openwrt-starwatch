@@ -221,3 +221,16 @@ with `uci get starwatch.main.token`.
 The complete wire format and operational constraints are in
 [`API.md`](API.md) and [`STARWATCH-SPEC.md`](STARWATCH-SPEC.md). Release notes
 are maintained in [`CHANGELOG.md`](CHANGELOG.md).
+
+## Security
+
+Please report vulnerabilities privately — see [`SECURITY.md`](SECURITY.md). The
+opkg feed is `usign`-signed; the installer pins the public key (fingerprint
+`f6c72c675c844b91`, [`package/starwatch-feed.pub`](package/starwatch-feed.pub))
+and leaves signature checking enabled.
+
+## License
+
+Starwatch is licensed under the **GNU Affero General Public License v3.0 or
+later** (AGPL-3.0-or-later); see [`LICENSE`](LICENSE). Vendored protobufs under
+`router/third_party/` retain their own upstream license.
