@@ -2,6 +2,7 @@ import CoreBluetooth
 import Foundation
 import Observation
 import WattlineCore
+import WattlineNetwork
 import WattlineUI
 
 @MainActor
@@ -135,6 +136,7 @@ final class AppModel {
 
     var route: Route
     var isDemo = false
+    private(set) var activeTransportKind: AppTransportKind = .bluetooth
     var discoveredDevices: [DiscoveredDevice] = []
     var bluetoothIssue: BluetoothIssue?
     var otaRecoveryDevice: DiscoveredDevice?
@@ -209,6 +211,7 @@ final class AppModel {
     private let snapshotCoordinator: SnapshotCoordinator?
     private let widgetReloadAdapter: WidgetReloadAdapter?
     private let liveActivityCoordinator: LiveActivityCoordinator
+    let routerConnections: RouterConnectionModel
     private var snapshotFlushTask: Task<Void, Never>?
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
@@ -242,6 +245,7 @@ final class AppModel {
     private var connectionOperationKey: ConnectionOperationKey?
     private var activeConnectionScope: DeviceConnectionScope?
     private var retiredConnectionScopeIDs: Set<UUID> = []
+    private var activeRouterEndpoints: Set<RouterEndpointCapability>?
 
     @ObservationIgnored
     private(set) lazy var deviceOperationBroker = DeviceOperationBroker(
@@ -272,7 +276,8 @@ final class AppModel {
         maintenanceClock: any DeviceClock = ContinuousDeviceClock(),
         snapshotCoordinator: SnapshotCoordinator? = SnapshotCoordinator.production(),
         widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter(),
-        liveActivityAdapter: any LiveActivityAdapter = SystemLiveActivityAdapter()
+        liveActivityAdapter: any LiveActivityAdapter = SystemLiveActivityAdapter(),
+        routerConnections: RouterConnectionModel = .production()
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
@@ -284,9 +289,12 @@ final class AppModel {
         self.snapshotCoordinator = snapshotCoordinator
         self.widgetReloadAdapter = widgetReloadAdapter
         self.liveActivityCoordinator = LiveActivityCoordinator(adapter: liveActivityAdapter)
+        self.routerConnections = routerConnections
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
+
+        Task { await routerConnections.reloadSavedHosts() }
 
         if persistence.systemSurfacePreferences.lowBatteryEnabled {
             Task { @MainActor [weak self] in
@@ -324,6 +332,8 @@ final class AppModel {
         let demo = DemoTransport(seed: 0x57415454)
         demoTransport = demo
         isDemo = true
+        activeTransportKind = .demo
+        activeRouterEndpoints = nil
         snapshotCoordinator?.setDemo(true)
         let generation = attach(transport: demo)
         selectedPeripheralID = DemoTransport.deviceID
@@ -365,6 +375,8 @@ final class AppModel {
         isDemo = false
         snapshotCoordinator?.setDemo(false)
         demoTransport = nil
+        activeTransportKind = .bluetooth
+        activeRouterEndpoints = nil
         capabilities = DeviceCapabilities(features: [])
         bluetoothIssue = nil
 
@@ -372,6 +384,56 @@ final class AppModel {
         attach(transport: transportFactory())
         route = .scan
         startScanning()
+    }
+
+    func connectViaRouter(
+        _ host: RouterHostMetadata,
+        endpoints: Set<RouterEndpointCapability> = Set(RouterEndpointCapability.allCases)
+    ) {
+        do {
+            let routerTransport = try routerConnections.makeTransport(for: host)
+            isDemo = false
+            demoTransport = nil
+            snapshotCoordinator?.setDemo(false)
+            activeTransportKind = .router
+            activeRouterEndpoints = endpoints
+            discoveredDevices.removeAll()
+            let generation = attach(transport: routerTransport)
+            let peripheralID = host.endpoint.peripheralID
+            selectedPeripheralID = peripheralID
+            connectedName = host.displayName
+            connectionStatus = .reconnecting
+            route = .connected
+            let operation = beginOperation(for: generation, transport: routerTransport)
+            let brokerContext = prepareBrokerContext(
+                peripheralID: peripheralID,
+                generation: generation
+            )
+            operationTask = Task { [weak self] in
+                do {
+                    await self?.publishBrokerContext(brokerContext)
+                    guard let self, self.isCurrent(operation) else { return }
+                    let scope = await routerTransport.makeConnectionScope(for: peripheralID)
+                    guard self.isCurrent(operation) else { return }
+                    let connectionKey = ConnectionOperationKey(
+                        transportGeneration: operation.transportGeneration,
+                        operationGeneration: operation.operationGeneration,
+                        peripheralID: peripheralID,
+                        scope: scope
+                    )
+                    connectionOperationKey = connectionKey
+                    try await routerTransport.connect(to: peripheralID, scope: scope)
+                    guard self.isCurrent(operation) else { return }
+                    await self.completeConnectionOperation(connectionKey)
+                } catch {
+                    guard let self, self.isCurrent(operation) else { return }
+                    connectionOperationKey = nil
+                    connectionStatus = .disconnected(String(describing: error))
+                }
+            }
+        } catch {
+            showToast(String(describing: error))
+        }
     }
 
     func startScanning() {
@@ -1107,7 +1169,19 @@ final class AppModel {
             }
         case let .handshakeCompleted(snapshot, _):
             let isOTAMode = snapshot.mode == .ota
-            capabilities = isOTAMode ? DeviceCapabilities(features: []) : snapshot.capabilities
+            if activeTransportKind == .router {
+                routerConnections.record(identity: snapshot)
+            }
+            if isOTAMode {
+                capabilities = DeviceCapabilities(features: [])
+            } else if let activeRouterEndpoints {
+                capabilities = RouterConnectionModel.capabilities(
+                    for: snapshot,
+                    endpoints: activeRouterEndpoints
+                )
+            } else {
+                capabilities = snapshot.capabilities
+            }
             selectedPeripheralID = snapshot.peripheralID
             let advertisedName = snapshot.advertisedName
                 ?? knownDevices[snapshot.peripheralID]?.advertisedName

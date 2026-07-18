@@ -1,15 +1,17 @@
 import SwiftUI
 import UIKit
 import WattlineCore
+import WattlineNetwork
 
 struct ScanView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
+    @State private var showsRouterSetup = false
 
     var body: some View {
         NavigationStack {
             Group {
-                if let issue = model.bluetoothIssue {
+                if let issue = model.bluetoothIssue, model.routerConnections.savedHosts.isEmpty {
                     BluetoothExplainer(issue: issue) {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             openURL(url)
@@ -17,7 +19,7 @@ struct ScanView: View {
                     } demo: {
                         model.enterDemo()
                     }
-                } else if model.sortedDevices.isEmpty {
+                } else if model.sortedDevices.isEmpty && model.routerConnections.savedHosts.isEmpty {
                     ScrollView {
                         ContentUnavailableView {
                             Label("Looking for Wattline devices", systemImage: "antenna.radiowaves.left.and.right")
@@ -30,13 +32,50 @@ struct ScanView: View {
                     }
                     .refreshable { await model.refreshScan() }
                 } else {
-                    List(model.sortedDevices) { device in
-                        Button {
-                            model.choose(device)
-                        } label: {
-                            DeviceRow(device: device, identity: model.knownDevices[device.id])
+                    List {
+                        if model.bluetoothIssue != nil {
+                            Section("Bluetooth") {
+                                Label("Bluetooth unavailable", systemImage: "bluetooth.slash")
+                                    .foregroundStyle(.secondary)
+                                Button("Open Settings") {
+                                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                                        openURL(url)
+                                    }
+                                }
+                            }
+                        } else if !model.sortedDevices.isEmpty {
+                            Section("Nearby over Bluetooth") {
+                                ForEach(model.sortedDevices) { device in
+                                    Button {
+                                        model.choose(device)
+                                    } label: {
+                                        DeviceRow(device: device, identity: model.knownDevices[device.id])
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
                         }
-                        .buttonStyle(.plain)
+
+                        if !model.routerConnections.savedHosts.isEmpty {
+                            Section("Advanced · Saved routers") {
+                                ForEach(model.routerConnections.savedHosts) { host in
+                                    Button {
+                                        model.connectViaRouter(host)
+                                    } label: {
+                                        RouterHostRow(host: host)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .onDelete { offsets in
+                                    let hosts = model.routerConnections.savedHosts
+                                    Task {
+                                        for index in offsets {
+                                            try? await model.routerConnections.remove(hosts[index])
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     .refreshable { await model.refreshScan() }
                 }
@@ -52,9 +91,16 @@ struct ScanView: View {
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if model.activeTransportKind == .router {
+                        Button("BT") { model.requestBluetoothAfterPriming() }
+                    }
+                    Button("Router") { showsRouterSetup = true }
                     Button("Demo") { model.enterDemo() }
                 }
+            }
+            .sheet(isPresented: $showsRouterSetup) {
+                RouterSetupView()
             }
             .sheet(item: Bindable(model).otaRecoveryDevice) { device in
                 OTARecoveryView(device: device) {
@@ -85,10 +131,122 @@ private struct DeviceRow: View {
                 }
             }
             Spacer()
+            Text(AppTransportKind.bluetooth.label)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
             RSSIBars(strength: presentation.signalStrength)
         }
         .contentShape(Rectangle())
         .padding(.vertical, 5)
+    }
+}
+
+private struct RouterHostRow: View {
+    let host: RouterHostMetadata
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "network")
+                .foregroundStyle(.indigo)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(host.displayName).font(.headline)
+                Text("\(host.host):\(host.port)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(AppTransportKind.router.label)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 5)
+    }
+}
+
+private struct RouterSetupView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = "My router"
+    @State private var address = ""
+    @State private var deviceID = ""
+    @State private var token = ""
+    @State private var fingerprint = ""
+    @State private var reachability = RouterHostReachability.lan
+    @State private var allowsInsecureWAN = false
+    @State private var errorMessage: String?
+    @State private var isSaving = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Connect via router") {
+                    TextField("Name", text: $name)
+                    TextField("Host or host:port", text: $address)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Picker("Reachability", selection: $reachability) {
+                        Text("LAN").tag(RouterHostReachability.lan)
+                        Text("VPN / Tailscale").tag(RouterHostReachability.vpn)
+                        Text("WAN").tag(RouterHostReachability.wan)
+                    }
+                    SecureField("Pairing bearer token", text: $token)
+                    TextField("Device MAC (optional)", text: $deviceID)
+                        .textInputAutocapitalization(.characters)
+                    TextField("HTTPS certificate fingerprint", text: $fingerprint)
+                        .textInputAutocapitalization(.characters)
+                }
+
+                if reachability == .wan {
+                    Section("WAN security") {
+                        Toggle("Allow insecure plain HTTP", isOn: $allowsInsecureWAN)
+                        if allowsInsecureWAN {
+                            Label(
+                                "Traffic and the bearer token can be intercepted. Prefer HTTPS with a pinned fingerprint or a VPN.",
+                                systemImage: "exclamationmark.triangle.fill"
+                            )
+                            .foregroundStyle(.orange)
+                        }
+                    }
+                }
+
+                if let errorMessage {
+                    Section { Text(errorMessage).foregroundStyle(.orange) }
+                }
+            }
+            .navigationTitle("Advanced connection")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { save() }
+                        .disabled(address.isEmpty || token.isEmpty || isSaving)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        errorMessage = nil
+        Task {
+            do {
+                _ = try await model.routerConnections.saveManualHost(
+                    address: address,
+                    displayName: name,
+                    reachability: reachability,
+                    allowsInsecureWAN: allowsInsecureWAN,
+                    deviceID: deviceID.isEmpty ? nil : deviceID,
+                    certificateFingerprint: fingerprint.isEmpty ? nil : fingerprint,
+                    token: token
+                )
+                dismiss()
+            } catch {
+                errorMessage = String(describing: error)
+                isSaving = false
+            }
+        }
     }
 }
 
