@@ -165,3 +165,40 @@ export function clientMutationPayload({configRevision, givenName, blocked} = {})
 export function clientMutationShouldRetry(error) {
   return Number(error?.status) === 409;
 }
+
+// Wi-Fi writes use the public, stable selector rather than a router's runtime
+// BSSID. Empty write-only credentials deliberately mean "preserve", never
+// "clear". Callers pass one mutation category per request.
+export function wifiMutationPayload({configRevision, network, radio, steering, outdoorMode, secureDNS} = {}) {
+	const payload = {config_revision: String(configRevision || ''), confirmation: 'APPLY WIFI CHANGES'};
+	if (network) {
+    const selected = {ssid: String(network.ssid || ''), band: String(network.band || '')};
+    if (network.newSSID !== undefined && String(network.newSSID) !== selected.ssid) selected.new_ssid = String(network.newSSID);
+    if (typeof network.passphrase === 'string' && network.passphrase !== '') selected.passphrase = network.passphrase;
+    for (const [source, target] of [['security', 'security'], ['hidden', 'hidden'], ['disabled', 'disabled']]) {
+      if (network[source] !== undefined) selected[target] = network[source];
+    }
+		payload.network = selected;
+		if (selected.security === 'OPEN') payload.confirmation = 'CREATE OPEN NETWORK';
+	} else if (radio) {
+		payload.radio = {band: String(radio.band || '')};
+		if (radio.enabled !== undefined) payload.radio.enabled = radio.enabled;
+		if (radio.disabled !== undefined) payload.radio.enabled = !radio.disabled;
+		if (radio.channel !== undefined) payload.radio.channel = radio.channel;
+		if (radio.channel_width_mhz !== undefined) payload.radio.channel_width_mhz = radio.channel_width_mhz;
+		if (radio.tx_power_level !== undefined) payload.radio.tx_power_level = radio.tx_power_level;
+	} else if (typeof steering === 'boolean') {
+		payload.band_steering_enabled = steering;
+  } else if (typeof outdoorMode === 'boolean') {
+    payload.outdoor_mode = outdoorMode;
+	} else if (typeof secureDNS === 'boolean') {
+		payload.dns = {secure: secureDNS};
+  } else {
+    throw new Error('Select one Wi-Fi change to apply.');
+  }
+  return payload;
+}
+
+export function wifiMutationShouldRetry(error) {
+  return Number(error?.status) === 409;
+}

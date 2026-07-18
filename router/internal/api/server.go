@@ -85,6 +85,8 @@ type SettingsProvider interface {
 type RouterMutationProvider interface {
 	RenameClient(context.Context, string, string, string) (uint32, error)
 	SetClientBlocked(context.Context, string, string, bool) (uint32, error)
+	ApplyRouterWifi(context.Context, string, dish.RouterWifiMutation) error
+	ApplyRouterNetwork(context.Context, string, dish.RouterNetworkMutation) error
 }
 
 type Deps struct {
@@ -152,6 +154,7 @@ func NewServer(deps Deps) *server {
 	mux.HandleFunc("GET /api/diagnostics", s.auth(s.diagnostics))
 	mux.HandleFunc("GET /api/router", s.auth(s.router))
 	mux.HandleFunc("PATCH /api/router/clients/{mac}", s.auth(s.routerClientPatch))
+	mux.HandleFunc("PATCH /api/router/wifi", s.auth(s.routerWifiPatch))
 	mux.HandleFunc("GET /api/history", s.auth(s.history))
 	mux.HandleFunc("GET /api/wan", s.auth(s.wan))
 	mux.HandleFunc("GET /api/outages", s.auth(s.outages))

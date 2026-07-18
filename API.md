@@ -452,9 +452,10 @@ The payload is a typed, local JSON model; protobuf messages are never embedded.
 Full client MAC addresses are intentionally returned to authenticated local
 administrators. The UI does not transmit them elsewhere.
 
-`domain` is the network identifier. The BSS identifiers are `bssid`, `ssid`,
-and `band`; `bssid` may be an empty string in config-only readback and is never
-synthesized, so it is not a reliable write key.
+`domain` is the network identifier. A BSS reports `bssid`, `ssid`, and `band`;
+`bssid` may be an empty string in config-only readback and is never synthesized,
+so it is not a write key. Wi-Fi mutations select a BSS by its `{ssid, band}`
+pair.
 Router ping fields are derived from router status and history. A ping success is
 a finite sample with `drop_rate < 1`; the one-hour fields are omitted and their
 availability is false when the router history buffer does not cover one hour.
@@ -506,8 +507,9 @@ Accepts one or more safe partial updates:
   "config_revision": "incarnation:42",
   "confirmation": "APPLY WIFI CHANGES",
   "network": {
-    "id": "opaque-bss-id",
     "ssid": "Starlink Cabin",
+    "band": "RF_5GHZ",
+    "new_ssid": "Starlink Studio",
     "security": "WPA2_WPA3",
     "passphrase": "write-only replacement",
     "hidden": false,
@@ -518,7 +520,7 @@ Accepts one or more safe partial updates:
     "enabled": true,
     "channel": 149,
     "channel_width_mhz": 80,
-    "tx_power_percent": 100
+    "tx_power_level": "TX_POWER_LEVEL_100"
   },
   "band_steering_enabled": true,
   "outdoor_mode": false,
@@ -530,12 +532,14 @@ Accepts one or more safe partial updates:
 ```
 
 Every top-level member is optional except `config_revision` and `confirmation`.
-At least one mutation must be present. Allowed security modes map directly to
-the BSS `Auth` oneof: `OPEN` → `AuthOpen`, `WPA2` → `AuthWpa2`, `WPA3` →
-`AuthWpa3`, and `WPA2_WPA3` → `AuthWpa2Wpa3`. A PSK is the selected auth arm's
-`Password`; an open network requires the stronger confirmation `CREATE OPEN
-NETWORK`. A supplied passphrase is accepted only for PSK security and must
-satisfy upstream length constraints.
+At least one mutation must be present. A `network` edit selects exactly one BSS
+with its current non-empty `{ssid, band}` pair; `new_ssid` is the optional
+rename value. The API never accepts a fictional network ID or runtime `bssid`
+as a selector. Allowed security modes map directly to the BSS `Auth` oneof:
+`OPEN` → `AuthOpen`, `WPA2` → `AuthWpa2`, `WPA3` → `AuthWpa3`, and `WPA2_WPA3`
+→ `AuthWpa2Wpa3`. A PSK is the selected auth arm's `Password`; an open network
+requires the stronger confirmation `CREATE OPEN NETWORK`. A supplied passphrase
+is accepted only for PSK security and must satisfy upstream length constraints.
 
 **BLOCKING precondition for network writes:** the only protobuf write is
 `ApplyNetworks`, which replaces the entire networks collection; there is no
@@ -559,9 +563,9 @@ The API exposes only:
   `VHT_BANDWIDTH_160_MHZ`. The 2.4 GHz band accepts only the HT widths. A width
   not supported by that band/router returns `422` without writing; `80+80` is
   not exposed by this integer contract.
-- Per-band `tx_power_percent` values `100`, `80`, `50`, `25`, `12`, and `6`,
-  mapped respectively to `TX_POWER_LEVEL_100`, `_80`, `_50`, `_25`, `_12`, and
-  `_6` through `ApplyTxPowerLevel_2Ghz`, `_5Ghz`, or `_5GhzHigh`.
+- Per-band `tx_power_level` accepts only the real enum names
+  `TX_POWER_LEVEL_100`, `_80`, `_50`, `_25`, `_12`, and `_6`, mapped through
+  `ApplyTxPowerLevel_2Ghz`, `_5Ghz`, or `_5GhzHigh`.
 - Outdoor mode through `ApplyOutdoorMode`, confirmation-gated and only when the
   router reports support. Starwatch relies on firmware regional enforcement;
   DFS enablement remains excluded below.

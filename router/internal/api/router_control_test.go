@@ -25,6 +25,205 @@ import (
 
 const renameMAC = "aa:bb:cc:dd:ee:ff"
 
+func TestWifiPatchAcceptsSSIDBandSelectorAndNewSSID(t *testing.T) {
+	fake := newNetworkRouterFake()
+	response := wifiRequest(networkHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","new_ssid":"Starlink Studio"}}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(fake.wifiWrites) != 1 {
+		t.Fatalf("writes=%d", len(fake.wifiWrites))
+	}
+	write := fake.wifiWrites[0].GetWifiConfig()
+	if !write.GetApplyNetworks() || write.GetApplyDisable_2Ghz() || len(write.GetNetworks()) != 1 {
+		t.Fatalf("write=%+v", write)
+	}
+	sets := write.GetNetworks()[0].GetBasicServiceSets()
+	if sets[0].GetSsid() != "Starlink Guest" || sets[1].GetSsid() != "Starlink Studio" {
+		t.Fatalf("sets=%+v", sets)
+	}
+	if sets[0].GetAuthWpa2().GetPassword() != "existing-sibling-password" || sets[1].GetAuthWpa2().GetPassword() != "existing-target-password" {
+		t.Fatalf("passwords were not preserved")
+	}
+}
+
+func TestWifiNetworkCredentialGuardWithholdsWrite(t *testing.T) {
+	fake := newNetworkRouterFake()
+	fake.config.Networks[0].BasicServiceSets[0].GetAuthWpa2().Password = ""
+	response := wifiRequest(networkHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","hidden":true}}`)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "router network credentials unavailable") || len(fake.wifiWrites) != 0 {
+		t.Fatalf("code=%d writes=%d body=%s", response.Code, len(fake.wifiWrites), response.Body.String())
+	}
+}
+
+func TestWifiNetworkPassphraseIsWriteOnlyAndReadbackDoesNotCompareIt(t *testing.T) {
+	fake := newNetworkRouterFake()
+	fake.redactPasswordOnWrite = true
+	audit := &renameAuditSink{}
+	bus := liveevent.NewBus()
+	live, unsubscribe := bus.Subscribe(1)
+	defer unsubscribe()
+	secret := "new-network-passphrase"
+	response := wifiRequest(networkHandlerWithAudit(t, fake, audit, bus), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","passphrase":"`+secret+`"}}`)
+	if response.Code != http.StatusAccepted || strings.Contains(response.Body.String(), secret) {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := fake.wifiWrites[0].GetWifiConfig().GetNetworks()[0].GetBasicServiceSets()[1].GetAuthWpa2().GetPassword(); got != secret {
+		t.Fatalf("write password=%q", got)
+	}
+	if len(audit.events) != 1 || strings.Contains(audit.events[0].Detail, secret) {
+		t.Fatalf("audit=%+v", audit.events)
+	}
+	select {
+	case message := <-live:
+		encoded, _ := json.Marshal(message.Data)
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("live payload exposes passphrase: %s", encoded)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing network audit publication")
+	}
+}
+
+func TestWifiNetworkOpenRequiresStrongerConfirmation(t *testing.T) {
+	fake := newNetworkRouterFake()
+	response := wifiRequest(networkHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","security":"OPEN"}}`)
+	if response.Code != http.StatusBadRequest || len(fake.wifiWrites) != 0 {
+		t.Fatalf("code=%d writes=%d body=%s", response.Code, len(fake.wifiWrites), response.Body.String())
+	}
+	response = wifiRequest(networkHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"CREATE OPEN NETWORK","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","security":"OPEN"}}`)
+	if response.Code != http.StatusAccepted || fake.config.Networks[0].BasicServiceSets[1].GetAuthOpen() == nil {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWifiNetworkReadbackMismatchIsUnconfirmed(t *testing.T) {
+	fake := newNetworkRouterFake()
+	fake.confirm = false
+	response := wifiRequest(networkHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","hidden":true}}`)
+	if response.Code != http.StatusBadGateway || len(fake.wifiWrites) != 1 {
+		t.Fatalf("code=%d writes=%d body=%s", response.Code, len(fake.wifiWrites), response.Body.String())
+	}
+}
+
+func TestWifiPatchRejectsLegacyNetworkIDsAndExcludedFields(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"legacy network id", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"id":"opaque-bss-id","ssid":"Starlink Cabin","band":"RF_5GHZ","new_ssid":"Starlink Studio"}}`},
+		{"runtime bssid", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","bssid":"00:11:22:33:44:55","new_ssid":"Starlink Studio"}}`},
+		{"firewall", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","firewall":{"enabled":false}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := wifiRequest(NewServer(Deps{Token: "secret", History: history.NewStore(1)}), test.body)
+			if response.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestWifiPatchRejectsAllKnownTopLevelExcludedFields(t *testing.T) {
+	for _, field := range []string{
+		"country_code", "regulatory", "pin", "mesh", "bypass", "ap", "repeater",
+		"dhcp", "firewall", "static_routes", "http_server", "dynamic", "client_keys",
+		"radius", "setup_complete", "sandbox", "disable_set_wifi_config_from_controller",
+		"DisableSetWifiConfigFromController", "factory", "debug",
+	} {
+		t.Run(field, func(t *testing.T) {
+			body := `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","` + field + `":true}`
+			response := wifiRequest(NewServer(Deps{Token: "secret", History: history.NewStore(1)}), body)
+			if response.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestWifiPatchRejectsUnknownNestedNetworkField(t *testing.T) {
+	response := wifiRequest(NewServer(Deps{Token: "secret", History: history.NewStore(1)}), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","new_ssid":"Starlink Studio","unexpected":true}}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWifiPatchRejectsMultipleJSONDocuments(t *testing.T) {
+	response := wifiRequest(NewServer(Deps{Token: "secret", History: history.NewStore(1)}), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","new_ssid":"Starlink Studio"}} {}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWifiPatchRequiresExactConfirmation(t *testing.T) {
+	for _, body := range []string{
+		`{"config_revision":"incarnation:7","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","new_ssid":"Starlink Studio"}}`,
+		`{"config_revision":"incarnation:7","confirmation":"RENAME WIFI","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","new_ssid":"Starlink Studio"}}`,
+	} {
+		response := wifiRequest(NewServer(Deps{Token: "secret", History: history.NewStore(1)}), body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestWifiPatchRejectsOversizeBody(t *testing.T) {
+	body := `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","network":{"ssid":"Starlink Cabin","band":"RF_5GHZ","new_ssid":"` + strings.Repeat("a", 128<<10) + `"}}`
+	response := wifiRequest(NewServer(Deps{Token: "secret", History: history.NewStore(1)}), body)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWifiScalarWritesUseExactlyOneApplyFlag(t *testing.T) {
+	tests := []struct{ name, body string }{
+		{"band enable", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","radio":{"band":"RF_2GHZ","enabled":true}}`},
+		{"width", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","radio":{"band":"RF_5GHZ","channel_width_mhz":80}}`},
+		{"tx power", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","radio":{"band":"RF_5GHZ_HIGH","tx_power_level":"TX_POWER_LEVEL_50"}}`},
+		{"steering", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","band_steering_enabled":true}`},
+		{"outdoor", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","outdoor_mode":true}`},
+		{"nameservers", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","dns":{"servers":["1.1.1.1"]}}`},
+		{"secure dns", `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","dns":{"secure":true}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRenameRouterFake()
+			response := wifiRequest(renameHandler(t, fake), test.body)
+			if response.Code != http.StatusAccepted || len(fake.wifiWrites) != 1 {
+				t.Fatalf("code=%d writes=%d body=%s", response.Code, len(fake.wifiWrites), response.Body.String())
+			}
+			config := fake.wifiWrites[0].GetWifiConfig()
+			if config.GetIncarnation() != 7 || countApplyFlags(config) != 1 || config.GetApplyNetworks() || config.GetApplyClientConfigs() {
+				t.Fatalf("unsafe config=%+v apply=%d", config, countApplyFlags(config))
+			}
+		})
+	}
+}
+
+func TestWifiScalarChannelIsWithheldWithoutWrite(t *testing.T) {
+	fake := newRenameRouterFake()
+	response := wifiRequest(renameHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","radio":{"band":"RF_5GHZ","channel":149}}`)
+	if response.Code != http.StatusUnprocessableEntity || len(fake.wifiWrites) != 0 {
+		t.Fatalf("code=%d writes=%d body=%s", response.Code, len(fake.wifiWrites), response.Body.String())
+	}
+}
+
+func TestWifiScalarReadbackAndUnsupportedFailures(t *testing.T) {
+	fake := newRenameRouterFake()
+	fake.confirm = false
+	response := wifiRequest(renameHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","outdoor_mode":true}`)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+	fake = newRenameRouterFake()
+	fake.wifiWriteErr = status.Error(codes.Unimplemented, "unsupported")
+	response = wifiRequest(renameHandler(t, fake), `{"config_revision":"incarnation:7","confirmation":"APPLY WIFI CHANGES","outdoor_mode":true}`)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestRenameClientAcceptsTargetedReadMergedRename(t *testing.T) {
 	fake := newRenameRouterFake()
 	audit := &renameAuditSink{}
@@ -406,6 +605,28 @@ func renameHandlerWithSnapshot(t *testing.T, fake *renameRouterFake, snapshot di
 	return NewServer(Deps{Token: "secret", Snapshot: snapshotStub{snapshot: snapshot}, History: history.NewStore(1), RouterMutations: controller})
 }
 
+func networkHandler(t *testing.T, fake *renameRouterFake) http.Handler {
+	t.Helper()
+	return networkHandlerWithAudit(t, fake, nil, nil)
+}
+
+func networkHandlerWithAudit(t *testing.T, fake *renameRouterFake, audit *renameAuditSink, bus *liveevent.Bus) http.Handler {
+	t.Helper()
+	address := startRenameRouter(t, fake)
+	controller := dish.NewRouterMutationController(dish.RouterMutationOptions{
+		ResolveGateway: func(context.Context) (string, error) { return address, nil },
+		Dial:           dish.DialRouterMutation,
+	})
+	deps := Deps{Token: "secret", Snapshot: snapshotStub{snapshot: dish.Snapshot{Topology: dish.TopologyFull, StarlinkRouter: &dish.StarlinkRouter{Reachable: true, ConfigRevision: "incarnation:7"}}}, History: history.NewStore(1), RouterMutations: controller}
+	if audit != nil {
+		deps.AuditEvents = audit
+	}
+	if bus != nil {
+		deps.AuditLive = bus
+	}
+	return NewServer(deps)
+}
+
 func renameRequest(handler http.Handler, mac, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPatch, "/api/router/clients/"+mac, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer secret")
@@ -414,16 +635,27 @@ func renameRequest(handler http.Handler, mac, body string) *httptest.ResponseRec
 	return response
 }
 
+func wifiRequest(handler http.Handler, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPatch, "/api/router/wifi", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	return response
+}
+
 type renameRouterFake struct {
 	device.UnimplementedDeviceServer
-	mu                  sync.Mutex
-	config              *device.WifiConfig
-	clients             []*device.WifiClient
-	writes              []*device.WifiSetClientGivenNameRequest
-	writeErr            error
-	confirm             bool
-	createConfigOnWrite bool
-	dropConfigOnWrite   bool
+	mu                    sync.Mutex
+	config                *device.WifiConfig
+	clients               []*device.WifiClient
+	writes                []*device.WifiSetClientGivenNameRequest
+	wifiWrites            []*device.WifiSetConfigRequest
+	writeErr              error
+	wifiWriteErr          error
+	confirm               bool
+	redactPasswordOnWrite bool
+	createConfigOnWrite   bool
+	dropConfigOnWrite     bool
 }
 
 func newRenameRouterFake() *renameRouterFake {
@@ -438,6 +670,15 @@ func newRenameRouterFake() *renameRouterFake {
 		clients: []*device.WifiClient{{MacAddress: renameMAC, GivenName: "Old Mac", ClientId: 42}},
 		confirm: true,
 	}
+}
+
+func newNetworkRouterFake() *renameRouterFake {
+	fake := newRenameRouterFake()
+	fake.config.Networks = []*device.WifiConfig_Network{{BasicServiceSets: []*device.WifiConfig_BasicServiceSet{
+		{Ssid: "Starlink Guest", Band: device.WifiConfig_RF_2GHZ, Auth: &device.WifiConfig_BasicServiceSet_AuthWpa2{AuthWpa2: &device.AuthWpa2{Password: "existing-sibling-password"}}},
+		{Ssid: "Starlink Cabin", Band: device.WifiConfig_RF_5GHZ, Auth: &device.WifiConfig_BasicServiceSet_AuthWpa2{AuthWpa2: &device.AuthWpa2{Password: "existing-target-password"}}},
+	}}}
+	return fake
 }
 
 type renameAuditSink struct{ events []history.Event }
@@ -479,9 +720,90 @@ func (f *renameRouterFake) Handle(_ context.Context, request *device.Request) (*
 			}
 		}
 		return &device.Response{}, nil
+	case *device.Request_WifiSetConfig:
+		f.wifiWrites = append(f.wifiWrites, proto.Clone(typed.WifiSetConfig).(*device.WifiSetConfigRequest))
+		if f.wifiWriteErr != nil {
+			return nil, f.wifiWriteErr
+		}
+		if f.confirm {
+			applyFakeWifiConfig(f.config, typed.WifiSetConfig.GetWifiConfig())
+			if f.redactPasswordOnWrite {
+				for _, network := range f.config.GetNetworks() {
+					for _, bss := range network.GetBasicServiceSets() {
+						if auth := bss.GetAuthWpa2(); auth != nil {
+							auth.Password = ""
+						}
+					}
+				}
+			}
+		}
+		return &device.Response{Response: &device.Response_WifiSetConfig{WifiSetConfig: &device.WifiSetConfigResponse{UpdatedWifiConfig: proto.Clone(f.config).(*device.WifiConfig)}}}, nil
 	default:
 		return nil, status.Errorf(codes.Unimplemented, "unexpected request %T", request.GetRequest())
 	}
+}
+
+func applyFakeWifiConfig(target, write *device.WifiConfig) {
+	if write.GetApplyDisable_2Ghz() {
+		target.Disable_2Ghz = write.GetDisable_2Ghz()
+	}
+	if write.GetApplyDisable_5Ghz() {
+		target.Disable_5Ghz = write.GetDisable_5Ghz()
+	}
+	if write.GetApplyDisable_5GhzHigh() {
+		target.Disable_5GhzHigh = write.GetDisable_5GhzHigh()
+	}
+	if write.GetApplyHtBandwidth_2Ghz() {
+		target.HtBandwidth_2Ghz = write.GetHtBandwidth_2Ghz()
+	}
+	if write.GetApplyHtBandwidth_5Ghz() {
+		target.HtBandwidth_5Ghz = write.GetHtBandwidth_5Ghz()
+	}
+	if write.GetApplyHtBandwidth_5GhzHigh() {
+		target.HtBandwidth_5GhzHigh = write.GetHtBandwidth_5GhzHigh()
+	}
+	if write.GetApplyVhtBandwidth() {
+		target.VhtBandwidth = write.GetVhtBandwidth()
+	}
+	if write.GetApplyVhtBandwidth_5GhzHigh() {
+		target.VhtBandwidth_5GhzHigh = write.GetVhtBandwidth_5GhzHigh()
+	}
+	if write.GetApplyTxPowerLevel_2Ghz() {
+		target.TxPowerLevel_2Ghz = write.GetTxPowerLevel_2Ghz()
+	}
+	if write.GetApplyTxPowerLevel_5Ghz() {
+		target.TxPowerLevel_5Ghz = write.GetTxPowerLevel_5Ghz()
+	}
+	if write.GetApplyTxPowerLevel_5GhzHigh() {
+		target.TxPowerLevel_5GhzHigh = write.GetTxPowerLevel_5GhzHigh()
+	}
+	if write.GetApplyDisableBandSteering() {
+		target.DisableBandSteering = write.GetDisableBandSteering()
+	}
+	if write.GetApplyOutdoorMode() {
+		target.OutdoorMode = write.GetOutdoorMode()
+	}
+	if write.GetApplyNameservers() {
+		target.Nameservers = append([]string(nil), write.GetNameservers()...)
+	}
+	if write.GetApplySecureDns() {
+		target.SecureDns = write.GetSecureDns()
+	}
+	if write.GetApplyNetworks() {
+		target.Networks = proto.Clone(&device.WifiConfig{Networks: write.GetNetworks()}).(*device.WifiConfig).GetNetworks()
+	}
+}
+
+func countApplyFlags(config *device.WifiConfig) int {
+	count := 0
+	fields := config.ProtoReflect().Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if strings.HasPrefix(string(field.Name()), "apply_") && config.ProtoReflect().Get(field).Bool() {
+			count++
+		}
+	}
+	return count
 }
 
 func assertJSONKeys(t *testing.T, encoded string, want ...string) {

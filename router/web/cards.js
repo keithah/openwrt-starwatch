@@ -160,10 +160,79 @@ export function HardwareCard({snapshot}) {
   return html`<${Card} title="Hardware" eyebrow="Terminal identity"><dl class="details"><dt>Model</dt><dd title=${av?.reason||''}>${show(friendlyModel(info.hardware_version))}</dd><dt>Hardware</dt><dd>${show(info.hardware_version)}</dd><dt>Firmware</dt><dd>${show(info.software_version)}</dd><dt>Dish ID</dt><dd>${show(info.id)}</dd><dt>Country</dt><dd>${show(info.country_code)}</dd><dt>Mobility</dt><dd>${show(snapshot.dish?.mobility_class)}</dd></dl></${Card}>`;
 }
 
-export function StarlinkRouterCard({router}) {
+const wifiBSS = router => (router?.networks || []).flatMap(network => (network.basic_service_sets || []).map(bss => ({...bss, domain: network.domain})));
+const radioLabel = radio => `${radio.band || 'Radio'} · ch ${radio.channel ?? 'auto'} · ${radio.channel_width_mhz ?? '—'} MHz`;
+
+export class WifiEditor extends Component {
+  constructor(props) {
+    super(props);
+    const bss = wifiBSS(props.router)[0] || {};
+    this.state = {selected: bss.ssid ? `${bss.ssid}::${bss.band}` : '', ssid: bss.ssid || '', passphrase: '', security: bss.security || '', hidden: !!bss.hidden, disabled: !!bss.disabled, pending: null, typedConfirmation: '', error: '', retry: null, busy: false};
+  }
+
+  componentDidUpdate(previousProps, previousState) {
+    if (previousProps.router !== this.props.router && !this.state.pending) this.selectDefault(this.props.router);
+    if (!previousState.pending && this.state.pending) this.confirmInput?.focus();
+  }
+  selectDefault = router => {
+    const bss = wifiBSS(router)[0];
+    if (bss) this.selectBSS(bss);
+  };
+  selectBSS = bss => this.setState({selected: `${bss.ssid}::${bss.band}`, ssid: bss.ssid || '', passphrase: '', security: bss.security || '', hidden: !!bss.hidden, disabled: !!bss.disabled, error: '', retry: null});
+  currentBSS = router => wifiBSS(router).find(item => `${item.ssid}::${item.band}` === this.state.selected);
+  openConfirm = (mutation, label, trigger, openNetwork = false) => {
+    this.trigger = trigger;
+    this.setState({pending: {mutation, label, openNetwork}, typedConfirmation: '', error: '', retry: null});
+  };
+  closeConfirm = () => this.setState({pending: null, typedConfirmation: '', error: '', retry: null}, () => this.trigger?.focus());
+  dialogKeyDown = event => {
+    if (event.key === 'Escape') { event.preventDefault(); this.closeConfirm(); return; }
+    if (event.key !== 'Tab') return;
+    const focusable = [...this.confirmDialog?.querySelectorAll('button:not([disabled]), input:not([disabled])') || []];
+    const first = focusable[0], last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  };
+  submit = async pending => {
+    const expected = pending.openNetwork ? 'CREATE OPEN NETWORK' : 'APPLY WIFI CHANGES';
+    if ((this.confirmInput?.value ?? this.state.typedConfirmation) !== expected) { this.setState({error: `Type ${expected} to confirm.`}); return; }
+    this.setState({busy: true, error: '', retry: null});
+    try {
+      await this.props.onMutate(pending.mutation);
+      this.setState({pending: null, passphrase: '', typedConfirmation: ''}, () => this.trigger?.focus());
+    } catch (error) {
+      this.setState({error: error.message || 'Wi-Fi update failed.', retry: error.retry ? pending : null});
+    } finally { this.setState({busy: false}); }
+  };
+  openBSS = event => {
+    const bss = this.currentBSS(this.props.router);
+    if (!bss) return;
+    const network = {ssid: bss.ssid, band: bss.band, newSSID: this.state.ssid.trim(), passphrase: this.state.passphrase, security: this.state.security, hidden: this.state.hidden, disabled: this.state.disabled};
+    this.openConfirm({network}, `Update ${bss.ssid} (${bss.band})`, event.currentTarget, this.state.security === 'OPEN');
+  };
+  render({router}, state) {
+    if (!router?.reachable && router?.reachable !== undefined) return null;
+    const bsses = wifiBSS(router), current = this.currentBSS(router);
+    const radios = router.radios || [];
+    return html`<section class="wifi-editor" aria-labelledby="wifi-editor-title">
+      <div class="wifi-editor-heading"><div><span class="eyebrow">TOPOLOGY B · GUARDED WRITES</span><h3 id="wifi-editor-title">Wi-Fi configuration</h3></div><span class="badge">revision ${router.config_revision || 'unavailable'}</span></div>
+      <p class="card-note">Each change is confirmed by the router. Passphrases are write-only and are never read back.</p>
+      ${state.error && !state.pending && html`<div class="control-banner disabled" role="status" aria-live="polite">${state.error}${state.retry && html` <button class="button subtle" type="button" onClick=${() => this.openConfirm(state.retry.mutation, state.retry.label, this.trigger, state.retry.openNetwork)}>Retry with refreshed revision</button>`}</div>`}
+      ${bsses.length ? html`<fieldset class="wifi-panel"><legend>Network</legend><label>Wi-Fi network<select value=${state.selected} onChange=${event => this.selectBSS(bsses.find(item => `${item.ssid}::${item.band}` === event.currentTarget.value))}>${bsses.map(bss => html`<option value=${`${bss.ssid}::${bss.band}`}>${bss.ssid} · ${bss.band}</option>`)}</select></label>
+        <div class="wifi-fields"><label>Network name<input value=${state.ssid} maxlength="128" onInput=${event => this.setState({ssid: event.currentTarget.value})}/></label><label>Passphrase <small>write-only</small><input type="password" autocomplete="new-password" placeholder="Unchanged" value=${state.passphrase} onInput=${event => this.setState({passphrase: event.currentTarget.value})}/></label><label>Security<select value=${state.security} onChange=${event => this.setState({security: event.currentTarget.value})}>${['OPEN','WPA2','WPA3','WPA2_WPA3'].map(value => html`<option value=${value}>${value}</option>`)}</select></label></div>
+        <div class="wifi-toggles"><label><input type="checkbox" checked=${state.hidden} onChange=${event => this.setState({hidden: event.currentTarget.checked})}/> Hidden network</label><label><input type="checkbox" checked=${state.disabled} onChange=${event => this.setState({disabled: event.currentTarget.checked})}/> Disable network</label></div><button data-wifi-edit class="button primary" type="button" disabled=${!current || state.busy} onClick=${this.openBSS}>Review network change</button>
+      </fieldset>` : html`<div class="empty">No Wi-Fi networks reported yet.</div>`}
+      ${radios.length ? html`<fieldset class="wifi-panel"><legend>Radios</legend><div class="wifi-radio-list">${radios.map(radio => html`<div class="wifi-radio-row"><strong>${radioLabel(radio)}</strong><span>${radio.tx_power_level || 'Power unavailable'}</span><button class="button subtle" type="button" disabled=${state.busy} onClick=${event => this.openConfirm({radio: {band: radio.band, disabled: !radio.disabled}}, `${radio.disabled ? 'Enable' : 'Disable'} ${radio.band}`, event.currentTarget)}> ${radio.disabled ? 'Enable' : 'Disable'} </button></div>`)}</div></fieldset>` : ''}
+      <fieldset class="wifi-panel"><legend>Router options</legend><div class="wifi-options"><button class="button subtle" type="button" disabled=${state.busy} onClick=${event => this.openConfirm({steering: !(router.disable_band_steering || false)}, 'Toggle band steering', event.currentTarget)}>Band steering</button><button class="button subtle" type="button" disabled=${state.busy} onClick=${event => this.openConfirm({outdoorMode: !router.outdoor_mode}, 'Toggle outdoor mode', event.currentTarget)}>Outdoor mode</button><button class="button subtle" type="button" disabled=${state.busy} onClick=${event => this.openConfirm({secureDNS: !router.secure_dns}, 'Toggle secure DNS', event.currentTarget)}>Secure DNS</button></div></fieldset>
+      ${state.pending && html`<div class="wifi-confirm-layer" role="presentation"><section class="wifi-confirm" role="dialog" aria-modal="true" aria-labelledby="wifi-confirm-title" onKeyDown=${this.dialogKeyDown} ref=${node => { this.confirmDialog = node; }}><span class="eyebrow">ROUTER WI-FI</span><h3 id="wifi-confirm-title">${state.pending.label}?</h3>${state.pending.openNetwork && html`<p class="wifi-open-warning">OPEN NETWORK — nearby devices can join without a passphrase.</p>`}<p>Type <code>${state.pending.openNetwork ? 'CREATE OPEN NETWORK' : 'APPLY WIFI CHANGES'}</code> to confirm. This uses revision <code>${router.config_revision || 'unavailable'}</code>.</p>${state.error && html`<div class="client-confirm-error" role="status" aria-live="polite">${state.error}</div>`}<label>Confirmation<input autocomplete="off" value=${state.typedConfirmation} onInput=${event => this.setState({typedConfirmation: event.currentTarget.value, error: ''})} ref=${node => { this.confirmInput = node; }}/></label><div class="control-actions"><button class="button warning" type="button" disabled=${state.busy} onClick=${() => this.submit(state.pending)}>Apply Wi-Fi change</button><button class="button subtle" type="button" disabled=${state.busy} onClick=${this.closeConfirm}>Cancel</button></div></section></div>`}
+    </section>`;
+  }
+}
+
+export function StarlinkRouterCard({router, onMutate}) {
   if (!router) return null;
   const device = router.device || router;
-  return html`<${Card} title="Starlink router" eyebrow="Topology B · local read model"><div class="metric-grid"><${Metric} label="Hardware" value=${device.hardware_version}/><${Metric} label="Firmware" value=${device.software_version}/><${Metric} label="Clients" value=${router.clients?.length ?? router.client_count}/><${Metric} label="Uptime" value=${formatDuration(device.uptime_seconds ?? router.uptime_seconds)}/></div>${router.ping&&html`<div class="router-card"><div class="metric-grid"><${Metric} label="Latency" value=${number(router.ping.latency_mean_ms)} unit="ms"/><${Metric} label="Loss" value=${percent(router.ping.drop_rate)}/></div></div>`}</${Card}>`;
+  return html`<${Card} title="Starlink router" eyebrow="Topology B · local read model"><div class="metric-grid"><${Metric} label="Hardware" value=${device.hardware_version}/><${Metric} label="Firmware" value=${device.software_version}/><${Metric} label="Clients" value=${router.clients?.length ?? router.client_count}/><${Metric} label="Uptime" value=${formatDuration(device.uptime_seconds ?? router.uptime_seconds)}/></div>${router.ping&&html`<div class="router-card"><div class="metric-grid"><${Metric} label="Latency" value=${number(router.ping.latency_mean_ms)} unit="ms"/><${Metric} label="Loss" value=${percent(router.ping.drop_rate)}/></div></div>`}<${WifiEditor} router=${router} onMutate=${onMutate}/></${Card}>`;
 }
 
 export class ClientManagement extends Component {

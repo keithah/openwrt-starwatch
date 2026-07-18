@@ -3,7 +3,7 @@ import htm from './vendor/htm.module.js';
 import {APIError, apiFetch, bootstrapToken, getHistory, LiveClient, storeToken} from './api.js';
 import {StatusHeader, GraphCard, ObstructionCard, OutageCard, AlignmentCard, PowerCard, WANCard, ControlsCard, SpeedCard, AlertsCard, HardwareCard, StarlinkRouterCard, ClientManagementCard} from './cards.js';
 import {TokenView, SettingsView, EventsView} from './views.js';
-import {clientMutationPayload, clientMutationShouldRetry, normalizeCardPreferences} from './logic.js';
+import {clientMutationPayload, clientMutationShouldRetry, normalizeCardPreferences, wifiMutationPayload, wifiMutationShouldRetry} from './logic.js';
 
 const html = htm.bind(h);
 const graphSeries = {
@@ -134,6 +134,22 @@ class App extends Component {
       throw error;
     }
   };
+  mutateRouterWifi = async mutation => {
+    const payload = wifiMutationPayload({configRevision: this.state.router?.config_revision, ...mutation});
+    try {
+      await this.request('/api/router/wifi', {method:'PATCH', body:JSON.stringify(payload)});
+      await this.refreshRouter();
+    } catch (error) {
+      // As with client changes, refresh stale telemetry but require the user to
+      // review and explicitly retry the write against the new revision.
+      if (wifiMutationShouldRetry(error)) {
+        try { await this.refreshRouter(); } catch (_) {}
+        error.retry = true;
+        error.message = `${error.message}. Router data was refreshed; review and retry.`;
+      }
+      throw error;
+    }
+  };
 
   control = async (action, params={}, confirmation='') => {
     if (confirmation==='typed'&&prompt('Type REBOOT to confirm. The dish will be offline 2–5 minutes.')!=='REBOOT')return;
@@ -176,7 +192,7 @@ class App extends Component {
     {id:'speed-test',label:'Speed test',available:true,render:()=>html`<${SpeedCard} speed=${state.speed} history=${state.speedHistory} onRun=${this.runSpeed} reachable=${state.snapshot.dish_reachable}/>`},
     {id:'alerts',label:'Alerts',available:true,render:()=>html`<${AlertsCard} snapshot=${state.snapshot} events=${state.events}/>`},
     {id:'hardware',label:'Hardware',available:!!state.snapshot.device_info,render:()=>html`<${HardwareCard} snapshot=${state.snapshot}/>`},
-    {id:'starlink-router',label:'Starlink router',available:!!state.router,render:()=>html`<${StarlinkRouterCard} router=${state.router}/>`},
+    {id:'starlink-router',label:'Starlink router',available:!!state.router,render:()=>html`<${StarlinkRouterCard} router=${state.router} onMutate=${this.mutateRouterWifi}/>`},
     {id:'client-management',label:'Client management',available:!!state.router,render:()=>html`<${ClientManagementCard} router=${state.router} onMutate=${this.mutateRouterClient}/>`},
   ]; }
   dashboard(state) { const cards=this.cardRegistry(state); const preferences=normalizeCardPreferences(cards,state.cardPreferences); const byID=new Map(cards.map(card=>[card.id,card])); return html`<main id="dashboard" class="dashboard"><nav class="quick-nav"><a href="#/events">Events</a><a href="#/settings">Settings</a></nav><div class="card-grid">${preferences.order.filter(id=>!preferences.hidden[id]).map(id=>byID.get(id)).filter(card=>card?.available).map(card=>card.render())}</div></main>`; }

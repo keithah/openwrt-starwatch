@@ -9,12 +9,12 @@ import {
   deriveState, availabilityValue, localMinutesToUTC, utcMinutesToLocal,
   friendlyModel, hasMotors, assembleSeries, outageBarLayout,
   normalizeCardPreferences, visibleCardOrder, clientMutationPayload,
-  clientMutationShouldRetry,
+  clientMutationShouldRetry, wifiMutationPayload, wifiMutationShouldRetry,
 } from './logic.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
 import {APIError} from './api.js';
 import {h, render} from './vendor/preact.module.js';
-import {ClientManagement} from './cards.js';
+import {ClientManagement, WifiEditor} from './cards.js';
 
 const results = [];
 const assert = (name, condition) => {
@@ -79,6 +79,45 @@ try {
   const unblockPayload = clientMutationPayload({configRevision: 'incarnation:21', blocked: false});
   assert('unblock payload carries typed confirmation and boolean state', unblockPayload.confirmation === 'UNBLOCK CLIENT' && unblockPayload.blocked === false);
   assert('only a stale revision requests refresh and retry', clientMutationShouldRetry({status: 409}) === true && clientMutationShouldRetry({status: 422}) === false);
+  const wifiPayload = wifiMutationPayload({configRevision: 'incarnation:22', network: {ssid: 'Starlink Cabin', band: 'RF_5GHZ', newSSID: 'Starlink Studio', passphrase: ''}});
+  assert('Wi-Fi BSS payload uses ssid plus band selector and new_ssid', wifiPayload.network.ssid === 'Starlink Cabin' && wifiPayload.network.band === 'RF_5GHZ' && wifiPayload.network.new_ssid === 'Starlink Studio' && !('id' in wifiPayload.network) && !('bssid' in wifiPayload.network));
+  assert('empty Wi-Fi passphrase is omitted rather than clearing credentials', !('passphrase' in wifiPayload.network));
+  assert('only a stale Wi-Fi revision requests refresh and retry', wifiMutationShouldRetry({status: 409}) === true && wifiMutationShouldRetry({status: 422}) === false);
+  const wifiHost = document.createElement('div');
+  document.body.append(wifiHost);
+  const wifiRouter = {config_revision: 'incarnation:23', networks: [{domain: 'lan', basic_service_sets: [{ssid: 'Guest', band: 'RF_2GHZ', security: 'OPEN', credential_set: false}]}], radios: [{band: 'RF_2GHZ', channel: 1, channel_width_mhz: 20, disabled: false, tx_power_level: 'TX_POWER_LEVEL_80'}]};
+  let wifiCalls = 0;
+  render(h(WifiEditor, {router: wifiRouter, onMutate: async () => { wifiCalls++; }}), wifiHost);
+  const passphraseField = wifiHost.querySelector('input[type="password"]');
+  assert('Wi-Fi editor keeps passphrase write-only and unchanged by default', !!passphraseField && passphraseField.value === '' && passphraseField.getAttribute('placeholder') === 'Unchanged' && !wifiHost.textContent.includes('existing-password'));
+  const editWiFi = wifiHost.querySelector('[data-wifi-edit]');
+  editWiFi.focus();
+  editWiFi.click();
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  const wifiDialog = document.querySelector('.wifi-confirm');
+  const wifiInput = wifiDialog.querySelector('input');
+  assert('open Wi-Fi confirmation moves focus to the typed confirmation input', document.activeElement === wifiInput && wifiDialog.textContent.includes('OPEN NETWORK'));
+  wifiDialog.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  await Promise.resolve();
+  assert('escape closes Wi-Fi confirmation and restores the invoking trigger', !document.querySelector('.wifi-confirm') && document.activeElement === editWiFi);
+  render(null, wifiHost);
+  wifiHost.remove();
+  const wifiReason = 'router firmware does not support this channel';
+  const wifiErrorHost = document.createElement('div');
+  document.body.append(wifiErrorHost);
+  render(h(WifiEditor, {router: wifiRouter, onMutate: async () => { throw new APIError(wifiReason, 422); }}), wifiErrorHost);
+  wifiErrorHost.querySelector('[data-wifi-edit]').click();
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  const failedDialog = document.querySelector('.wifi-confirm');
+  const failedInput = failedDialog.querySelector('input');
+  failedInput.value = 'APPLY WIFI CHANGES';
+  failedInput.dispatchEvent(new Event('input', {bubbles: true}));
+  failedDialog.querySelector('button').click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const wifiStatus = document.querySelector('.wifi-confirm [role="status"][aria-live="polite"]');
+  assert('422 Wi-Fi reason is shown verbatim in the confirmation dialog', wifiStatus?.textContent === wifiReason);
+  render(null, wifiErrorHost);
+  wifiErrorHost.remove();
   const clientHost = document.createElement('div');
   document.body.append(clientHost);
   render(h(ClientManagement, {router: null, onMutate: async () => {}}), clientHost);
