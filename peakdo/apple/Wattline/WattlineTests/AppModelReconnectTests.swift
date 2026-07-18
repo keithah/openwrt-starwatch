@@ -316,6 +316,50 @@ final class AppModelReconnectTests: XCTestCase {
         XCTAssertEqual(model.route, .scan)
     }
 
+    func testDirectConnectionPublishesBrokerReadinessBeforeConnectedPresentation() async throws {
+        let transport = ControlledConnectionTransport()
+        let initialPublication = AsyncGate()
+        let completionPublication = AsyncGate()
+        let gate = AsyncGate()
+        let suiteName = "WattlineTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let persistence = AppPersistence(defaults: defaults)
+        let model = AppModel(
+            persistence: persistence,
+            transportFactory: { transport },
+            brokerPublicationBarrier: {
+                if await transport.connectCount == 0 {
+                    await initialPublication.open()
+                    return
+                }
+                await completionPublication.open()
+                await gate.wait()
+            }
+        )
+        let device = DiscoveredDevice(
+            id: UUID(),
+            localName: "Link-Power 2",
+            rssi: -40,
+            mode: .application
+        )
+
+        model.requestBluetoothAfterPriming()
+        await initialPublication.wait()
+        model.choose(device)
+        try await waitUntil { await transport.connectCount == 1 }
+        await transport.succeedConnect(at: 0, deliverConnectedEvent: false)
+        await completionPublication.wait()
+
+        XCTAssertNotEqual(model.connectionStatus, .connected)
+        await gate.open()
+        try await waitUntil {
+            await MainActor.run { model.connectionStatus == .connected }
+        }
+        let hasConnectedContext = await model.deviceOperationBroker.hasConnectedContext
+        XCTAssertTrue(hasConnectedContext)
+    }
+
     func testReturnToScanRejectsLateScopedConnectedAndHandshake() async throws {
         let transport = ControlledConnectionTransport()
         let suiteName = "WattlineTests.\(UUID().uuidString)"

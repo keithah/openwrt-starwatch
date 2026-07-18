@@ -78,17 +78,19 @@ final class SettingsOperationTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         let persistence = AppPersistence(defaults: defaults)
-        persistence.onboardingComplete = true
         let model = AppModel(persistence: persistence, transportFactory: { transport })
         model.requestBluetoothAfterPriming()
         model.choose(DiscoveredDevice(id: UUID(), localName: "Link-Power 2", rssi: -40, mode: .application))
-        try await eventually { model.connectionStatus == .connected }
+        try await eventually {
+            guard model.connectionStatus == .connected else { return false }
+            return await model.deviceOperationBroker.hasConnectedContext
+        }
         return model
     }
 
-    private func eventually(condition: @escaping () -> Bool) async throws {
+    private func eventually(condition: @escaping () async -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
-        while !condition() {
+        while !(await condition()) {
             if ContinuousClock.now >= deadline { XCTFail("Condition was not met before timeout"); return }
             try await Task.sleep(for: .milliseconds(10))
         }

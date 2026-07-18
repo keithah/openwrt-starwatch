@@ -985,36 +985,33 @@ final class AppModel {
     }
 
     private func completeConnectionOperation(_ key: ConnectionOperationKey) async {
-        guard connectionOperationKey == key,
-              transportGeneration == key.transportGeneration,
-              operationGeneration == key.operationGeneration,
-              selectedPeripheralID == key.peripheralID,
-              !retiredConnectionScopeIDs.contains(key.scope.sessionID),
-              activeConnectionScope == nil || activeConnectionScope == key.scope
-        else { return }
+        guard connectionOperationKey == key, isCurrent(key) else { return }
         activeConnectionScope = key.scope
         connectionOperationKey = nil
-        establishConnectedPresentation(scope: key.scope)
         if let session {
             await session.receive(.connected(key.scope))
         }
-        guard transportGeneration == key.transportGeneration,
-              selectedPeripheralID == key.peripheralID,
-              activeConnectionScope == key.scope
-        else { return }
-        let brokerContext = prepareBrokerContext(
+
+        let context = prepareBrokerContext(
             peripheralID: key.peripheralID,
             generation: key.transportGeneration
         )
-        await publishBrokerContext(brokerContext)
-        guard transportGeneration == key.transportGeneration,
-              selectedPeripheralID == key.peripheralID,
-              activeConnectionScope == key.scope
-        else { return }
+        await publishBrokerContext(context)
+        guard isCurrent(key) else { return }
         await deviceOperationBroker.markConnected(
             peripheralID: key.peripheralID,
             generation: key.transportGeneration
         )
+        guard isCurrent(key) else { return }
+        establishConnectedPresentation(scope: key.scope)
+    }
+
+    private func isCurrent(_ key: ConnectionOperationKey) -> Bool {
+        transportGeneration == key.transportGeneration
+            && operationGeneration == key.operationGeneration
+            && selectedPeripheralID == key.peripheralID
+            && !retiredConnectionScopeIDs.contains(key.scope.sessionID)
+            && (activeConnectionScope == nil || activeConnectionScope == key.scope)
     }
 
     private func requestBrokerReconnect(_ attempt: DeviceOperationBroker.ConnectionAttempt) async {
