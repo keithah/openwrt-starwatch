@@ -6,49 +6,54 @@ import XCTest
 final class RouterCommandMapperTests: XCTestCase {
     private let mapper = RouterCommandMapper()
 
-    func testMapsAllowListedActionsWithTelemetryReconcilers() throws {
+    func testMapsCanonicalGranularControlsWithTelemetryReconcilers() throws {
         let dc = try mapper.route(for: .setDC(true))
         XCTAssertEqual(dc.method, "POST")
-        XCTAssertEqual(dc.path, "/api/v1/device/action")
-        XCTAssertEqual(try bodyString(dc, key: "action"), "dc_on")
+        XCTAssertEqual(dc.path, "/api/v1/device/dc")
+        XCTAssertEqual(try bodyBool(dc, key: "on"), true)
         XCTAssertEqual(dc.confirmation, .telemetry(.dcEnabled(true), timeout: .seconds(3)))
 
         let typeC = try mapper.route(for: .setTypeCOutput(false))
-        XCTAssertEqual(try bodyString(typeC, key: "action"), "usbc_off")
+        XCTAssertEqual(typeC.path, "/api/v1/device/usbc/output")
+        XCTAssertEqual(try bodyBool(typeC, key: "on"), false)
         XCTAssertEqual(typeC.confirmation, .telemetry(.typeCOutput(false), timeout: .seconds(3)))
 
         let bypass = try mapper.route(for: .setBypass(true))
-        XCTAssertEqual(try bodyString(bypass, key: "action"), "bypass_on")
+        XCTAssertEqual(bypass.path, "/api/v1/device/dc/bypass")
+        XCTAssertEqual(try bodyBool(bypass, key: "on"), true)
         XCTAssertEqual(bypass.confirmation, .telemetry(.bypass(true), timeout: .seconds(10)))
         XCTAssertTrue(bypass.ignoresResponseResult)
     }
 
     func testMapsPowerLimitSetClearAndGetToDocumentedContract() throws {
         let set = try mapper.route(for: .setPowerLimit(.output, level: .watts100))
-        XCTAssertEqual(set.method, "POST")
-        XCTAssertEqual(set.path, "/api/v1/device/usbc-limit")
-        XCTAssertEqual(try bodyString(set, key: "type"), "output")
+        XCTAssertEqual(set.method, "PUT")
+        XCTAssertEqual(set.path, "/api/v1/device/usbc/limit/output")
         XCTAssertEqual(try bodyInt(set, key: "watts"), 100)
         XCTAssertEqual(set.confirmation, .powerLimit(.output))
 
         let clear = try mapper.route(for: .clearPowerLimit(.input))
-        XCTAssertEqual(try bodyString(clear, key: "type"), "input")
-        XCTAssertEqual(try bodyBool(clear, key: "clear"), true)
+        XCTAssertEqual(clear.method, "DELETE")
+        XCTAssertEqual(clear.path, "/api/v1/device/usbc/limit/input")
+        XCTAssertNil(clear.body)
         XCTAssertEqual(clear.confirmation, .powerLimit(.input))
 
         let get = try mapper.route(for: .getPowerLimit(.runtime))
         XCTAssertEqual(get.method, "GET")
+        XCTAssertEqual(get.path, "/api/v1/device/usbc/limit/runtime")
         XCTAssertNil(get.body)
         XCTAssertEqual(get.confirmation, .powerLimit(.runtime))
     }
 
     func testRestartAndShutdownAreAllowListedButRawCommandsAreUnsupported() throws {
         let restart = try mapper.route(for: .restart)
-        XCTAssertEqual(try bodyString(restart, key: "action"), "restart")
+        XCTAssertEqual(restart.path, "/api/v1/device/restart")
+        XCTAssertNil(restart.body)
         XCTAssertEqual(restart.confirmation, .disconnect(.successThenReconnect))
 
         let shutdown = try mapper.route(for: .shutdown)
-        XCTAssertEqual(try bodyString(shutdown, key: "action"), "shutdown")
+        XCTAssertEqual(shutdown.path, "/api/v1/device/shutdown")
+        XCTAssertEqual(try bodyBool(shutdown, key: "confirm"), true)
         XCTAssertEqual(shutdown.confirmation, .disconnect(.successThenDisarmReconnect))
 
         for command in [DeviceCommand.enterOTA, .runningMode(.factory)] {
@@ -63,11 +68,11 @@ final class RouterCommandMapperTests: XCTestCase {
     func testEveryAdvertisedSurfaceHasARouterRoute() throws {
         let features: FeatureFlags = [
             .dcControl, .usbOutputControl, .usbPowerLimit,
-            .dcBypassControl, .dcScheduler, .shutdown,
+            .dcBypassControl, .shutdown,
         ]
         let capabilities = RouterCapabilities(
             features: features.rawValue,
-            endpoints: [.actions, .usbCLimit, .bypassThreshold, .schedules]
+            endpoints: [.controls, .usbCLimit]
         )
 
         for surface in capabilities.supportedSurfaces {
@@ -80,41 +85,12 @@ final class RouterCommandMapperTests: XCTestCase {
                 _ = try mapper.route(for: .setPowerLimit(.output, level: .watts100))
             case .bypassControl:
                 _ = try mapper.route(for: .setBypass(true))
-            case .bypassThreshold:
-                _ = try mapper.setBypassThreshold(volts: 19.6)
-            case .schedules:
-                _ = mapper.listSchedules()
             case .restart:
                 _ = try mapper.route(for: .restart)
             case .shutdown:
                 _ = try mapper.route(for: .shutdown)
             }
         }
-    }
-
-    func testMapsBypassThresholdAndScheduleRoutes() throws {
-        let threshold = try mapper.setBypassThreshold(volts: 19.6)
-        XCTAssertEqual(threshold.path, "/api/v1/device/bypass-threshold")
-        XCTAssertEqual(try bodyDouble(threshold, key: "volts"), 19.6, accuracy: 0.0001)
-        XCTAssertEqual(threshold.confirmation, .bypassThreshold(19.6))
-
-        let schedule = RouterSchedule(
-            id: nil,
-            status: 1,
-            type: 1,
-            hour: 22,
-            minute: 30,
-            repeatMask: 0,
-            action: 0
-        )
-        let add = try mapper.upsertSchedule(schedule)
-        XCTAssertEqual(add.method, "POST")
-        XCTAssertEqual(add.path, "/api/v1/device/schedules")
-        XCTAssertEqual(try bodyInt(add, key: "hour"), 22)
-        XCTAssertEqual(add.confirmation, .scheduleMutation)
-
-        XCTAssertEqual(mapper.listSchedules().path, "/api/v1/device/schedules")
-        XCTAssertEqual(try mapper.deleteSchedule(id: 7).path, "/api/v1/device/schedules/7")
     }
 
     private func body(_ request: RouterRequest) throws -> [String: Any] {
@@ -133,9 +109,6 @@ final class RouterCommandMapperTests: XCTestCase {
         try XCTUnwrap(body(request)[key] as? Bool)
     }
 
-    private func bodyDouble(_ request: RouterRequest, key: String) throws -> Double {
-        try XCTUnwrap(body(request)[key] as? Double)
-    }
 }
 
 final class RouterCommandExecutionTests: XCTestCase {
@@ -163,7 +136,7 @@ final class RouterCommandExecutionTests: XCTestCase {
             await completion.finish(outcome)
             return outcome
         }
-        try await server.waitForRequest(method: "POST", path: "/api/v1/device/action")
+        try await server.waitForRequest(method: "POST", path: "/api/v1/device/dc")
         let finishedAfterAck = await completion.isFinished
         XCTAssertFalse(finishedAfterAck)
         XCTAssertTrue(server.push(snapshot(dcEnabled: false)))
@@ -187,7 +160,7 @@ final class RouterCommandExecutionTests: XCTestCase {
             await completion.finish(outcome)
             return outcome
         }
-        try await server.waitForRequest(method: "POST", path: "/api/v1/device/action")
+        try await server.waitForRequest(method: "POST", path: "/api/v1/device/usbc/output")
         XCTAssertTrue(server.push(snapshot(typeCEnabled: true, mode: 3)))
         for _ in 0..<100 { await Task.yield() }
         let finishedFromEnabled = await completion.isFinished
@@ -200,7 +173,7 @@ final class RouterCommandExecutionTests: XCTestCase {
 
     func testBypassIgnoresHTTPResultButRequiresTelemetry() async throws {
         let server = commandServer()
-        server.enqueue(method: "POST", path: "/api/v1/device/action", statusCode: 502, body: #"{"error":"device result fd"}"#)
+        server.enqueue(method: "POST", path: "/api/v1/device/dc/bypass", statusCode: 502, body: #"{"error":{"code":"ble_operation_failed","message":"BLE operation failed","details":{}}}"#)
         let transport = makeTransport(server)
         try await connect(transport, server)
         let completion = CommandCompletionProbe()
@@ -210,7 +183,7 @@ final class RouterCommandExecutionTests: XCTestCase {
             await completion.finish(outcome)
             return outcome
         }
-        try await server.waitForRequest(method: "POST", path: "/api/v1/device/action")
+        try await server.waitForRequest(method: "POST", path: "/api/v1/device/dc/bypass")
         let finishedAfterErrorResponse = await completion.isFinished
         XCTAssertFalse(finishedAfterErrorResponse)
         XCTAssertTrue(server.push(snapshot(dcEnabled: true, bypass: false)))
@@ -223,54 +196,49 @@ final class RouterCommandExecutionTests: XCTestCase {
         XCTAssertEqual(outcome, .sent)
     }
 
-    func testPowerLimitSetAndClearPerformPOSTThenGETAndReturnConfirmedLevel() async throws {
+    func testPowerLimitCanonicalPutAndDeleteReturnRouterObservedLevel() async throws {
         let server = commandServer()
-        server.enqueue(method: "POST", path: "/api/v1/device/usbc-limit", body: #"{"watts":100,"level":4}"#)
-        server.enqueue(method: "GET", path: "/api/v1/device/usbc-limit", body: limitResponse(outputLevel: 4))
+        server.enqueue(method: "PUT", path: "/api/v1/device/usbc/limit/output", body: #"{"type":"output","level":4,"watts":100}"#)
         let transport = makeTransport(server)
         try await connect(transport, server)
 
         let set = try await transport.perform(.setPowerLimit(.output, level: .watts100))
         XCTAssertEqual(replyLevel(set), 4)
         XCTAssertEqual(
-            server.requests.filter { $0.path == "/api/v1/device/usbc-limit" }.map(\.method),
-            ["POST", "GET"]
+            server.requests.filter { $0.path == "/api/v1/device/usbc/limit/output" }.map(\.method),
+            ["PUT"]
         )
 
-        server.enqueue(method: "POST", path: "/api/v1/device/usbc-limit", body: #"{"status":"cleared"}"#)
-        server.enqueue(method: "GET", path: "/api/v1/device/usbc-limit", body: limitResponse(outputLevel: 3))
+        server.enqueue(method: "DELETE", path: "/api/v1/device/usbc/limit/output", body: #"{"type":"output","level":3,"watts":65}"#)
         let clear = try await transport.perform(.clearPowerLimit(.output))
         XCTAssertEqual(replyLevel(clear), 3)
         XCTAssertEqual(
-            server.requests.filter { $0.path == "/api/v1/device/usbc-limit" }.map(\.method),
-            ["POST", "GET", "POST", "GET"]
+            server.requests.filter { $0.path == "/api/v1/device/usbc/limit/output" }.map(\.method),
+            ["PUT", "DELETE"]
         )
     }
 
-    func testBypassThresholdAndSchedulesUseDocumentedRoutes() async throws {
+    func testCanonicalClockReadUnavailableAndManualSync() async throws {
         let server = commandServer()
-        server.enqueue(method: "POST", path: "/api/v1/device/bypass-threshold", body: #"{"volts":19.6}"#)
-        server.enqueue(method: "GET", path: "/api/v1/device/bypass-threshold", body: #"{"volts":19.6}"#)
-        server.enqueue(method: "GET", path: "/api/v1/device/schedules", body: #"[{"id":0,"status":1,"type":1,"hour":3,"minute":0,"repeat":0,"action":1}]"#)
-        server.enqueue(method: "POST", path: "/api/v1/device/schedules", body: #"{"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}"#)
-        server.enqueue(method: "DELETE", path: "/api/v1/device/schedules/3", body: #"{"status":"deleted"}"#)
+        server.enqueue(method: "GET", path: "/api/v1/device/clock", body: #"{"available":false,"device_time":null,"system_time":"2026-07-17T20:00:02Z","drift_seconds":null}"#)
+        server.enqueue(method: "GET", path: "/api/v1/device/clock", body: #"{"available":true,"device_time":"2026-07-17T20:00:00Z","system_time":"2026-07-17T20:00:02Z","drift_seconds":-2}"#)
+        server.enqueue(method: "POST", path: "/api/v1/device/clock/sync", body: #"{"synced":true,"system_time":"2026-07-17T20:00:02Z"}"#)
         let transport = makeTransport(server)
         try await connect(transport, server)
 
-        let threshold = try await transport.setBypassThreshold(19.6)
-        XCTAssertEqual(threshold, 19.6, accuracy: 0.0001)
-        let schedules = try await transport.schedules()
-        XCTAssertEqual(schedules.map(\.id), [0])
-        let added = try await transport.upsertSchedule(RouterSchedule(
-            id: nil, status: 1, type: 1, hour: 6, minute: 30, repeatMask: 0, action: 1
-        ))
-        XCTAssertEqual(added.id, 3)
-        try await transport.deleteSchedule(id: 3)
+        let deviceTime = try await transport.readDeviceTimeIfSupported()
+        XCTAssertNil(deviceTime)
+        let readableDeviceTime = try await transport.readDeviceTimeIfSupported()
+        XCTAssertEqual(readableDeviceTime, Date(timeIntervalSince1970: 1_784_318_400))
+        try await transport.synchronizeDeviceTime()
+        let clockRequests = server.requests.filter { $0.path.contains("/device/clock") }
+        XCTAssertEqual(clockRequests.map(\.method), ["GET", "GET", "POST"])
+        XCTAssertTrue(clockRequests.allSatisfy { $0.body == nil })
     }
 
     func testRouterErrorsAndUnsupportedCommandsAreClear() async throws {
         let server = commandServer()
-        server.enqueue(method: "POST", path: "/api/v1/device/action", statusCode: 502, body: "router command failed")
+        server.enqueue(method: "POST", path: "/api/v1/device/dc", statusCode: 502, body: "router command failed")
         let transport = makeTransport(server)
         try await connect(transport, server)
 
@@ -298,8 +266,8 @@ final class RouterCommandExecutionTests: XCTestCase {
         let outcome = try await transport.perform(.restart)
         XCTAssertEqual(outcome, .sent)
         let action = try XCTUnwrap(server.requests.last)
-        let body = try JSONSerialization.jsonObject(with: XCTUnwrap(action.body)) as? [String: String]
-        XCTAssertEqual(body?["action"], "restart")
+        XCTAssertEqual(action.path, "/api/v1/device/restart")
+        XCTAssertNil(action.body)
     }
 
     func testShutdownRetiresConnectionWithoutReconnectingOrResubscribing() async throws {
@@ -321,6 +289,10 @@ final class RouterCommandExecutionTests: XCTestCase {
 
         let outcome = try await transport.perform(.shutdown)
         XCTAssertEqual(outcome, .sent)
+        let shutdown = try XCTUnwrap(server.requests.last)
+        XCTAssertEqual(shutdown.path, "/api/v1/device/shutdown")
+        let shutdownBody = try JSONSerialization.jsonObject(with: XCTUnwrap(shutdown.body)) as? [String: Bool]
+        XCTAssertEqual(shutdownBody?["confirm"], true)
         XCTAssertEqual(server.eventStreamCount, 1)
 
         XCTAssertTrue(server.push(Data(#"{"connected":false}"#.utf8)))
@@ -436,7 +408,7 @@ final class RouterCommandExecutionTests: XCTestCase {
         addTeardownBlock { await transport.disconnect() }
 
         let timedOut = Task { try await transport.perform(.setDC(true)) }
-        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/action", count: 1)
+        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/dc", count: 1)
         await clock.waitForSleepCount(1)
         let firstSleeps = await clock.requestedSleeps
         guard firstSleeps == [.seconds(3)] else {
@@ -453,7 +425,7 @@ final class RouterCommandExecutionTests: XCTestCase {
 
         XCTAssertTrue(server.push(snapshot(dcEnabled: true)), "late telemetry remains publishable")
         let successor = Task { try await transport.perform(.setDC(false)) }
-        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/action", count: 2)
+        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/dc", count: 2)
         await clock.waitForSleepCount(2)
         for _ in 0..<100 { await Task.yield() }
         XCTAssertTrue(server.push(snapshot(dcEnabled: false)))
@@ -478,7 +450,7 @@ final class RouterCommandExecutionTests: XCTestCase {
         addTeardownBlock { await transport.disconnect() }
 
         let command = Task { try await transport.perform(.setDC(true)) }
-        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/action", count: 1)
+        try await server.waitForRequestCount(method: "POST", path: "/api/v1/device/dc", count: 1)
         await clock.waitForSleepCount(1)
         let requestedSleeps = await clock.requestedSleeps
         guard requestedSleeps == [.seconds(3)] else {
@@ -562,10 +534,6 @@ final class RouterCommandExecutionTests: XCTestCase {
 
     private func snapshot(typeCEnabled: Bool, mode: UInt8) -> Data {
         Data(#"{"connected":true,"typec":{"enabled":\#(typeCEnabled),"status":0,"volts":20,"amps":0,"watts":0,"temp_c":25,"mode":\#(mode),"dc_input":false}}"#.utf8)
-    }
-
-    private func limitResponse(outputLevel: Int) -> String {
-        #"{"global":{"level":3,"watts":65},"input":{"level":3,"watts":65},"output":{"level":\#(outputLevel),"watts":100},"runtime":{"level":-1,"watts":0}}"#
     }
 
     private func replyLevel(_ outcome: CommandOutcome) -> UInt8? {

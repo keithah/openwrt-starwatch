@@ -30,23 +30,20 @@ actor RouterConnection {
     }
 
     private struct PowerLimitResponse: Decodable {
-        struct Value: Decodable { let level: Int }
-        let global: Value
-        let input: Value
-        let output: Value
-        let runtime: Value
-
-        func level(for type: PowerLimitType) -> Int {
-            switch type {
-            case .global: global.level
-            case .input: input.level
-            case .output: output.level
-            case .runtime: runtime.level
-            }
-        }
+        let type: String
+        let level: Int
+        let watts: Int?
     }
 
-    private struct BypassThresholdResponse: Decodable { let volts: Double }
+    private struct ClockResponse: Decodable {
+        let available: Bool
+        let deviceTime: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case available
+            case deviceTime = "device_time"
+        }
+    }
 
     private let endpoint: RouterEndpoint
     private let credentials: any RouterCredentialProvider
@@ -300,17 +297,7 @@ actor RouterConnection {
                 generation: context.generation,
                 scope: context.scope
             )
-            let confirmedData: Data
-            if request.method == "GET" {
-                confirmedData = responseData
-            } else {
-                confirmedData = try await execute(
-                    RouterRequest(method: "GET", path: "/api/v1/device/usbc-limit"),
-                    generation: context.generation,
-                    scope: context.scope
-                )
-            }
-            return try powerLimitOutcome(data: confirmedData, type: type)
+            return try powerLimitOutcome(data: responseData, type: type)
 
         case let .disconnect(policy):
             if policy == .successThenDisarmReconnect {
@@ -349,7 +336,7 @@ actor RouterConnection {
                 throw error
             }
 
-        case .none, .bypassThreshold, .scheduleMutation:
+        case .none:
             _ = try await execute(
                 request,
                 generation: context.generation,
@@ -359,40 +346,32 @@ actor RouterConnection {
         }
     }
 
-    func setBypassThreshold(_ request: RouterRequest) async throws -> Double {
+    func executeBodyless(_ method: String, _ path: String) async throws {
         guard let context = establishedContext() else {
             throw NetworkError.transport("Router device is not connected")
         }
-        _ = try await execute(request, generation: context.generation, scope: context.scope)
-        let data = try await execute(
-            RouterRequest(method: "GET", path: "/api/v1/device/bypass-threshold"),
+        _ = try await execute(
+            RouterRequest(method: method, path: path),
             generation: context.generation,
             scope: context.scope
         )
-        return try Self.decode(BypassThresholdResponse.self, from: data, token: "").volts
     }
 
-    func schedules(_ request: RouterRequest) async throws -> [RouterSchedule] {
+    func readDeviceTime() async throws -> Date? {
         guard let context = establishedContext() else {
             throw NetworkError.transport("Router device is not connected")
         }
-        let data = try await execute(request, generation: context.generation, scope: context.scope)
-        return try Self.decode([RouterSchedule].self, from: data, token: "")
-    }
-
-    func upsertSchedule(_ request: RouterRequest) async throws -> RouterSchedule {
-        guard let context = establishedContext() else {
-            throw NetworkError.transport("Router device is not connected")
+        let data = try await execute(
+            RouterRequest(method: "GET", path: "/api/v1/device/clock"),
+            generation: context.generation,
+            scope: context.scope
+        )
+        let response = try Self.decode(ClockResponse.self, from: data, token: "")
+        guard response.available else { return nil }
+        guard let value = response.deviceTime, let date = Self.date(from: value) else {
+            throw NetworkError.decode("Router clock response has no valid device_time")
         }
-        let data = try await execute(request, generation: context.generation, scope: context.scope)
-        return try Self.decode(RouterSchedule.self, from: data, token: "")
-    }
-
-    func deleteSchedule(_ request: RouterRequest) async throws {
-        guard let context = establishedContext() else {
-            throw NetworkError.transport("Router device is not connected")
-        }
-        _ = try await execute(request, generation: context.generation, scope: context.scope)
+        return date
     }
 
     func refreshTelemetry() async throws {
@@ -850,7 +829,10 @@ actor RouterConnection {
 
     private func powerLimitOutcome(data: Data, type: PowerLimitType) throws -> CommandOutcome {
         let response = try Self.decode(PowerLimitResponse.self, from: data, token: "")
-        let level = response.level(for: type)
+        guard response.type == Self.powerLimitName(type) else {
+            throw NetworkError.decode("Power-limit response type does not match request")
+        }
+        let level = response.level
         let command = DeviceCommand.getPowerLimit(type)
         let frame: Data
         if level < 0 {
@@ -862,6 +844,23 @@ actor RouterConnection {
             frame = Data([0x02, 0x80, 0x00, UInt8(level)])
         }
         return .reply(try command.validate(frame))
+    }
+
+    private static func powerLimitName(_ type: PowerLimitType) -> String {
+        switch type {
+        case .global: "global"
+        case .input: "input"
+        case .output: "output"
+        case .runtime: "runtime"
+        }
+    }
+
+    private static func date(from value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 
     private static func validate(

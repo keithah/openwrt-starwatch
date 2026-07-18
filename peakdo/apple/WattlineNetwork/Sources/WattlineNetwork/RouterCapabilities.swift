@@ -1,10 +1,8 @@
 import WattlineCore
 
 public enum RouterEndpointCapability: String, CaseIterable, Hashable, Sendable {
-    case actions
+    case controls
     case usbCLimit
-    case bypassThreshold
-    case schedules
 }
 
 public enum RouterSurfaceCapability: String, CaseIterable, Hashable, Sendable {
@@ -12,8 +10,6 @@ public enum RouterSurfaceCapability: String, CaseIterable, Hashable, Sendable {
     case typeCOutput
     case powerLimits
     case bypassControl
-    case bypassThreshold
-    case schedules
     case restart
     case shutdown
 }
@@ -32,19 +28,15 @@ public struct RouterCapabilities: Equatable, Sendable {
     public func supports(_ surface: RouterSurfaceCapability) -> Bool {
         switch surface {
         case .dcControl:
-            features.contains(.dcControl) && endpoints.contains(.actions)
+            features.contains(.dcControl) && endpoints.contains(.controls)
         case .typeCOutput:
-            features.contains(.usbOutputControl) && endpoints.contains(.actions)
+            features.contains(.usbOutputControl) && endpoints.contains(.controls)
         case .powerLimits:
             features.contains(.usbPowerLimit) && endpoints.contains(.usbCLimit)
         case .bypassControl:
-            features.contains(.dcBypassControl) && endpoints.contains(.actions)
-        case .bypassThreshold:
-            features.contains(.dcBypassControl) && endpoints.contains(.bypassThreshold)
-        case .schedules:
-            features.contains(.dcScheduler) && endpoints.contains(.schedules)
+            features.contains(.dcBypassControl) && endpoints.contains(.controls)
         case .restart, .shutdown:
-            features.contains(.shutdown) && endpoints.contains(.actions)
+            features.contains(.shutdown) && endpoints.contains(.controls)
         }
     }
 

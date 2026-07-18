@@ -223,38 +223,14 @@ public actor RouterTransport: DeviceTransport {
     }
 
     public func synchronizeDeviceTime() async throws {
-        throw NetworkError.unsupported("Router time synchronization is unsupported")
+        try await transactions.enqueue { [connection] in
+            try await connection.executeBodyless("POST", "/api/v1/device/clock/sync")
+        }
     }
 
     public func readDeviceTimeIfSupported() async throws -> Date? {
-        throw NetworkError.unsupported("Router device-time reads are unsupported")
-    }
-
-    public func setBypassThreshold(_ volts: Double) async throws -> Double {
-        let request = try commandMapper.setBypassThreshold(volts: volts)
-        return try await transactions.enqueue { [connection] in
-            try await connection.setBypassThreshold(request)
-        }
-    }
-
-    public func schedules() async throws -> [RouterSchedule] {
-        let request = commandMapper.listSchedules()
-        return try await transactions.enqueue { [connection] in
-            try await connection.schedules(request)
-        }
-    }
-
-    public func upsertSchedule(_ schedule: RouterSchedule) async throws -> RouterSchedule {
-        let request = try commandMapper.upsertSchedule(schedule)
-        return try await transactions.enqueue { [connection] in
-            try await connection.upsertSchedule(request)
-        }
-    }
-
-    public func deleteSchedule(id: UInt8) async throws {
-        let request = try commandMapper.deleteSchedule(id: id)
         try await transactions.enqueue { [connection] in
-            try await connection.deleteSchedule(request)
+            try await connection.readDeviceTime()
         }
     }
 }
