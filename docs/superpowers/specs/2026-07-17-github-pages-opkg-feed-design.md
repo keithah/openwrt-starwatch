@@ -30,14 +30,15 @@ wget -qO- https://keithah.github.io/openwrt-starwatch/install.sh | sh
 ```
 
 The script requires root, `opkg`, `wget`, and the supported architecture. It
-writes exactly one managed feed file,
-`/etc/opkg/customfeeds.conf.d/starwatch.conf`, containing the GitHub Pages
-feed URL. It then runs `opkg update` and installs or upgrades the daemon plus
+writes exactly one marked `src/gz starwatch ...` entry in the standard
+`/etc/opkg/customfeeds.conf` file, containing the GitHub Pages feed URL. It
+then runs `opkg update` and installs or upgrades the daemon plus
 the detected UI package. It ends by reporting the local dashboard URL and the
 selected UI.
 
-Re-running the script is safe: it rewrites only its own feed file, refreshes
-the index, and asks `opkg` to install the same package set. It never uses
+Re-running the script is safe: it replaces only its marked `starwatch` entry,
+preserves every other custom feed, refreshes the index, and asks `opkg` to
+install the same package set. It never uses
 force-downgrade or force-reinstall, modifies other feeds, overwrites the
 Starwatch UCI configuration, or changes routing/firewall state.
 
