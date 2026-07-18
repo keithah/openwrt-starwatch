@@ -309,6 +309,10 @@ final class AppModel {
 
     #if DEBUG
     var hasSnapshotCoordinatorForTesting: Bool { snapshotCoordinator != nil }
+
+    func waitForSnapshotFanOutForTesting() async {
+        await snapshotFlushTask?.value
+    }
     #endif
 
     var sortedDevices: [DiscoveredDevice] {

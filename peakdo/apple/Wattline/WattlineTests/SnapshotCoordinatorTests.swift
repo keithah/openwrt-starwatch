@@ -75,7 +75,7 @@ final class SnapshotCoordinatorTests: XCTestCase {
         var pending = accepted
         pending.pendingMutations = [PendingMutation(id: UUID(), reconciler: .dcEnabled(false), startedAt: .zero, timeout: .seconds(3))]
         model.applySessionState(pending)
-        try await waitUntil { backend.writeCount == acceptedWrites }
+        await model.waitForSnapshotFanOutForTesting()
         let pendingWrites = backend.writeCount
         XCTAssertEqual(pendingWrites, 1, "control/pending state must not write a snapshot")
     }
