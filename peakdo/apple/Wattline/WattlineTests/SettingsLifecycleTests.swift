@@ -13,6 +13,114 @@ final class SettingsLifecycleTests: XCTestCase {
         _ = try? await task.value
         try await waitUntil { await clock.sleeperCount == 0 }
     }
+
+    func testOverlappingRestartsResolveReplacedWaiterExactlyOnce() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(
+            reconnectAfterRestart: true,
+            deferRestartPerform: true
+        )
+        let model = try await makeConnectedModel(transport, clock: clock)
+        let firstFinished = CompletionProbe()
+        let secondStarted = CompletionProbe()
+        let secondFinished = CompletionProbe()
+
+        let first = Task {
+            await model.restartDevice()
+            await firstFinished.mark()
+        }
+        try await waitUntil { await transport.restartPerformCount == 1 }
+
+        let second = Task {
+            await secondStarted.mark()
+            await model.restartDevice()
+            await secondFinished.mark()
+        }
+        try await waitUntil { await secondStarted.isMarked }
+        await Task.yield()
+
+        await transport.releaseRestartPerform(1)
+        try await waitUntil { await transport.restartPerformCount == 2 }
+        await transport.releaseRestartPerform(2)
+        try await waitUntil { await transport.pendingDisconnectScope != nil }
+        await transport.releasePendingDisconnect()
+
+        do {
+            try await waitUntil {
+                let didFinishFirst = await firstFinished.isMarked
+                let didFinishSecond = await secondFinished.isMarked
+                return didFinishFirst && didFinishSecond
+            }
+        } catch {
+            first.cancel()
+            second.cancel()
+            throw error
+        }
+        try await waitUntil {
+            model.connectionStatus == .connected && model.maintenanceState == .idle
+        }
+    }
+
+    func testCancelingRestartCallerRemovesItsWaiterWithoutAdvancingClock() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(reconnectAfterRestart: true)
+        let model = try await makeConnectedModel(transport, clock: clock)
+        let finished = CompletionProbe()
+        let restart = Task {
+            await model.restartDevice()
+            await finished.mark()
+        }
+
+        try await waitUntil { await transport.pendingDisconnectScope != nil }
+        try await waitUntil { await clock.sleeperCount == 1 }
+        restart.cancel()
+
+        do {
+            try await waitUntil {
+                let didFinish = await finished.isMarked
+                let sleeperCount = await clock.sleeperCount
+                return didFinish && sleeperCount == 0
+            }
+        } catch {
+            await clock.advance(by: .seconds(1))
+            await restart.value
+            throw error
+        }
+        XCTAssertEqual(model.maintenanceState, .idle)
+    }
+
+    func testReplacingGenerationCancelsOldRestartTimeoutWithoutClobberingHealthySession() async throws {
+        let clock = TestDeviceClock()
+        let transport = LifecycleTransport(reconnectAfterRestart: true)
+        let model = try await makeConnectedModel(transport, clock: clock)
+        let finished = CompletionProbe()
+        let oldRestart = Task {
+            await model.restartDevice()
+            await finished.mark()
+        }
+
+        try await waitUntil { await transport.pendingDisconnectScope != nil }
+        try await waitUntil { await clock.sleeperCount == 1 }
+        model.enterDemo()
+        try await waitUntil {
+            guard model.connectionStatus == .connected,
+                  model.maintenanceState == .idle,
+                  model.isDemo
+            else { return false }
+            return await model.deviceOperationBroker.hasConnectedContext
+        }
+
+        await clock.advance(by: .seconds(1))
+        try await waitUntil { await finished.isMarked }
+        await oldRestart.value
+
+        XCTAssertEqual(model.connectionStatus, .connected)
+        XCTAssertEqual(model.maintenanceState, .idle)
+        XCTAssertEqual(model.route, .connected)
+        XCTAssertTrue(model.isDemo)
+        let hasConnectedContext = await model.deviceOperationBroker.hasConnectedContext
+        XCTAssertTrue(hasConnectedContext)
+    }
     func testRestartWriteFailureWhileStillConnectedShowsRetryWithoutRecovery() async throws {
         let clock = TestDeviceClock()
         let transport = LifecycleTransport(reconnectAfterRestart: false, restartFails: true)
@@ -275,6 +383,7 @@ private actor LifecycleTransport: DeviceTransport {
     private let restartFailsAfterDisconnect: Bool
     private let emitDisconnectAfterThrow: Bool
     private let deferReconnect: Bool
+    private let deferRestartPerform: Bool
     private(set) var connectedIDs: [UUID] = []
     private(set) var scanStarts = 0
     private(set) var restartConnectCount = 0
@@ -283,10 +392,12 @@ private actor LifecycleTransport: DeviceTransport {
     private(set) var scopes: [DeviceConnectionScope] = []
     private var activeScope: DeviceConnectionScope?
     private var reconnectWaiter: CheckedContinuation<Void, Never>?
+    private var restartPerformWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
     private(set) var pendingDisconnectScope: DeviceConnectionScope?
+    private(set) var restartPerformCount = 0
     var reconnectIsWaiting: Bool { reconnectWaiter != nil }
 
-    init(reconnectAfterRestart: Bool, shutdownFails: Bool = false, restartFails: Bool = false, restartFailsAfterDisconnect: Bool = false, emitDisconnectAfterThrow: Bool = false, deferReconnect: Bool = false) {
+    init(reconnectAfterRestart: Bool, shutdownFails: Bool = false, restartFails: Bool = false, restartFailsAfterDisconnect: Bool = false, emitDisconnectAfterThrow: Bool = false, deferReconnect: Bool = false, deferRestartPerform: Bool = false) {
         let pair = AsyncStream<DeviceEvent>.makeStream()
         events = pair.stream
         continuation = pair.continuation
@@ -296,6 +407,7 @@ private actor LifecycleTransport: DeviceTransport {
         self.restartFailsAfterDisconnect = restartFailsAfterDisconnect
         self.emitDisconnectAfterThrow = emitDisconnectAfterThrow
         self.deferReconnect = deferReconnect
+        self.deferRestartPerform = deferRestartPerform
     }
 
     func startScan() async throws { scanStarts += 1 }
@@ -314,6 +426,9 @@ private actor LifecycleTransport: DeviceTransport {
         continuation.yield(.connected(scope))
     }
     func releaseReconnect() { reconnectWaiter?.resume(); reconnectWaiter = nil }
+    func releaseRestartPerform(_ number: Int) {
+        restartPerformWaiters.removeValue(forKey: number)?.resume()
+    }
     func releasePendingDisconnect() {
         guard let pendingDisconnectScope else { return }
         self.pendingDisconnectScope = nil
@@ -328,6 +443,15 @@ private actor LifecycleTransport: DeviceTransport {
             if shutdownFails { throw TransportFailure(message: "FM write failed") }
             if let activeScope { continuation.yield(.disconnected(activeScope, nil)) }
             return .sent
+        }
+        if command.disconnectPolicy == .successThenReconnect {
+            restartPerformCount += 1
+            let performNumber = restartPerformCount
+            if deferRestartPerform {
+                await withCheckedContinuation { continuation in
+                    restartPerformWaiters[performNumber] = continuation
+                }
+            }
         }
         if command.disconnectPolicy == .successThenReconnect, reconnectAfterRestart {
             if emitDisconnectAfterThrow {
@@ -349,6 +473,14 @@ private actor LifecycleTransport: DeviceTransport {
     func refreshTelemetry() async throws {}
     func synchronizeDeviceTime() async throws {}
     func readDeviceTimeIfSupported() async throws -> Date? { nil }
+}
+
+private actor CompletionProbe {
+    private(set) var isMarked = false
+
+    func mark() {
+        isMarked = true
+    }
 }
 
 private actor TestDeviceClock: DeviceClock {

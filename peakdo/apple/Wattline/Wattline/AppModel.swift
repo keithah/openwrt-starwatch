@@ -242,6 +242,8 @@ final class AppModel {
         let scope: DeviceConnectionScope
     }
     private struct RestartDisconnectWaiter {
+        let id: UUID
+        let operationID: UUID
         let key: RestartDisconnectKey
         let continuation: CheckedContinuation<Bool, Never>
         let timeoutTask: Task<Void, Never>
@@ -251,6 +253,7 @@ final class AppModel {
     // being mistaken for successful restart recovery.
     private var restartDisconnectObserved: RestartDisconnectKey?
     private var restartDisconnectWaiter: RestartDisconnectWaiter?
+    private var restartOperationID: UUID?
     private var connectionOperationKey: ConnectionOperationKey?
     private var activeConnectionScope: DeviceConnectionScope?
     private var retiredConnectionScopeIDs: Set<UUID> = []
@@ -470,10 +473,12 @@ final class AppModel {
         else { return }
         let generation = transportGeneration
         let disconnectKey = RestartDisconnectKey(generation: generation, scope: scope)
+        let operationID = UUID()
         restartTimeoutTask?.cancel()
         restartRecoveryTask?.cancel()
         restartDisconnectObserved = nil
         cancelRestartDisconnectWaiter()
+        restartOperationID = operationID
         maintenanceState = .restarting
         var writeFailure: Error?
         do {
@@ -481,41 +486,66 @@ final class AppModel {
         } catch {
             writeFailure = error
         }
-        let observed = await awaitRestartDisconnect(disconnectKey)
+        guard isCurrentRestart(operationID, key: disconnectKey) else { return }
+        let observed = await awaitRestartDisconnect(disconnectKey, operationID: operationID)
+        if Task.isCancelled {
+            cancelRestartOperationIfCurrent(operationID)
+            return
+        }
+        guard isCurrentRestart(operationID, key: disconnectKey) else { return }
         guard observed else {
+            restartOperationID = nil
             maintenanceState = .restartFailed(
                 writeFailure.map(String.init(describing:)) ?? "Restart timed out. Try again."
             )
             return
         }
         restartRecoveryTask = Task { [weak self] in
-            await self?.recoverRestart(disconnectKey)
+            await self?.recoverRestart(disconnectKey, operationID: operationID)
         }
     }
 
-    private func awaitRestartDisconnect(_ key: RestartDisconnectKey) async -> Bool {
+    private func awaitRestartDisconnect(
+        _ key: RestartDisconnectKey,
+        operationID: UUID
+    ) async -> Bool {
         if restartDisconnectObserved == key { return true }
-        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let timeoutTask = Task { [weak self, maintenanceClock] in
-                do {
-                    try await maintenanceClock.sleep(for: .seconds(1))
-                } catch {
+        let waiterID = UUID()
+        let cancelWaiter: @MainActor @Sendable () -> Void = { [weak self] in
+            self?.resolveRestartDisconnect(waiterID: waiterID, observed: false)
+        }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: false)
                     return
                 }
-                await MainActor.run {
-                    self?.resolveRestartDisconnect(key, observed: false)
+                cancelRestartDisconnectWaiter()
+                let timeoutTask = Task { [weak self, maintenanceClock] in
+                    do {
+                        try await maintenanceClock.sleep(for: .seconds(1))
+                    } catch {
+                        return
+                    }
+                    await MainActor.run {
+                        self?.resolveRestartDisconnect(waiterID: waiterID, observed: false)
+                    }
                 }
+                restartDisconnectWaiter = RestartDisconnectWaiter(
+                    id: waiterID,
+                    operationID: operationID,
+                    key: key,
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                )
             }
-            restartDisconnectWaiter = RestartDisconnectWaiter(
-                key: key,
-                continuation: continuation,
-                timeoutTask: timeoutTask
-            )
+        } onCancel: {
+            Task { @MainActor in cancelWaiter() }
         }
     }
 
-    private func resolveRestartDisconnect(_ key: RestartDisconnectKey, observed: Bool) {
-        guard let waiter = restartDisconnectWaiter, waiter.key == key else { return }
+    private func resolveRestartDisconnect(waiterID: UUID, observed: Bool) {
+        guard let waiter = restartDisconnectWaiter, waiter.id == waiterID else { return }
         restartDisconnectWaiter = nil
         waiter.timeoutTask.cancel()
         waiter.continuation.resume(returning: observed)
@@ -527,27 +557,44 @@ final class AppModel {
         else { return }
         let key = RestartDisconnectKey(generation: generation, scope: scope)
         restartDisconnectObserved = key
-        resolveRestartDisconnect(key, observed: true)
+        guard let waiter = restartDisconnectWaiter,
+              waiter.key == key,
+              waiter.operationID == restartOperationID
+        else { return }
+        resolveRestartDisconnect(waiterID: waiter.id, observed: true)
     }
 
     private func cancelRestartDisconnectWaiter() {
         guard let waiter = restartDisconnectWaiter else { return }
-        restartDisconnectWaiter = nil
-        waiter.timeoutTask.cancel()
-        waiter.continuation.resume(returning: false)
+        resolveRestartDisconnect(waiterID: waiter.id, observed: false)
+    }
+
+    private func isCurrentRestart(_ operationID: UUID, key: RestartDisconnectKey) -> Bool {
+        restartOperationID == operationID
+            && transportGeneration == key.generation
+            && selectedPeripheralID == key.scope.peripheralID
+            && maintenanceState == .restarting
+    }
+
+    private func cancelRestartOperationIfCurrent(_ operationID: UUID) {
+        guard restartOperationID == operationID else { return }
+        restartOperationID = nil
+        cancelRestartDisconnectWaiter()
+        if maintenanceState == .restarting { maintenanceState = .idle }
     }
 
     func retryRestart() async {
         await restartDevice()
     }
 
-    private func recoverRestart(_ disconnectKey: RestartDisconnectKey) async {
+    private func recoverRestart(_ disconnectKey: RestartDisconnectKey, operationID: UUID) async {
         let generation = disconnectKey.generation
         let peripheralID = disconnectKey.scope.peripheralID
         let deadline = (await maintenanceClock.now) + .seconds(30)
         while !Task.isCancelled,
               transportGeneration == generation,
               selectedPeripheralID == peripheralID,
+              restartOperationID == operationID,
               maintenanceState == .restarting {
             // Do not let withConnection reuse the still-connected context. A
             // fresh reconnect is valid only after the expected disconnect event
@@ -558,7 +605,9 @@ final class AppModel {
                 continue
             }
             let now = await maintenanceClock.now
+            guard isCurrentRestart(operationID, key: disconnectKey) else { return }
             guard now < deadline else {
+                restartOperationID = nil
                 maintenanceState = .restartFailed("Restart timed out. Try again.")
                 return
             }
@@ -566,6 +615,7 @@ final class AppModel {
                 _ = try await deviceOperationBroker.withConnection(to: peripheralID, timeout: deadline - now) { _ in () }
                 guard transportGeneration == generation,
                       selectedPeripheralID == peripheralID,
+                      restartOperationID == operationID,
                       maintenanceState == .restarting
                 else { return }
                 return
@@ -573,7 +623,9 @@ final class AppModel {
                 return
             } catch {
                 let retryNow = await maintenanceClock.now
+                guard isCurrentRestart(operationID, key: disconnectKey) else { return }
                 guard retryNow < deadline else {
+                    restartOperationID = nil
                     maintenanceState = .restartFailed("Restart timed out. Try again.")
                     return
                 }
@@ -582,8 +634,14 @@ final class AppModel {
             }
         }
         guard !Task.isCancelled else { return }
-        guard transportGeneration == generation, selectedPeripheralID == peripheralID else { return }
-        if maintenanceState == .restarting { maintenanceState = .restartFailed("Restart timed out. Try again.") }
+        guard transportGeneration == generation,
+              selectedPeripheralID == peripheralID,
+              restartOperationID == operationID
+        else { return }
+        if maintenanceState == .restarting {
+            restartOperationID = nil
+            maintenanceState = .restartFailed("Restart timed out. Try again.")
+        }
     }
 
     func shutdownDevice() async {
@@ -697,7 +755,9 @@ final class AppModel {
     func returnToScan() {
         restartRecoveryTask?.cancel()
         restartTimeoutTask?.cancel()
+        restartOperationID = nil
         cancelRestartDisconnectWaiter()
+        if maintenanceState == .restarting { maintenanceState = .idle }
         invalidateBrokerContext()
         connectionOperationKey = nil
         retireActiveConnectionScope()
@@ -900,6 +960,11 @@ final class AppModel {
         initialCapabilities: DeviceCapabilities = DeviceCapabilities(features: []),
         peripheralID: UUID? = nil
     ) -> UInt {
+        restartRecoveryTask?.cancel()
+        restartRecoveryTask = nil
+        restartOperationID = nil
+        cancelRestartDisconnectWaiter()
+        if maintenanceState == .restarting { maintenanceState = .idle }
         invalidateBrokerContext()
         flushPendingTelemetryPersistence()
         telemetryPersistenceTask?.cancel()
@@ -1309,6 +1374,7 @@ final class AppModel {
         scanMessage = nil
         connectionStatus = .connected
         if maintenanceState == .restarting {
+            restartOperationID = nil
             restartTimeoutTask?.cancel()
             restartTimeoutTask = nil
             restartRecoveryTask?.cancel()
