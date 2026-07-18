@@ -1,5 +1,7 @@
 # Starwatch for OpenWrt
 
+**Product page: [keithah.com/products/starwatch](https://keithah.com/products/starwatch)**
+
 Starwatch is an offline-first Starlink observatory for OpenWrt and GL.iNet
 routers. A static Go daemon reads the dish's local gRPC API, combines dish and
 router-side WAN telemetry, keeps tiered history, evaluates alerts, exposes a
