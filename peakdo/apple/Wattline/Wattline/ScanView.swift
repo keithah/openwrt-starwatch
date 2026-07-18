@@ -7,6 +7,7 @@ struct ScanView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
     @State private var showsRouterSetup = false
+    @State private var showsPairingEntry = false
     @State private var discoveredRouterSetup: DiscoveredRouter?
 
     private var scanRecords: [AppDeviceConnectionRecord] {
@@ -99,14 +100,23 @@ struct ScanView: View {
                         Button("BT") { model.requestBluetoothAfterPriming() }
                     }
                     Button("Router") { showsRouterSetup = true }
+                    Button("Pair") { showsPairingEntry = true }
                     Button("Demo") { model.enterDemo() }
                 }
             }
             .sheet(isPresented: $showsRouterSetup) {
                 RouterSetupView()
             }
+            .sheet(isPresented: $showsPairingEntry) {
+                RouterPairingEntryView()
+            }
             .sheet(item: $discoveredRouterSetup) { router in
-                RouterSetupView(discoveredRouter: router)
+                RouterEnrollmentView(router: router)
+            }
+            .sheet(isPresented: pairingPayloadPresented) {
+                if let payload = model.routerEnrollmentRoute.payload {
+                    RouterEnrollmentView(payload: payload)
+                }
             }
             .sheet(item: Bindable(model).otaRecoveryDevice) { device in
                 OTARecoveryView(device: device) {
@@ -116,6 +126,13 @@ struct ScanView: View {
             .onAppear { model.routerConnections.startDiscovery() }
             .onDisappear { model.routerConnections.stopDiscovery() }
         }
+    }
+
+    private var pairingPayloadPresented: Binding<Bool> {
+        Binding(
+            get: { model.routerEnrollmentRoute.payload != nil },
+            set: { if !$0 { model.routerEnrollmentRoute.clear() } }
+        )
     }
 
     private func perform(_ action: ScanPrimaryAction, record: AppDeviceConnectionRecord) {

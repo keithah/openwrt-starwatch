@@ -184,6 +184,28 @@ final class RouterConnectionModel {
         return try await persist(host: host, token: result.token)
     }
 
+    @discardableResult
+    func enroll(
+        router: DiscoveredRouter,
+        pin: String,
+        label: String
+    ) async throws -> RouterHostMetadata {
+        let client = try enrollmentClientFactory(router.endpoint)
+        let result = try await client.enroll(
+            pin: pin,
+            label: label,
+            expectedDeviceID: router.deviceID,
+            expectedFingerprint: router.certificateFingerprint
+        )
+        let host = try Self.host(
+            result: result,
+            displayName: router.serviceName,
+            reachability: .lan,
+            allowsInsecureWAN: false
+        )
+        return try await persist(host: host, token: result.token)
+    }
+
     func remove(_ host: RouterHostMetadata) async throws {
         try await credentialStore.deleteToken(for: host.endpoint)
         try await hostStore.remove(id: host.id)
@@ -204,6 +226,29 @@ final class RouterConnectionModel {
         }
         await reloadSavedHosts()
         return host
+    }
+
+    private static func host(
+        result: RouterEnrollmentResult,
+        displayName: String,
+        reachability: RouterHostReachability,
+        allowsInsecureWAN: Bool
+    ) throws -> RouterHostMetadata {
+        var components = URLComponents()
+        components.scheme = result.endpoint.scheme
+        components.host = result.endpoint.host
+        components.port = result.endpoint.port
+        guard let address = components.string else {
+            throw RouterEnrollmentError.invalidResponse
+        }
+        return try RouterHostValidator.validate(
+            address,
+            displayName: displayName,
+            reachability: reachability,
+            allowsInsecureWAN: allowsInsecureWAN,
+            deviceID: result.deviceID,
+            certificateFingerprint: result.endpoint.certificateFingerprint
+        )
     }
 
     func record(identity: DeviceIdentitySnapshot) {

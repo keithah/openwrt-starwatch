@@ -86,6 +86,9 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         let plist = try NSDictionary(contentsOf: TestProjectFiles.url("Wattline/Info.plist"), error: ())
         XCTAssertEqual(plist["NSBonjourServices"] as? [String], ["_wattline._tcp"])
         XCTAssertFalse((plist["NSLocalNetworkUsageDescription"] as? String)?.isEmpty ?? true)
+        XCTAssertFalse((plist["NSCameraUsageDescription"] as? String)?.isEmpty ?? true)
+        let URLTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [NSDictionary])
+        XCTAssertEqual(URLTypes.first?["CFBundleURLSchemes"] as? [String], ["wattline"])
     }
 
     func testWidgetExtensionDeclaresWidgetKitExtensionPoint() throws {

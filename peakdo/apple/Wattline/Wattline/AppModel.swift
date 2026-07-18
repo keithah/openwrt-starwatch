@@ -220,6 +220,7 @@ final class AppModel {
     private let widgetReloadAdapter: WidgetReloadAdapter?
     private let liveActivityCoordinator: LiveActivityCoordinator
     let routerConnections: RouterConnectionModel
+    let routerEnrollmentRoute: RouterEnrollmentRoute
     private var snapshotFlushTask: Task<Void, Never>?
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
@@ -308,7 +309,8 @@ final class AppModel {
         snapshotCoordinator: SnapshotCoordinator? = SnapshotCoordinator.production(),
         widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter(),
         liveActivityAdapter: any LiveActivityAdapter = SystemLiveActivityAdapter(),
-        routerConnections: RouterConnectionModel = .production()
+        routerConnections: RouterConnectionModel = .production(),
+        routerEnrollmentRoute: RouterEnrollmentRoute = RouterEnrollmentRoute()
     ) {
         self.persistence = persistence
         self.transportFactory = transportFactory
@@ -323,6 +325,7 @@ final class AppModel {
         self.widgetReloadAdapter = widgetReloadAdapter
         self.liveActivityCoordinator = LiveActivityCoordinator(adapter: liveActivityAdapter)
         self.routerConnections = routerConnections
+        self.routerEnrollmentRoute = routerEnrollmentRoute
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
@@ -360,6 +363,10 @@ final class AppModel {
     }
 
     func handleDeepLink(_ url: URL) {
+        if routerEnrollmentRoute.consume(url) {
+            route = .scan
+            return
+        }
         guard url.scheme?.lowercased() == "wattline",
               url.host?.lowercased() == "dashboard" else { return }
         guard route != .onboarding else { return }

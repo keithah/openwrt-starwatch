@@ -1,6 +1,6 @@
 import Foundation
 import WattlineCore
-import WattlineNetwork
+@testable import WattlineNetwork
 import XCTest
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -102,6 +102,57 @@ final class RouterAppWiringTests: XCTestCase {
         let request = try XCTUnwrap(requests.first)
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.path, "/api/v1/pair")
+    }
+
+    func testDiscoveredRouterPINEnrollmentPersistsThenConnects() async throws {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "http://router.local:8377/api/v1/pair")!,
+            statusCode: 201,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        let body = Data(#"{"token":"managed-secret","device_id":"DC:04:5A:EB:72:2B","base_urls":{"https":null,"http":"http://router.local:8377/api/v1"},"tls_sha256":"","magic_dns_name":""}"#.utf8)
+        let enrollmentHTTP = RouterEnrollmentHTTPRecorder(result: .success((body, response)))
+        let fixture = makeFixture(enrollmentClientFactory: { _ in
+            RouterEnrollmentClient(httpClient: enrollmentHTTP)
+        })
+        let router = DiscoveredRouter(
+            deviceID: "DC045AEB722B",
+            serviceName: "Kitchen router",
+            domain: "local.",
+            model: "BP4SL3V2",
+            cid: 0x0305,
+            features: 0x0000_0fff,
+            certificateFingerprint: nil,
+            endpoint: RouterEndpoint(
+                scheme: "http", host: "router.local", port: 8377,
+                certificateFingerprint: nil, allowsInsecureWAN: false
+            )
+        )
+        var connectedHost: RouterHostMetadata?
+        let coordinator = RouterEnrollmentCoordinator(
+            connections: fixture.model,
+            connect: { connectedHost = $0 }
+        )
+
+        let saved = try await coordinator.submit(
+            pin: "123456",
+            label: "Keith iPhone",
+            router: router
+        )
+
+        XCTAssertEqual(saved.deviceID, "DC045AEB722B")
+        XCTAssertEqual(connectedHost, saved)
+        let savedToken = await fixture.credentialBackend.savedToken
+        XCTAssertEqual(savedToken, "managed-secret")
+        let requests = await enrollmentHTTP.requests
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.method, "POST")
+        XCTAssertEqual(request.path, "/api/v1/pair")
+        let requestJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(request.body)) as? [String: String]
+        )
+        XCTAssertEqual(requestJSON, ["pin": "123456", "label": "Keith iPhone"])
     }
 
     func testEnrollmentDeletesTokenWhenHostMetadataPersistenceFails() async throws {
@@ -286,6 +337,7 @@ private actor RouterEnrollmentHTTPRecorder: RouterEnrollmentHTTPClient {
     struct Request: Sendable {
         let method: String
         let path: String
+        let body: Data?
     }
 
     private let result: Result<(Data, HTTPURLResponse), any Error>
@@ -300,7 +352,7 @@ private actor RouterEnrollmentHTTPRecorder: RouterEnrollmentHTTPClient {
         _ path: String,
         body: Data?
     ) async throws -> (Data, HTTPURLResponse) {
-        requests.append(Request(method: method, path: path))
+        requests.append(Request(method: method, path: path, body: body))
         return try result.get()
     }
 }
