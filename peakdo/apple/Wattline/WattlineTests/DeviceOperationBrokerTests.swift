@@ -21,15 +21,13 @@ final class DeviceOperationBrokerTests: XCTestCase {
             session: session
         ))
 
-        async let first = broker.perform(.setDC(true), generation: 4)
-        while await replay.inFlightCount == 0 { await Task.yield() }
-        async let second = broker.perform(.setDC(false), generation: 4)
-        while await replay.maximumPendingTransactionCount < 2 { await Task.yield() }
+        let first = Task { try await broker.perform(.setDC(true), generation: 4) }
+        try await eventually { await replay.inFlightCount == 1 }
+        try await eventually { await clock.sleeperCount == 1 }
+        let second = Task { try await broker.perform(.setDC(false), generation: 4) }
 
-        let maximumWhileBothPending = await replay.maximumInFlightCount
-        XCTAssertEqual(maximumWhileBothPending, 1)
         await clock.advance(by: .seconds(1))
-        _ = try await (first, second)
+        _ = try await (first.value, second.value)
         await assertThrows(.superseded) {
             try await broker.perform(.setDC(false), generation: 3)
         }
@@ -51,7 +49,7 @@ final class DeviceOperationBrokerTests: XCTestCase {
         XCTAssertEqual(requests, [])
     }
 
-    func testAttachingDifferentPeripheralInSameGenerationRequiresReconnect() async {
+    func testAttachingDifferentPeripheralInSameGenerationRequiresReconnect() async throws {
         let harness = await makeHarness(generation: 3)
         await harness.broker.markConnected(peripheralID: harness.peripheralID, generation: 3)
         let nextPeripheralID = UUID()
@@ -66,7 +64,7 @@ final class DeviceOperationBrokerTests: XCTestCase {
         let result = Task {
             try await harness.broker.withConnection(to: nextPeripheralID) { _ in true }
         }
-        for _ in 0..<20 { await Task.yield() }
+        try await eventually { await harness.reconnect.requests.count == 1 }
 
         let requests = await harness.reconnect.requests
         XCTAssertEqual(requests.count, 1)
@@ -399,6 +397,23 @@ final class DeviceOperationBrokerTests: XCTestCase {
             XCTFail("Unexpected error: \(error)", file: file, line: line)
         }
     }
+
+    private func eventually(
+        timeout: Duration = .seconds(2),
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () async -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !(await condition()) {
+            if clock.now >= deadline {
+                XCTFail("Condition was not met before timeout", file: file, line: line)
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
 }
 
 private struct BrokerHarness: Sendable {
@@ -433,6 +448,7 @@ private actor BrokerTestClock: DeviceClock {
 
     private(set) var now: Duration = .zero
     private var sleepers: [Sleeper] = []
+    var sleeperCount: Int { sleepers.count }
 
     func sleep(for duration: Duration) async throws {
         await withCheckedContinuation { continuation in

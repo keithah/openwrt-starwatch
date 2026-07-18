@@ -372,7 +372,7 @@ final class AppModelReconnectTests: XCTestCase {
         do {
             _ = try await result.value
             XCTFail("Old broker context must be rejected after scan state is visible")
-        } catch let error as DeviceOperationBroker.BrokerError {
+        } catch let error as Wattline.DeviceOperationBroker.BrokerError {
             XCTAssertEqual(error, .unavailable)
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -416,7 +416,7 @@ final class AppModelReconnectTests: XCTestCase {
                 return true
             }
             XCTFail("Old broker context must be rejected after transport replacement returns")
-        } catch let error as DeviceOperationBroker.BrokerError {
+        } catch let error as Wattline.DeviceOperationBroker.BrokerError {
             XCTAssertEqual(error, .unavailable)
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -739,7 +739,7 @@ final class AppModelReconnectTests: XCTestCase {
         do {
             _ = try await first.value
             XCTFail("The superseded first waiter must fail")
-        } catch let error as DeviceOperationBroker.BrokerError {
+        } catch let error as Wattline.DeviceOperationBroker.BrokerError {
             XCTAssertEqual(error, .superseded)
         }
     }
@@ -892,6 +892,14 @@ final class AppModelReconnectTests: XCTestCase {
         let reply = Data([Command.dcControl.rawValue, Action.set.rawValue | 0x80, 0])
         let transport = MutationTransport(steps: [.suspendedReply(reply)])
         let model = makeMutationModel(transport: transport)
+        let peripheralID = UUID()
+        model.choose(.init(
+            id: peripheralID,
+            localName: "Link-Power 2",
+            rssi: -45,
+            mode: .application
+        ))
+        try await eventually { model.connectionStatus == .connected }
         let off = try DCPortStatus(frame: Data([0, 0, 0, 0, 0, 0, 0, 0]))
         await transport.emit(.dc(off, timestamp: .zero))
         try await eventually { model.state.dc == off }
@@ -949,14 +957,14 @@ final class AppModelReconnectTests: XCTestCase {
             let model = AppModel(persistence: fixture.persistence, transportFactory: { fixture.transport })
 
             try await eventually { await fixture.transport.scanCount == 1 }
-            await fixture.transport.releasePostThrowDisconnectIfNeeded()
-            if ordering == .afterThrow {
-                try await eventually {
-                    model.connectionStatus == .disconnected("reconnect failed")
-                }
+            try await eventually {
+                model.connectionStatus == .disconnected("reconnectFailed")
             }
+            await fixture.transport.releasePostThrowDisconnectIfNeeded()
+            try await Task.sleep(for: .milliseconds(25))
 
             XCTAssertEqual(model.route, .scan, "ordering: \(ordering)")
+            XCTAssertEqual(model.connectionStatus, .disconnected("reconnectFailed"), "ordering: \(ordering)")
             XCTAssertEqual(model.scanMessage, "Couldn’t reconnect. Scanning for nearby devices.")
             XCTAssertEqual(fixture.persistence.lastSuccessfulPeripheralID, id)
 
@@ -1210,12 +1218,17 @@ final class AppModelReconnectTests: XCTestCase {
 
     private func eventually(
         timeout: Duration = .seconds(2),
+        file: StaticString = #filePath,
+        line: UInt = #line,
         condition: @escaping () async -> Bool
     ) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while !(await condition()) {
-            if clock.now >= deadline { XCTFail("Condition was not met before timeout"); return }
+            if clock.now >= deadline {
+                XCTFail("Condition was not met before timeout", file: file, line: line)
+                return
+            }
             try await Task.sleep(for: .milliseconds(10))
         }
     }

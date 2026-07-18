@@ -11,7 +11,8 @@ final class PackageBoundaryTests: XCTestCase {
         "NetworkExtension",
         "NWBrowser",
         "NWConnection",
-        "Network."
+        "Network.",
+        "import Security"
     ]
 
     func testCoreImportAuditDetectsEveryForbiddenNetworkingToken() {
@@ -23,7 +24,8 @@ final class PackageBoundaryTests: XCTestCase {
             "NetworkExtension",
             "NWBrowser",
             "NWConnection",
-            "Network."
+            "Network.",
+            "import Security"
         ]
         for token in requiredTokens {
             let fixture = "let marker = \"\(token)\""
@@ -34,7 +36,7 @@ final class PackageBoundaryTests: XCTestCase {
         }
     }
 
-    func testUnauthorizedErrorAndCoreImportAudit() throws {
+    func testUnauthorizedErrorAndCoreUIImportAudit() throws {
         XCTAssertEqual(NetworkError.unauthorized, .unauthorized)
 
         let coreRoot = URL(fileURLWithPath: #filePath)
@@ -42,18 +44,21 @@ final class PackageBoundaryTests: XCTestCase {
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // WattlineNetwork
             .deletingLastPathComponent() // apple
-        let sourceRoot = coreRoot.appendingPathComponent("WattlineCore/Sources")
-        let enumerator = FileManager.default.enumerator(at: sourceRoot, includingPropertiesForKeys: nil)
-        var auditedFileCount = 0
-        for case let file as URL in enumerator ?? FileManager.default.enumerator(atPath: sourceRoot.path)! {
-            guard file.pathExtension == "swift" else { continue }
-            auditedFileCount += 1
-            let contents = try String(contentsOf: file)
-            for token in forbiddenNetworkingTokens(in: contents) {
-                XCTAssertFalse(contents.contains(token), "WattlineCore contains forbidden networking token \(token) in \(file.path)")
+        for module in ["WattlineCore", "WattlineUI"] {
+            let sourceRoot = coreRoot.appendingPathComponent("\(module)/Sources")
+            let enumerator = FileManager.default.enumerator(at: sourceRoot, includingPropertiesForKeys: nil)
+            var auditedFileCount = 0
+            for case let file as URL in enumerator ?? FileManager.default.enumerator(atPath: sourceRoot.path)! {
+                guard file.pathExtension == "swift" else { continue }
+                auditedFileCount += 1
+                let contents = try String(contentsOf: file)
+                XCTAssertTrue(
+                    forbiddenNetworkingTokens(in: contents).isEmpty,
+                    "\(module) contains a forbidden networking token in \(file.path)"
+                )
             }
+            XCTAssertGreaterThan(auditedFileCount, 0, "\(module) source audit did not inspect any Swift files")
         }
-        XCTAssertGreaterThan(auditedFileCount, 0, "WattlineCore source audit did not inspect any Swift files")
     }
 
     private func forbiddenNetworkingTokens(in contents: String) -> [String] {

@@ -184,11 +184,11 @@
 - `RouterConnectionModel` exposes discovered/manual endpoints, transport labels, DEMO/BT/Router selection, and saved-host actions.
 - AppModel receives a `DeviceTransport` factory and keeps one owner per process; selecting RouterTransport never creates a BLE session.
 
-- [ ] Step 1: Add failing tests for router records alongside BLE records, manual host selection, same-device deduplication, unsupported surfaces absent from the view model, and no second transport owner.
-- [ ] Step 2: Run the app-target focused tests; expected failures.
-- [ ] Step 3: Wire the package into app targets, add Scan selection and “Connect via router” advanced path, and amend §9 to describe optional LAN/Tailscale/VPN token-authenticated no-cloud transport and insecure-WAN opt-in.
-- [ ] Step 4: Run focused app tests, Core/UI/Network suites, and generic iOS/macOS builds.
-- [ ] Step 5: Commit `feat: wire optional router transport into Wattline`.
+- [x] Step 1: Add failing tests for router records alongside BLE records, manual host selection, same-device deduplication, unsupported surfaces absent from the view model, and no second transport owner.
+- [x] Step 2: Run the app-target focused tests; expected failures.
+- [x] Step 3: Wire the package into app targets, add Scan selection and “Connect via router” advanced path, and amend §9 to describe optional LAN/Tailscale/VPN token-authenticated no-cloud transport and insecure-WAN opt-in.
+- [x] Step 4: Run focused app tests, Core/UI/Network suites, and generic iOS/macOS builds.
+- [x] Step 5: Commit `feat: wire optional router transport into Wattline`.
 
 ### Task 9: Verification and handoff
 
@@ -196,13 +196,13 @@
 - Modify: `peakdo/apple/WattlineNetwork/Tests/WattlineNetworkTests/NetworkAuditTests.swift`
 - Modify: `peakdo/apple/docs/superpowers/plans/2026-07-17-wattline-network.md` only for checked results
 
-- [ ] Step 1: Run `swift test --package-path peakdo/apple/WattlineCore`.
-- [ ] Step 2: Run `swift test --package-path peakdo/apple/WattlineUI`.
-- [ ] Step 3: Run `swift test --package-path peakdo/apple/WattlineNetwork`.
-- [ ] Step 4: Run app tests/builds with `xcodebuild` for a generic iOS destination and macOS destination where available.
-- [ ] Step 5: Run audits: `rg` forbidden imports in Core/UI, `rg 'URLSession|NWBrowser|Network\.'` to confirm network isolation, `rg 'api\.peakdo\.ca|URLSession'` to ensure no OTA/cloud additions, and `git diff --check`.
-- [ ] Step 6: Document real-router, signed simulator, TLS fingerprint, and background reconnect checks that remain external.
-- [ ] Step 7: Commit `test: verify optional router transport boundaries` and stop for review.
+- [x] Step 1: Run `swift test --package-path peakdo/apple/WattlineCore`.
+- [x] Step 2: Run `swift test --package-path peakdo/apple/WattlineUI`.
+- [x] Step 3: Run `swift test --package-path peakdo/apple/WattlineNetwork`.
+- [x] Step 4: Run app tests/builds with `xcodebuild` for a generic iOS destination and macOS destination where available.
+- [x] Step 5: Run audits: `rg` forbidden imports in Core/UI, `rg 'URLSession|NWBrowser|Network\.'` to confirm network isolation, `rg 'api\.peakdo\.ca|URLSession'` to ensure no OTA/cloud additions, and `git diff --check`.
+- [x] Step 6: Document real-router, signed simulator, TLS fingerprint, and background reconnect checks that remain external.
+- [x] Step 7: Commit `test: verify optional router transport boundaries` and stop for review.
 
 **Milestone 4 handoff:** Deliver the complete diff, executed outputs, audit results, and external-check classification. Do not begin unrelated feature work without approval.
 
