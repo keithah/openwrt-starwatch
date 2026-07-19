@@ -118,6 +118,24 @@ func TestUnavailableInputsDoNotFalselyClearActiveAlerts(t *testing.T) {
 	}
 }
 
+func TestDisablingActiveRuleEmitsResolve(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	notifications := &notificationSink{}
+	rules := map[string]Rule{"thermal_throttle": DefaultRules()["thermal_throttle"]}
+	engine := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, Delivery: notifications})
+	inputs := Inputs{Dish: dish.Snapshot{Dish: &dish.Status{Alerts: map[string]bool{"thermal_throttle": true}}}}
+	engine.Tick(inputs)
+	rule := rules["thermal_throttle"]
+	rule.Enabled = false
+	rules["thermal_throttle"] = rule
+	engine.SetRules(rules)
+	now = now.Add(time.Minute)
+	engine.Tick(inputs)
+	if len(notifications.notifications) != 2 || notifications.notifications[0].State != StateFiring || notifications.notifications[1].State != StateResolved {
+		t.Fatalf("notifications=%#v", notifications.notifications)
+	}
+}
+
 func TestOutageAndDishUnreachableHoldDedupAndSuppression(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	notifications := &notificationSink{}

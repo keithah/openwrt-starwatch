@@ -181,7 +181,14 @@ func (e *Engine) Tick(inputs Inputs) {
 			continue
 		}
 		rule, exists := rules[name]
-		if !exists || !rule.Enabled {
+		if !exists {
+			delete(e.states, name)
+			continue
+		}
+		if !rule.Enabled {
+			if state := e.states[name]; state != nil && state.active {
+				e.emit(name, rule.Severity, StateResolved, state, inputs, now)
+			}
 			delete(e.states, name)
 			continue
 		}

@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 )
@@ -30,6 +29,18 @@ type Dispatcher struct {
 	queue   chan Notification
 	mu      sync.Mutex
 }
+
+type deliveryJob struct {
+	notification Notification
+	endpoint     string
+}
+
+type deliveryHTTPError struct {
+	code   int
+	status string
+}
+
+func (e *deliveryHTTPError) Error() string { return "HTTP " + e.status }
 
 func NewDispatcher(options DeliveryOptions) *Dispatcher {
 	if options.HTTPClient == nil {
@@ -77,33 +88,113 @@ func (d *Dispatcher) Enqueue(notification Notification) {
 }
 
 func (d *Dispatcher) Run(ctx context.Context) {
+	webhookQueue := make(chan deliveryJob, cap(d.queue))
+	ntfyQueue := make(chan deliveryJob, cap(d.queue))
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		d.runEndpoint(ctx, "webhook", webhookQueue)
+	}()
+	go func() {
+		defer workers.Done()
+		d.runEndpoint(ctx, "ntfy", ntfyQueue)
+	}()
+	defer workers.Wait()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case notification := <-d.queue:
-			d.deliver(ctx, notification)
+			webhookURL, ntfyURL := d.endpoints()
+			if webhookURL != "" {
+				d.enqueueEndpoint("webhook", webhookQueue, deliveryJob{notification: notification, endpoint: webhookURL})
+			}
+			if ntfyURL != "" {
+				d.enqueueEndpoint("ntfy", ntfyQueue, deliveryJob{notification: notification, endpoint: ntfyURL})
+			}
 		}
 	}
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, notification Notification) {
-	d.mu.Lock()
-	webhookURL, ntfyURL := d.options.WebhookURL, d.options.NtfyURL
-	d.mu.Unlock()
+	webhookURL, ntfyURL := d.endpoints()
+	var deliveries sync.WaitGroup
 	if webhookURL != "" {
-		if err := d.webhook(ctx, notification, webhookURL); err != nil {
-			d.options.Logf("starwatchd: webhook delivery failed for %s: %s", notification.Alert, safeDeliveryError(err))
-		}
+		deliveries.Add(1)
+		go func() {
+			defer deliveries.Done()
+			d.deliverEndpoint(ctx, "webhook", deliveryJob{notification: notification, endpoint: webhookURL})
+		}()
 	}
 	if ntfyURL != "" {
-		if err := d.ntfy(ctx, notification, ntfyURL); err != nil {
-			d.options.Logf("starwatchd: ntfy delivery failed for %s: %s", notification.Alert, safeDeliveryError(err))
+		deliveries.Add(1)
+		go func() {
+			defer deliveries.Done()
+			d.deliverEndpoint(ctx, "ntfy", deliveryJob{notification: notification, endpoint: ntfyURL})
+		}()
+	}
+	deliveries.Wait()
+}
+
+func (d *Dispatcher) endpoints() (string, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.options.WebhookURL, d.options.NtfyURL
+}
+
+func (d *Dispatcher) runEndpoint(ctx context.Context, kind string, jobs <-chan deliveryJob) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-jobs:
+			d.deliverEndpoint(ctx, kind, job)
 		}
 	}
 }
 
+func (d *Dispatcher) deliverEndpoint(ctx context.Context, kind string, job deliveryJob) {
+	var err error
+	if kind == "webhook" {
+		err = d.webhook(ctx, job.notification, job.endpoint)
+	} else {
+		err = d.ntfy(ctx, job.notification, job.endpoint)
+	}
+	if err != nil && ctx.Err() == nil {
+		d.logf("starwatchd: %s delivery failed for %s: %s", kind, job.notification.Alert, safeDeliveryError(err))
+	}
+}
+
+func (d *Dispatcher) enqueueEndpoint(kind string, queue chan deliveryJob, job deliveryJob) {
+	select {
+	case queue <- job:
+		return
+	default:
+	}
+	select {
+	case dropped := <-queue:
+		d.logf("starwatchd: %s delivery queue full; dropping oldest %s notification", kind, dropped.notification.Alert)
+	default:
+	}
+	select {
+	case queue <- job:
+	default:
+		d.logf("starwatchd: %s delivery queue remained full; dropping %s notification", kind, job.notification.Alert)
+	}
+}
+
+func (d *Dispatcher) logf(format string, args ...any) {
+	d.mu.Lock()
+	d.options.Logf(format, args...)
+	d.mu.Unlock()
+}
+
 func safeDeliveryError(err error) string {
+	var statusError *deliveryHTTPError
+	if errors.As(err, &statusError) {
+		return statusError.Error()
+	}
 	var requestError *url.Error
 	if errors.As(err, &requestError) {
 		switch {
@@ -115,10 +206,16 @@ func safeDeliveryError(err error) string {
 			return "network request failed"
 		}
 	}
-	if strings.HasPrefix(err.Error(), "HTTP ") {
-		return err.Error()
-	}
 	return fmt.Sprintf("%T", err)
+}
+
+func retryableDeliveryError(err error) bool {
+	var statusError *deliveryHTTPError
+	if errors.As(err, &statusError) {
+		return statusError.code == http.StatusTooManyRequests || statusError.code >= http.StatusInternalServerError
+	}
+	var requestError *url.Error
+	return errors.As(err, &requestError)
 }
 
 func (d *Dispatcher) webhook(ctx context.Context, notification Notification, endpoint string) error {
@@ -140,10 +237,10 @@ func (d *Dispatcher) webhook(ctx context.Context, notification Notification, end
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
 				return nil
 			}
-			err = fmt.Errorf("HTTP %s", response.Status)
+			err = &deliveryHTTPError{code: response.StatusCode, status: response.Status}
 		}
 		lastErr = err
-		if attempt == 3 {
+		if attempt == 3 || !retryableDeliveryError(err) {
 			break
 		}
 		if err := d.options.Sleep(ctx, d.options.Backoff*time.Duration(1<<attempt)); err != nil {
@@ -174,7 +271,7 @@ func (d *Dispatcher) ntfy(ctx context.Context, notification Notification, endpoi
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, response.Body)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %s", response.Status)
+		return &deliveryHTTPError{code: response.StatusCode, status: response.Status}
 	}
 	return nil
 }

@@ -123,3 +123,106 @@ func TestDispatcherFailureLogDoesNotExposeEndpointSecret(t *testing.T) {
 		t.Fatalf("log lacks safe context: %q", logged)
 	}
 }
+
+func TestDispatcherDoesNotRetryTerminalWebhook4xx(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "invalid", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	var sleeps []time.Duration
+	dispatcher := NewDispatcher(DeliveryOptions{
+		WebhookURL: server.URL, HTTPClient: server.Client(), Backoff: time.Millisecond,
+		Sleep: func(_ context.Context, duration time.Duration) error { sleeps = append(sleeps, duration); return nil },
+	})
+	if err := dispatcher.webhook(context.Background(), Notification{Alert: "test"}, server.URL); err == nil {
+		t.Fatal("terminal 400 returned no error")
+	}
+	if calls.Load() != 1 || len(sleeps) != 0 {
+		t.Fatalf("calls=%d sleeps=%v", calls.Load(), sleeps)
+	}
+}
+
+func TestDispatcherRetriesWebhookRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "later", http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	var sleeps []time.Duration
+	dispatcher := NewDispatcher(DeliveryOptions{
+		HTTPClient: server.Client(), Backoff: time.Millisecond,
+		Sleep: func(_ context.Context, duration time.Duration) error { sleeps = append(sleeps, duration); return nil },
+	})
+	if err := dispatcher.webhook(context.Background(), Notification{Alert: "test"}, server.URL); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 || !reflect.DeepEqual(sleeps, []time.Duration{time.Millisecond}) {
+		t.Fatalf("calls=%d sleeps=%v", calls.Load(), sleeps)
+	}
+}
+
+func TestDispatcherRunDoesNotLetWebhookRetryBlockNtfy(t *testing.T) {
+	retryStarted := make(chan struct{}, 1)
+	releaseRetry := make(chan struct{})
+	ntfyDelivered := make(chan string, 2)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(request.Body)
+		var notification Notification
+		_ = json.Unmarshal(body, &notification)
+		status := http.StatusServiceUnavailable
+		if request.URL.Host == "ntfy.test" {
+			status = http.StatusNoContent
+			ntfyDelivered <- notification.Alert
+		}
+		return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	dispatcher := NewDispatcher(DeliveryOptions{
+		WebhookURL: "https://webhook.test/hook", NtfyURL: "https://ntfy.test/topic", HTTPClient: client, QueueSize: 4,
+		Sleep: func(ctx context.Context, _ time.Duration) error {
+			select {
+			case retryStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-releaseRetry:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer close(releaseRetry)
+	done := make(chan struct{})
+	go func() { dispatcher.Run(ctx); close(done) }()
+	dispatcher.Enqueue(Notification{Alert: "one"})
+	select {
+	case <-retryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("webhook did not enter retry backoff")
+	}
+	dispatcher.Enqueue(Notification{Alert: "two"})
+	for _, want := range []string{"one", "two"} {
+		select {
+		case got := <-ntfyDelivered:
+			if got != want {
+				t.Fatalf("ntfy delivery=%q want=%q", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("ntfy delivery %q blocked by webhook retry", want)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not stop")
+	}
+}
