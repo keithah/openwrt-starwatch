@@ -125,6 +125,61 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(fixture.model.historyError)
     }
 
+    func testLockDoesNotInvalidateInFlightHistorySuccess() async throws {
+        let existing = #"[{"at":"2026-07-17T19:59:00Z","level":41,"status":-1}]"#
+        let refreshed = #"[{"at":"2026-07-17T20:00:00Z","level":73,"status":1}]"#
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok(existing), AdminScriptedHTTP.ok(refreshed)],
+            historyGatedCallNumbers: [2]
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.reloadHistory()
+        XCTAssertEqual(fixture.model.history.first?.level, 41)
+
+        let reload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+        await fixture.model.lock()
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertEqual(fixture.model.history.first?.level, 41)
+        XCTAssertEqual(fixture.model.historyLoadState, .refreshing)
+
+        fixture.historyHTTP.releaseGates()
+        await reload.value
+
+        XCTAssertEqual(fixture.model.history.first?.level, 73)
+        XCTAssertEqual(fixture.model.historyLoadState, .loaded)
+        XCTAssertNotNil(fixture.model.historyFetchedAt)
+        XCTAssertNil(fixture.model.historyError)
+    }
+
+    func testLockDoesNotStrandInFlightHistoryError() async throws {
+        let existing = #"[{"at":"2026-07-17T19:59:00Z","level":41,"status":-1}]"#
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok(existing), .failure(NetworkError.timeout)],
+            historyGatedCallNumbers: [2]
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.reloadHistory()
+        XCTAssertEqual(fixture.model.history.first?.level, 41)
+
+        let reload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+        await fixture.model.lock()
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertEqual(fixture.model.history.first?.level, 41)
+        XCTAssertEqual(fixture.model.historyLoadState, .refreshing)
+
+        fixture.historyHTTP.releaseGates()
+        await reload.value
+
+        XCTAssertEqual(fixture.model.history.first?.level, 41)
+        XCTAssertEqual(fixture.model.historyLoadState, .failed)
+        XCTAssertNotNil(fixture.model.historyFetchedAt)
+        XCTAssertEqual(fixture.model.historyError, "Could not load router history.")
+    }
+
     func testOlderSameSessionHistorySuccessCannotOverwriteNewerSuccess() async throws {
         let older = #"[{"at":"2026-07-17T19:58:00Z","level":41,"status":-1}]"#
         let newer = #"[{"at":"2026-07-17T20:00:00Z","level":89,"status":1}]"#
@@ -221,6 +276,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.history, [])
         XCTAssertNil(fixture.model.historyFetchedAt)
         XCTAssertNil(fixture.model.historyError)
+        XCTAssertEqual(fixture.model.historyLoadState, .neverLoaded)
     }
 
     func testHistoryErrorFromEndedSessionDoesNotPublish() async throws {
@@ -238,6 +294,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         await reload.value
 
         XCTAssertNil(fixture.model.historyError)
+        XCTAssertEqual(fixture.model.historyLoadState, .neverLoaded)
     }
 
     func testHistorySuccessReleasedAfterReplacementBeginDoesNotPublish() async throws {
@@ -259,6 +316,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.history, [])
         XCTAssertNil(fixture.model.historyFetchedAt)
         XCTAssertNil(fixture.model.historyError)
+        XCTAssertEqual(fixture.model.historyLoadState, .neverLoaded)
     }
 
     func testHistoryErrorReleasedAfterReplacementBeginDoesNotPublish() async throws {
@@ -279,6 +337,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.history, [])
         XCTAssertNil(fixture.model.historyFetchedAt)
         XCTAssertNil(fixture.model.historyError)
+        XCTAssertEqual(fixture.model.historyLoadState, .neverLoaded)
     }
 
     func testBeginningReplacementSessionClearsPublishedHistory() async throws {
@@ -302,19 +361,21 @@ final class RouterAdministrationModelTests: XCTestCase {
         let fixture = try await makeFixture(results: [AdminScriptedHTTP.ok("{}")])
         await fixture.model.begin(host: fixture.host)
         XCTAssertEqual(fixture.model.access, .locked)
-        XCTAssertEqual(
-            RouterAdministrationPresentation(access: fixture.model.access).visibleSections,
-            [.connectionAndHistory]
-        )
+        let locked = RouterAdministrationPresentation(access: fixture.model.access)
+        XCTAssertTrue(locked.showsHistory)
+        XCTAssertTrue(locked.showsClientSections)
+        XCTAssertFalse(locked.showsAdministratorSections)
+        XCTAssertTrue(locked.showsUnlockField)
 
         await fixture.model.unlock(token: "boot-admin")
 
         XCTAssertEqual(fixture.model.access, .unlocked)
         XCTAssertNil(fixture.model.adminError)
-        XCTAssertEqual(
-            RouterAdministrationPresentation(access: fixture.model.access).visibleSections,
-            [.connectionAndHistory, .clientEnrollment, .apiClients]
-        )
+        let unlocked = RouterAdministrationPresentation(access: fixture.model.access)
+        XCTAssertTrue(unlocked.showsHistory)
+        XCTAssertTrue(unlocked.showsClientSections)
+        XCTAssertTrue(unlocked.showsAdministratorSections)
+        XCTAssertFalse(unlocked.showsUnlockField)
         let stored = try await fixture.credentialStore.readToken(
             for: fixture.host.endpoint, role: .administrator
         )

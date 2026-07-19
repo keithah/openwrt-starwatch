@@ -32,6 +32,7 @@ final class RouterAdministrationModel {
     private let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient
     private let now: () -> Date
     private var sessionGeneration: UInt64 = 0
+    private var adminOperationGeneration: UInt64 = 0
     private var historyRequestGeneration: UInt64 = 0
 
     init(
@@ -81,7 +82,9 @@ final class RouterAdministrationModel {
 
     private func beginSession(host: RouterHostMetadata) async -> UInt64 {
         sessionGeneration &+= 1
-        let generation = sessionGeneration
+        adminOperationGeneration &+= 1
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
         self.host = host
         access = .locked
         adminError = nil
@@ -92,25 +95,34 @@ final class RouterAdministrationModel {
         do {
             try await adminClient.attach(endpoint: host.endpoint)
         } catch {
-            guard sessionGeneration == generation else { return generation }
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation
+            else { return session }
             adminError = "Could not prepare a connection to this router."
-            return generation
+            return session
         }
-        guard sessionGeneration == generation else { return generation }
+        guard sessionGeneration == session,
+              adminOperationGeneration == adminOperation
+        else { return session }
         access = .verifying
         do {
             try await adminClient.verifyStoredAdministrator()
-            guard sessionGeneration == generation else { return generation }
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation
+            else { return session }
             access = .unlocked
         } catch {
-            guard sessionGeneration == generation else { return generation }
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation
+            else { return session }
             access = .locked
         }
-        return generation
+        return session
     }
 
     func end() async {
         sessionGeneration &+= 1
+        adminOperationGeneration &+= 1
         host = nil
         access = .locked
         adminError = nil
@@ -149,18 +161,26 @@ final class RouterAdministrationModel {
 
     func unlock(token: String) async {
         guard host != nil, access != .verifying else { return }
-        let generation = sessionGeneration
+        adminOperationGeneration &+= 1
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
         access = .verifying
         adminError = nil
         do {
             try await adminClient.verifyAdministrator(token: token)
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation
+            else { return }
             access = .unlocked
         } catch is CancellationError {
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation
+            else { return }
             access = .locked
         } catch {
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation
+            else { return }
             access = .locked
             adminError = Self.unlockMessage(for: error)
         }
@@ -168,7 +188,7 @@ final class RouterAdministrationModel {
 
     func lock() async {
         guard host != nil else { return }
-        sessionGeneration &+= 1
+        adminOperationGeneration &+= 1
         access = .locked
         adminError = nil
         try? await adminClient.clearAdministratorCredential()
@@ -187,19 +207,15 @@ final class RouterAdministrationModel {
 }
 
 struct RouterAdministrationPresentation: Equatable {
-    enum Section: Equatable {
-        case connectionAndHistory
-        case clientEnrollment
-        case apiClients
-    }
-
-    let visibleSections: [Section]
+    let showsHistory: Bool
+    let showsClientSections: Bool
+    let showsAdministratorSections: Bool
     let showsUnlockField: Bool
 
     init(access: RouterAdministrationModel.AdminAccess) {
+        showsHistory = true
+        showsClientSections = true
+        showsAdministratorSections = access == .unlocked
         showsUnlockField = access != .unlocked
-        visibleSections = access == .unlocked
-            ? [.connectionAndHistory, .clientEnrollment, .apiClients]
-            : [.connectionAndHistory]
     }
 }

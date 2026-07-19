@@ -18,10 +18,12 @@ struct RouterAdministrationView: View {
                     LabeledContent("Address", value: "\(host.host):\(host.port)")
                 }
 
-                Section("History") {
-                    RouterHistoryView(model: admin)
-                    Button("Refresh history") {
-                        Task { await admin.reloadHistory() }
+                if presentation.showsClientSections, presentation.showsHistory {
+                    Section("History") {
+                        RouterHistoryView(model: admin)
+                        Button("Refresh history") {
+                            Task { await admin.reloadHistory() }
+                        }
                     }
                 }
 
@@ -41,7 +43,7 @@ struct RouterAdministrationView: View {
                     } footer: {
                         Text("The administrator token is verified against the router and stored in Keychain. Wattline cannot promote a managed client token.")
                     }
-                } else {
+                } else if presentation.showsAdministratorSections {
                     Section("Administration") {
                         Button("Lock administration", role: .destructive) {
                             Task { await admin.lock() }
