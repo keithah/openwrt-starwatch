@@ -135,3 +135,42 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
         return satisfied.map(\.continuation)
     }
 }
+
+actor AdministrationCredentialBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private(set) var saveCount = 0
+    private let gateSaves: Bool
+    private var saveStarted = false
+    private var saveStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var saveGate: CheckedContinuation<Void, Never>?
+
+    init(gateSaves: Bool = false) {
+        self.gateSaves = gateSaves
+    }
+
+    func read(account: String) async throws -> Data? { values[account] }
+
+    func save(_ data: Data, account: String) async throws {
+        saveCount += 1
+        saveStarted = true
+        let waiters = saveStartedWaiters
+        saveStartedWaiters = []
+        waiters.forEach { $0.resume() }
+        if gateSaves {
+            await withCheckedContinuation { saveGate = $0 }
+        }
+        values[account] = data
+    }
+
+    func delete(account: String) async throws { values[account] = nil }
+
+    func waitForSaveToStart() async {
+        if saveStarted { return }
+        await withCheckedContinuation { saveStartedWaiters.append($0) }
+    }
+
+    func releaseSave() {
+        saveGate?.resume()
+        saveGate = nil
+    }
+}
