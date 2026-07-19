@@ -26,6 +26,9 @@ final class RouterAdministrationModel {
     private(set) var historyFetchedAt: Date?
     private(set) var historyError: String?
     private(set) var historyLoadState: HistoryLoadState = .neverLoaded
+    private(set) var pairingStatus: RouterPairingMode?
+    private(set) var pairingQRPNG: Data?
+    private(set) var pairingError: String?
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
@@ -34,6 +37,7 @@ final class RouterAdministrationModel {
     private var sessionGeneration: UInt64 = 0
     private var adminOperationGeneration: UInt64 = 0
     private var historyRequestGeneration: UInt64 = 0
+    private var pairingSecretGeneration: UInt64 = 0
 
     init(
         connections: RouterConnectionModel,
@@ -85,6 +89,8 @@ final class RouterAdministrationModel {
         adminOperationGeneration &+= 1
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
+        clearPairingSecrets()
+        pairingError = nil
         self.host = host
         access = .locked
         adminError = nil
@@ -130,6 +136,8 @@ final class RouterAdministrationModel {
         historyFetchedAt = nil
         historyError = nil
         historyLoadState = .neverLoaded
+        clearPairingSecrets()
+        pairingError = nil
         await adminClient.detach()
     }
 
@@ -177,11 +185,13 @@ final class RouterAdministrationModel {
                   adminOperationGeneration == adminOperation
             else { return }
             access = .locked
+            clearPairingSecrets()
         } catch {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation
             else { return }
             access = .locked
+            clearPairingSecrets()
             adminError = Self.unlockMessage(for: error)
         }
     }
@@ -191,7 +201,109 @@ final class RouterAdministrationModel {
         adminOperationGeneration &+= 1
         access = .locked
         adminError = nil
+        clearPairingSecrets()
         try? await adminClient.clearAdministratorCredential()
+    }
+
+    func reloadPairingMode() async {
+        pairingError = await performPairingAdmin { client in
+            try await client.pairingMode()
+        } apply: { [weak self] status in
+            self?.publishPairingStatus(status)
+        }
+    }
+
+    func openPairing() async {
+        pairingError = await performPairingAdmin { client in
+            try await client.openPairingMode()
+        } apply: { [weak self] status in
+            self?.publishPairingStatus(status)
+        }
+    }
+
+    func closePairing() async {
+        pairingError = await performPairingAdmin { client in
+            try await client.closePairingMode()
+        } apply: { [weak self] in
+            self?.clearPairingSecrets()
+        }
+    }
+
+    func loadPairingQR() async {
+        guard pairingStatus?.open == true else { return }
+        pairingError = await performPairingAdmin { client in
+            try await client.pairingQRCodePNG()
+        } apply: { [weak self] png in
+            self?.pairingQRPNG = png
+        }
+    }
+
+    func clearPairingSecrets() {
+        pairingSecretGeneration &+= 1
+        pairingStatus = nil
+        pairingQRPNG = nil
+    }
+
+    func expirePairingSecretsIfNeeded() {
+        guard let status = pairingStatus,
+              status.open,
+              status.expiresAt <= now()
+        else { return }
+        clearPairingSecrets()
+    }
+
+    private func publishPairingStatus(_ status: RouterPairingMode) {
+        pairingStatus = status
+        if status.open == false {
+            pairingQRPNG = nil
+        }
+    }
+
+    private func performAdmin<Value>(
+        _ operation: (RouterAdministrationClient) async throws -> Value,
+        apply: (Value) -> Void
+    ) async -> String? {
+        guard host != nil, access == .unlocked else { return nil }
+        let generation = sessionGeneration
+        do {
+            let value = try await operation(adminClient)
+            guard sessionGeneration == generation else { return nil }
+            apply(value)
+            return nil
+        } catch is CancellationError {
+            return nil
+        } catch {
+            guard sessionGeneration == generation else { return nil }
+            if handleAdminFailure(error) {
+                try? await adminClient.clearAdministratorCredential()
+                return nil
+            }
+            return "The request failed. Try again."
+        }
+    }
+
+    private func performPairingAdmin<Value>(
+        _ operation: (RouterAdministrationClient) async throws -> Value,
+        apply: (Value) -> Void
+    ) async -> String? {
+        let secretGeneration = pairingSecretGeneration
+        return await performAdmin(operation) { [weak self] value in
+            guard let self,
+                  pairingSecretGeneration == secretGeneration
+            else { return }
+            apply(value)
+        }
+    }
+
+    private func handleAdminFailure(_ error: Error) -> Bool {
+        guard (error as? RouterAdministrationError) == .invalidAdministratorToken else {
+            return false
+        }
+        adminOperationGeneration &+= 1
+        access = .locked
+        clearPairingSecrets()
+        adminError = "The administrator session is no longer valid."
+        return true
     }
 
     private static func unlockMessage(for error: Error) -> String {
@@ -207,15 +319,21 @@ final class RouterAdministrationModel {
 }
 
 struct RouterAdministrationPresentation: Equatable {
+    enum Section: Equatable {
+        case clientEnrollment
+    }
+
     let showsHistory: Bool
     let showsClientSections: Bool
     let showsAdministratorSections: Bool
     let showsUnlockField: Bool
+    let visibleSections: [Section]
 
     init(access: RouterAdministrationModel.AdminAccess) {
         showsHistory = true
         showsClientSections = true
         showsAdministratorSections = access == .unlocked
         showsUnlockField = access != .unlocked
+        visibleSections = access == .unlocked ? [.clientEnrollment] : []
     }
 }

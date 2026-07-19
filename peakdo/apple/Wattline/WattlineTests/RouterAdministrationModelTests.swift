@@ -618,6 +618,124 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertTrue(ScanRecordPresentation(record: saved).offersRouterAdministration)
         XCTAssertFalse(ScanRecordPresentation(record: unsaved).offersRouterAdministration)
     }
+
+    func testPairingSecretsExistOnlyWhileOpenAndClearOnExpiryAndAdmin401() async throws {
+        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        var currentTime = ISO8601DateFormatter().date(from: "2026-07-18T00:00:00Z")!
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(openBody),
+                .success((png, AdminScriptedHTTP.pngResponse())),
+                .failure(NetworkError.unauthorized),
+            ],
+            now: { currentTime }
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+
+        await fixture.model.openPairing()
+        XCTAssertEqual(fixture.model.pairingStatus?.pin, "123456")
+
+        await fixture.model.loadPairingQR()
+        XCTAssertEqual(fixture.model.pairingQRPNG, png)
+
+        currentTime = ISO8601DateFormatter().date(from: "2026-07-18T00:06:00Z")!
+        fixture.model.expirePairingSecretsIfNeeded()
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+
+        await fixture.model.openPairing()
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
+
+    func testQRLoadIsStructurallyImpossibleWhileClosedOrLocked() async throws {
+        let fixture = try await makeFixture(results: [AdminScriptedHTTP.ok("{}")])
+        await fixture.model.begin(host: fixture.host)
+
+        await fixture.model.loadPairingQR()
+        XCTAssertNil(fixture.model.pairingQRPNG)
+
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.loadPairingQR()
+        XCTAssertNil(fixture.model.pairingQRPNG)
+        XCTAssertEqual(fixture.http.calls.map(\.path), ["/api/v1/settings"])
+    }
+
+    func testLockAndSessionEndClearPairingSecrets() async throws {
+        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+
+        await fixture.model.lock()
+
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        XCTAssertNotNil(fixture.model.pairingStatus?.pin)
+
+        await fixture.model.end()
+
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+        XCTAssertNil(fixture.model.pairingError)
+    }
+
+    func testClearingSecretsWhilePairingRequestIsInFlightPreventsLatePINResurrection() async throws {
+        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let opening = Task { await fixture.model.openPairing() }
+        await fixture.http.waitForGateRegistration()
+        fixture.model.clearPairingSecrets()
+        fixture.http.releaseGates()
+        await opening.value
+
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
+
+    func testClearingSecretsWhileQRRequestIsInFlightPreventsLateQRResurrection() async throws {
+        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            .success((png, AdminScriptedHTTP.pngResponse())),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        fixture.http.gateNextRequest()
+
+        let loading = Task { await fixture.model.loadPairingQR() }
+        await fixture.http.waitForGateRegistration()
+        fixture.model.clearPairingSecrets()
+        fixture.http.releaseGates()
+        await loading.value
+
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
 }
 
 @MainActor
@@ -703,6 +821,7 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     private let shouldGate: Bool
     private let gatedCallNumbers: Set<Int>
     private var startedCallCount = 0
+    private var gatesNextRequest = false
 
     init(
         results: [Result<(Data, HTTPURLResponse), Error>],
@@ -730,6 +849,19 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         ))
     }
 
+    static func pngResponse() -> HTTPURLResponse {
+        HTTPURLResponse(
+            url: URL(string: "https://router.local:8378")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "image/png"]
+        )!
+    }
+
+    func gateNextRequest() {
+        lock.withLock { gatesNextRequest = true }
+    }
+
     func get(_ path: String, token: String) async throws -> (Data, HTTPURLResponse) {
         try await request("GET", path, body: nil, token: token)
     }
@@ -743,7 +875,11 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         let (result, shouldGateRequest) = lock.withLock {
             startedCallCount += 1
             let result = scripted.isEmpty ? nil : scripted.removeFirst()
-            return (result, shouldGate || gatedCallNumbers.contains(startedCallCount))
+            let shouldGateRequest = shouldGate
+                || gatedCallNumbers.contains(startedCallCount)
+                || gatesNextRequest
+            gatesNextRequest = false
+            return (result, shouldGateRequest)
         }
         if shouldGateRequest {
             await withCheckedContinuation { gate in
