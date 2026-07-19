@@ -311,7 +311,7 @@ func (p *Poller) pollStatus(parent context.Context) {
 	if alignment := status.GetAlignmentStats(); alignment != nil {
 		p.succeeded(FieldAlignment)
 		dishStatus.Alignment = &Alignment{
-			BoresightAzimuthDeg: status.GetBoresightAzimuthDeg(), BoresightElevationDeg: status.GetBoresightElevationDeg(),
+			BoresightAzimuthDeg: alignment.GetBoresightAzimuthDeg(), BoresightElevationDeg: alignment.GetBoresightElevationDeg(),
 			TiltAngleDeg: alignment.GetTiltAngleDeg(),
 		}
 	} else {

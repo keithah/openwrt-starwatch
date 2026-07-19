@@ -45,6 +45,7 @@ type speedtestSink interface {
 type SpeedtestOptions struct {
 	Context      context.Context
 	PollInterval time.Duration
+	RPCTimeout   time.Duration
 	Now          func() time.Time
 	Store        speedtestSink
 	Live         event.Publisher
@@ -64,6 +65,9 @@ func NewSpeedtestManager(api speedtestAPI, options SpeedtestOptions) *SpeedtestM
 	}
 	if options.PollInterval <= 0 {
 		options.PollInterval = time.Second
+	}
+	if options.RPCTimeout <= 0 {
+		options.RPCTimeout = 2 * time.Second
 	}
 	if options.Now == nil {
 		options.Now = time.Now
@@ -101,7 +105,15 @@ func (m *SpeedtestManager) Start(ctx context.Context) error {
 			}()
 			return nil
 		}
-		if !unsupportedRPC(err) {
+		if !unsupportedRPC(err) && status.Code(err) != codes.Unavailable {
+			m.fail(err)
+			return err
+		}
+		if attempt == 2 {
+			if unsupportedRPC(err) {
+				m.setState(SpeedtestUnsupported, "")
+				return nil
+			}
 			m.fail(err)
 			return err
 		}
@@ -110,7 +122,6 @@ func (m *SpeedtestManager) Start(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	m.setState(SpeedtestUnsupported, "")
 	return nil
 }
 
@@ -126,7 +137,9 @@ func (m *SpeedtestManager) poll() {
 			m.fail(m.options.Context.Err())
 			return
 		case <-ticker.C:
-			statusResponse, err := m.api.GetSpeedtestStatus(m.options.Context)
+			ctx, cancel := context.WithTimeout(m.options.Context, m.options.RPCTimeout)
+			statusResponse, err := m.api.GetSpeedtestStatus(ctx)
+			cancel()
 			if err != nil {
 				if unsupportedRPC(err) {
 					unsupportedFailures++
@@ -134,6 +147,9 @@ func (m *SpeedtestManager) poll() {
 						m.setState(SpeedtestUnsupported, "")
 						return
 					}
+					continue
+				}
+				if status.Code(err) == codes.Unavailable {
 					continue
 				}
 				m.fail(err)
@@ -180,8 +196,7 @@ func (m *SpeedtestManager) setState(state SpeedtestState, message string) {
 }
 
 func unsupportedRPC(err error) bool {
-	code := status.Code(err)
-	return code == codes.Unimplemented || code == codes.Unavailable
+	return status.Code(err) == codes.Unimplemented
 }
 
 func waitContext(ctx context.Context, delay time.Duration) bool {

@@ -16,6 +16,7 @@ import (
 
 type speedFake struct {
 	statuses []*device.SpeedtestStatus
+	errors   []error
 	err      error
 	calls    int
 	startErr error
@@ -28,6 +29,13 @@ func (f *speedFake) StartSpeedtest(context.Context) error {
 }
 func (f *speedFake) GetSpeedtestStatus(context.Context) (*device.SpeedtestStatus, error) {
 	f.calls++
+	if len(f.errors) > 0 {
+		err := f.errors[0]
+		f.errors = f.errors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -96,12 +104,73 @@ func TestSpeedtestManagerReportsUnsupportedAfterThreeStatusFailures(t *testing.T
 }
 
 func TestSpeedtestManagerReportsUnsupportedAfterThreeStartFailures(t *testing.T) {
-	api := &speedFake{startErr: status.Error(codes.Unavailable, "not supported")}
+	api := &speedFake{startErr: status.Error(codes.Unimplemented, "not supported")}
 	manager := NewSpeedtestManager(api, SpeedtestOptions{PollInterval: time.Millisecond})
 	if err := manager.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := manager.Snapshot().State; got != SpeedtestUnsupported || api.starts != 3 {
 		t.Fatalf("state=%q starts=%d", got, api.starts)
+	}
+}
+
+func TestSpeedtestManagerTreatsUnavailableStartAsTransientError(t *testing.T) {
+	api := &speedFake{startErr: status.Error(codes.Unavailable, "dish reconnecting")}
+	manager := NewSpeedtestManager(api, SpeedtestOptions{PollInterval: time.Millisecond})
+	err := manager.Start(context.Background())
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("error=%v", err)
+	}
+	if got := manager.Snapshot().State; got != SpeedtestError || api.starts != 3 {
+		t.Fatalf("state=%q starts=%d", got, api.starts)
+	}
+}
+
+func TestSpeedtestManagerRetriesUnavailableWithoutMarkingUnsupported(t *testing.T) {
+	api := &speedFake{
+		errors: []error{
+			status.Error(codes.Unavailable, "dish reconnecting"),
+			status.Error(codes.Unavailable, "dish reconnecting"),
+		},
+		statuses: []*device.SpeedtestStatus{{
+			Down: &device.SpeedtestStatus_Direction{ThroughputsMbps: []float32{10}},
+			Up:   &device.SpeedtestStatus_Direction{ThroughputsMbps: []float32{2}},
+		}},
+	}
+	manager := NewSpeedtestManager(api, SpeedtestOptions{PollInterval: time.Millisecond})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	manager.Wait()
+	if got := manager.Snapshot().State; got != SpeedtestDone {
+		t.Fatalf("state=%q want %q", got, SpeedtestDone)
+	}
+}
+
+type blockingSpeedAPI struct {
+	statusContextDone chan struct{}
+}
+
+func (b *blockingSpeedAPI) StartSpeedtest(context.Context) error { return nil }
+func (b *blockingSpeedAPI) GetSpeedtestStatus(ctx context.Context) (*device.SpeedtestStatus, error) {
+	<-ctx.Done()
+	close(b.statusContextDone)
+	return nil, ctx.Err()
+}
+
+func TestSpeedtestStatusPollHasPerRPCTimeout(t *testing.T) {
+	api := &blockingSpeedAPI{statusContextDone: make(chan struct{})}
+	manager := NewSpeedtestManager(api, SpeedtestOptions{PollInterval: time.Millisecond, RPCTimeout: 5 * time.Millisecond})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-api.statusContextDone:
+	case <-time.After(time.Second):
+		t.Fatal("status RPC context was never canceled")
+	}
+	manager.Wait()
+	if got := manager.Snapshot().State; got != SpeedtestError {
+		t.Fatalf("state=%q want %q", got, SpeedtestError)
 	}
 }

@@ -21,6 +21,7 @@ func cannedResponse(request *device.Request) (*device.Response, error) {
 	case *device.Request_GetStatus:
 		return &device.Response{Response: &device.Response_DishGetStatus{DishGetStatus: &device.DishGetStatusResponse{
 			DeviceState: &device.DeviceState{UptimeS: 99}, PopPingLatencyMs: 42,
+			BoresightAzimuthDeg: 11, BoresightElevationDeg: 22,
 			DownlinkThroughputBps: 1000, UplinkThroughputBps: 200,
 			GpsStats: &device.DishGpsStats{
 				GpsValid: true, GpsSats: 14, NoSatsAfterTtff: true, InhibitGps: false,
@@ -29,8 +30,10 @@ func cannedResponse(request *device.Request) (*device.Response, error) {
 			SecondsToFirstNonemptySlot: 0.8,
 			DisablementCode:            disablement.UtDisablementCode_OKAY,
 			ObstructionStats:           &device.DishObstructionStats{FractionObstructed: 0.25},
-			AlignmentStats:             &device.AlignmentStats{TiltAngleDeg: 12},
-			UpsuStats:                  &device.DishUpsuStats{DishPower: 55},
+			AlignmentStats: &device.AlignmentStats{
+				TiltAngleDeg: 12, BoresightAzimuthDeg: 33, BoresightElevationDeg: 44,
+			},
+			UpsuStats: &device.DishUpsuStats{DishPower: 55},
 		}}}, nil
 	case *device.Request_GetDeviceInfo:
 		return &device.Response{Response: &device.Response_GetDeviceInfo{GetDeviceInfo: &device.GetDeviceInfoResponse{DeviceInfo: &device.DeviceInfo{
@@ -85,6 +88,20 @@ func TestStatusIncludesTypedGPSAndDiagnosticEnums(t *testing.T) {
 	}
 	if available := snapshot.FieldAvailability[FieldGPS]; !available.Available {
 		t.Fatalf("GPS availability=%+v", available)
+	}
+}
+
+func TestStatusUsesAlignmentStatsBoresightFields(t *testing.T) {
+	fake := &fakeDishServer{handle: func(_ context.Context, request *device.Request) (*device.Response, error) {
+		return cannedResponse(request)
+	}}
+	poller, _ := testPoller(t, fake)
+	poller.backfillDone = true
+	poller.pollStatus(context.Background())
+
+	alignment := poller.Snapshot().Dish.Alignment
+	if alignment == nil || alignment.BoresightAzimuthDeg != 33 || alignment.BoresightElevationDeg != 44 || alignment.TiltAngleDeg != 12 {
+		t.Fatalf("alignment=%+v", alignment)
 	}
 }
 
