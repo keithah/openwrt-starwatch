@@ -268,6 +268,18 @@ final class RouterAdministrationModel {
         tokenRequestGeneration &+= 1
         let requestGeneration = tokenRequestGeneration
         tokensError = nil
+        let adminAttachment: RouterAdministrationAttachmentLease
+        do {
+            adminAttachment = try await adminClient.attachmentLease()
+        } catch {
+            guard isCurrentTokenOperation(
+                session: session,
+                adminOperation: adminOperation,
+                request: requestGeneration
+            ) else { return }
+            tokensError = "The request failed. Try again."
+            return
+        }
         let revokedClientLease: RouterCredentialLease?
         if wasCurrentClient, let revokedHost {
             do {
@@ -286,8 +298,16 @@ final class RouterAdministrationModel {
         } else {
             revokedClientLease = nil
         }
+        guard isCurrentAdminEndpoint(
+            session: session,
+            adminOperation: adminOperation,
+            endpoint: revokedHost?.endpoint
+        ) else { return }
         do {
-            try await adminClient.revokeToken(id: token.id)
+            try await adminClient.revokeToken(
+                id: token.id,
+                attachment: adminAttachment
+            )
         } catch is CancellationError {
             return
         } catch {

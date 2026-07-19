@@ -58,6 +58,14 @@ extension RouterAdministrationClient {
 
     @discardableResult
     public func revokeToken(id: String) async throws -> String {
+        try await revokeToken(id: id, attachment: attachmentLease())
+    }
+
+    @discardableResult
+    public func revokeToken(
+        id: String,
+        attachment: RouterAdministrationAttachmentLease
+    ) async throws -> String {
         guard !id.isEmpty, id != "bootstrap" else {
             throw RouterAdministrationError.protectedToken
         }
@@ -69,7 +77,7 @@ extension RouterAdministrationClient {
         }
         struct Revoked: Decodable { let revoked: String }
         let (data, _) = try await sendDurableMutation(
-            "DELETE", "/api/v1/tokens/\(encoded)"
+            "DELETE", "/api/v1/tokens/\(encoded)", attachment: attachment
         )
         guard let response = try? JSONDecoder().decode(Revoked.self, from: data),
               response.revoked == id

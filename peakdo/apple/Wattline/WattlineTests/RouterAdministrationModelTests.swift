@@ -1582,6 +1582,140 @@ final class RouterAdministrationModelTests: XCTestCase {
         ])
     }
 
+    func testEndpointReplacementDuringClientLeaseReadSendsNoRevoke() async throws {
+        let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let backend = NextClientReadGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(initial),
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+            ],
+            hostTokenID: "self-id",
+            credentialBackend: backend
+        )
+        let replacement = try RouterHostValidator.validate(
+            "https://replacement.local:8378",
+            displayName: "Replacement router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: String(repeating: "1", count: 64),
+            tokenID: "replacement-id"
+        )
+        try await fixture.credentialStore.saveToken(
+            "replacement-admin", for: replacement.endpoint, role: .administrator
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        await backend.gateNextClientRead()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await backend.waitForClientReadToStart()
+        await fixture.model.begin(host: replacement)
+        await backend.releaseClientRead()
+        await revoke.value
+
+        let oldClient = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        let replacementAdmin = try await fixture.credentialStore.readToken(
+            for: replacement.endpoint, role: .administrator
+        )
+        XCTAssertEqual(oldClient, "wlt_client")
+        XCTAssertEqual(replacementAdmin, "replacement-admin")
+        XCTAssertEqual(fixture.model.host, replacement)
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertFalse(fixture.http.calls.contains { $0.method == "DELETE" })
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/settings",
+        ])
+    }
+
+    func testLockAndReunlockDuringClientLeaseReadSendsNoRevoke() async throws {
+        let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let backend = NextClientReadGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(initial),
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+            ],
+            hostTokenID: "self-id",
+            credentialBackend: backend
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        await backend.gateNextClientRead()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await backend.waitForClientReadToStart()
+        await fixture.model.lock()
+        await fixture.model.unlock(token: "new-admin")
+        await backend.releaseClientRead()
+        await revoke.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(client, "wlt_client")
+        XCTAssertEqual(admin, "new-admin")
+        XCTAssertEqual(fixture.model.host, fixture.host)
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertFalse(fixture.http.calls.contains { $0.method == "DELETE" })
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/settings",
+        ])
+    }
+
+    func testSessionEndDuringClientLeaseReadSendsNoRevoke() async throws {
+        let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let backend = NextClientReadGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(initial),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+            ],
+            hostTokenID: "self-id",
+            credentialBackend: backend
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        await backend.gateNextClientRead()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await backend.waitForClientReadToStart()
+        await fixture.model.end()
+        await backend.releaseClientRead()
+        await revoke.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(client, "wlt_client")
+        XCTAssertEqual(admin, "old-admin")
+        XCTAssertNil(fixture.model.host)
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertFalse(fixture.http.calls.contains { $0.method == "DELETE" })
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+        ])
+    }
+
     func testSelfRevokeCleanupFailureIsVisibleWhileHostAndAdminSurviveAndRelistRuns() async throws {
         let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
         let backend = ClientDeleteFailingAdministrationBackend()
@@ -2114,6 +2248,44 @@ private actor AdministrationMemoryBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
     func save(_ data: Data, account: String) async throws { values[account] = data }
     func delete(account: String) async throws { values[account] = nil }
+}
+
+private actor NextClientReadGatedAdministrationBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private var shouldGateClientRead = false
+    private var clientReadStarted = false
+    private var clientReadStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var clientReadGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? {
+        if shouldGateClientRead, !account.hasSuffix(".administrator") {
+            shouldGateClientRead = false
+            clientReadStarted = true
+            let waiters = clientReadStartedWaiters
+            clientReadStartedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { clientReadGate = $0 }
+        }
+        return values[account]
+    }
+
+    func save(_ data: Data, account: String) async throws { values[account] = data }
+    func delete(account: String) async throws { values[account] = nil }
+
+    func gateNextClientRead() {
+        shouldGateClientRead = true
+        clientReadStarted = false
+    }
+
+    func waitForClientReadToStart() async {
+        if clientReadStarted { return }
+        await withCheckedContinuation { clientReadStartedWaiters.append($0) }
+    }
+
+    func releaseClientRead() {
+        clientReadGate?.resume()
+        clientReadGate = nil
+    }
 }
 
 private actor ClientDeleteFailingAdministrationBackend: RouterCredentialBackend {

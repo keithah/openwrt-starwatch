@@ -11,6 +11,16 @@ public enum RouterAdministrationError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+public struct RouterAdministrationAttachmentLease: Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible
+{
+    fileprivate let generation: UInt64
+    fileprivate let endpoint: RouterEndpoint
+
+    public var description: String { "RouterAdministrationAttachmentLease([REDACTED])" }
+    public var debugDescription: String { description }
+}
+
 /// Serializes privileged router requests for one endpoint at a time.
 /// Attaching a different endpoint increments a generation; completions from a
 /// previous generation are discarded as CancellationError and can never save
@@ -47,6 +57,16 @@ public actor RouterAdministrationClient {
         generation &+= 1
         endpoint = nil
         http = nil
+    }
+
+    public func attachmentLease() throws -> RouterAdministrationAttachmentLease {
+        guard let endpoint, http != nil else {
+            throw RouterAdministrationError.notAttached
+        }
+        return RouterAdministrationAttachmentLease(
+            generation: generation,
+            endpoint: endpoint
+        )
     }
 
     public func verifyAdministrator(token: String) async throws {
@@ -165,10 +185,15 @@ public actor RouterAdministrationClient {
     func sendDurableMutation(
         _ method: String,
         _ path: String,
-        body: Data? = nil
+        body: Data? = nil,
+        attachment: RouterAdministrationAttachmentLease
     ) async throws -> (Data, HTTPURLResponse) {
-        guard let endpoint, let http else { throw RouterAdministrationError.notAttached }
-        let requestGeneration = generation
+        guard generation == attachment.generation,
+              endpoint == attachment.endpoint,
+              let endpoint,
+              let http
+        else { throw CancellationError() }
+        let requestGeneration = attachment.generation
         let storedToken: String?
         do {
             storedToken = try await credentials.readToken(

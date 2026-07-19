@@ -10,11 +10,19 @@ final class RouterPairingAdministrationTests: XCTestCase {
         certificateFingerprint: String(repeating: "0", count: 64),
         allowsInsecureWAN: false
     )
+    private let replacementEndpoint = RouterEndpoint(
+        scheme: "https",
+        host: "replacement.local",
+        port: 8378,
+        certificateFingerprint: String(repeating: "1", count: 64),
+        allowsInsecureWAN: false
+    )
 
     private func makeAttachedClient(
         http: ScriptedRouterHTTPClient
     ) async throws -> RouterAdministrationClient {
-        let store = RouterCredentialStore(backend: PairingCredentialBackend())
+        let backend = PairingCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
         try await store.saveToken("boot-admin", for: endpoint, role: .administrator)
         let client = RouterAdministrationClient(credentials: store) { _ in http }
         try await client.attach(endpoint: endpoint)
@@ -212,6 +220,46 @@ final class RouterPairingAdministrationTests: XCTestCase {
         XCTAssertEqual(revokedID, "durable-id")
     }
 
+    func testStaleAttachmentLeaseCannotRevokeThroughReplacement() async throws {
+        let endpoint = self.endpoint
+        let replacementEndpoint = self.replacementEndpoint
+        let oldHTTP = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(#"{"revoked":"stale-id"}"#),
+        ])
+        let replacementHTTP = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(#"{"revoked":"stale-id"}"#),
+        ])
+        let backend = PairingCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        try await store.saveToken(
+            "old-admin", for: endpoint, role: .administrator
+        )
+        try await store.saveToken(
+            "replacement-admin", for: replacementEndpoint, role: .administrator
+        )
+        let client = RouterAdministrationClient(credentials: store) { requested in
+            requested == endpoint ? oldHTTP : replacementHTTP
+        }
+        try await client.attach(endpoint: endpoint)
+        let attachment = try await client.attachmentLease()
+
+        try await client.attach(endpoint: replacementEndpoint)
+        do {
+            _ = try await client.revokeToken(id: "stale-id", attachment: attachment)
+            XCTFail("expected stale attachment cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let credentialReadCount = await backend.readCount
+        XCTAssertTrue(oldHTTP.calls.isEmpty)
+        XCTAssertTrue(replacementHTTP.calls.isEmpty)
+        XCTAssertEqual(credentialReadCount, 0)
+        XCTAssertFalse(String(describing: attachment).contains("old-admin"))
+        XCTAssertFalse(String(describing: attachment).contains("router.local"))
+        XCTAssertFalse(String(reflecting: attachment).contains("replacement.local"))
+    }
+
     func testStaleRevokeFailureIsCancellationBeforeAuthTranslation() async throws {
         let http = ScriptedRouterHTTPClient(
             results: [.failure(NetworkError.unauthorized)],
@@ -235,7 +283,11 @@ final class RouterPairingAdministrationTests: XCTestCase {
 
 private actor PairingCredentialBackend: RouterCredentialBackend {
     private var values: [String: Data] = [:]
-    func read(account: String) async throws -> Data? { values[account] }
+    private(set) var readCount = 0
+    func read(account: String) async throws -> Data? {
+        readCount += 1
+        return values[account]
+    }
     func save(_ data: Data, account: String) async throws { values[account] = data }
     func delete(account: String) async throws { values[account] = nil }
 }
