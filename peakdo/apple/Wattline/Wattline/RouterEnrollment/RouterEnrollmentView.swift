@@ -58,15 +58,9 @@ struct RouterPairingEntryView: View {
             errorMessage = "That is not a valid wattlined pairing code."
             return false
         }
-        guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
-              model.routerEnrollmentRoute.consume(url)
-        else {
-            errorMessage = "That is not a valid wattlined pairing code."
-            return false
-        }
+        model.routerEnrollmentRoute.consume(input)
         pairingText = ""
         errorMessage = nil
-        _ = input
         dismiss()
         return true
     }

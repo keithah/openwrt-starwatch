@@ -26,7 +26,71 @@ final class RouterEnrollmentRouteTests: XCTestCase {
     }
 
     func testPairingDeepLinkMovesAppToScanAndPublishesEphemeralEnrollment() {
-        let model = AppModel(
+        let model = makeModel(onboardingComplete: true)
+
+        model.handleDeepLink(URL(string:
+            "wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456"
+        )!)
+
+        XCTAssertEqual(model.route, .scan)
+        XCTAssertEqual(model.routerEnrollmentRoute.payload?.deviceID, "DC045AEB722B")
+    }
+
+    func testPairingDeepLinkDuringOnboardingDefersPayloadWithoutLeavingOnboarding() {
+        let model = makeModel(onboardingComplete: false)
+
+        model.handleDeepLink(URL(string:
+            "wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456"
+        )!)
+
+        XCTAssertEqual(model.route, .onboarding)
+        XCTAssertEqual(model.routerEnrollmentRoute.payload?.deviceID, "DC045AEB722B")
+
+        model.requestBluetoothAfterPriming()
+
+        XCTAssertEqual(model.route, .scan)
+        XCTAssertEqual(model.routerEnrollmentRoute.payload?.deviceID, "DC045AEB722B")
+    }
+
+    func testTextAndImagePairingSurfacesRouteParsedInputWithoutURLReparse() throws {
+        let projectDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let enrollmentSource = try String(contentsOf:
+            projectDirectory.appendingPathComponent("Wattline/RouterEnrollment/RouterEnrollmentView.swift"),
+            encoding: .utf8
+        )
+        let recognitionSource = try String(contentsOf:
+            projectDirectory.appendingPathComponent("Wattline/RouterEnrollment/QRCodeRecognition.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(enrollmentSource.contains("RouterPairingInputParser.parse(text: value)"))
+        XCTAssertTrue(enrollmentSource.contains("routerEnrollmentRoute.consume(input)"))
+        XCTAssertFalse(enrollmentSource.contains("URL(string: value"))
+        XCTAssertTrue(recognitionSource.contains("RouterPairingInputParser.parse(text: value)"))
+        XCTAssertTrue(recognitionSource.contains("route.consume(input)"))
+        XCTAssertFalse(recognitionSource.contains("URL(string: value"))
+    }
+
+    func testRouteAcceptsAlreadyParsedPairingInput() throws {
+        let route = RouterEnrollmentRoute()
+        let input = try RouterPairingInputParser.parse(text:
+            "  wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456\n"
+        )
+
+        XCTAssertTrue(route.consume(input))
+        XCTAssertEqual(route.payload?.deviceID, "DC045AEB722B")
+    }
+
+    private func makeModel(onboardingComplete: Bool) -> AppModel {
+        let suiteName = "RouterEnrollmentRouteTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let persistence = AppPersistence(defaults: defaults)
+        persistence.onboardingComplete = onboardingComplete
+        return AppModel(
+            persistence: persistence,
             transportFactory: { EnrollmentRouteNoopTransport() },
             snapshotCoordinator: nil,
             widgetReloadAdapter: nil,
@@ -38,13 +102,6 @@ final class RouterEnrollmentRouteTests: XCTestCase {
                 transportFactory: { _, _ in EnrollmentRouteNoopTransport() }
             )
         )
-
-        model.handleDeepLink(URL(string:
-            "wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456"
-        )!)
-
-        XCTAssertEqual(model.route, .scan)
-        XCTAssertEqual(model.routerEnrollmentRoute.payload?.deviceID, "DC045AEB722B")
     }
 
     func testNonPairingURLDoesNotReplaceCurrentRoute() throws {

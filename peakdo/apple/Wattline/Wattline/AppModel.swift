@@ -364,6 +364,7 @@ final class AppModel {
 
     func handleDeepLink(_ url: URL) {
         if routerEnrollmentRoute.consume(url) {
+            guard route != .onboarding else { return }
             route = .scan
             return
         }

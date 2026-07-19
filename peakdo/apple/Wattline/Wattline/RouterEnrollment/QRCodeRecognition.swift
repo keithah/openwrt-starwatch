@@ -38,9 +38,8 @@ final class RouterPairingImageImporter {
 
     func importImage(_ data: Data) async throws {
         let value = try await recognizer.payload(from: data)
-        guard let url = URL(string: value), route.consume(url) else {
-            throw RouterPairingPayloadError.invalidPayload
-        }
+        let input = try RouterPairingInputParser.parse(text: value)
+        route.consume(input)
     }
 }
 
