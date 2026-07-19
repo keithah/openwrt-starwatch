@@ -316,6 +316,8 @@ final class RouterCredentialStoreTests: XCTestCase {
         let savedAccounts = await backend.savedAccounts
         XCTAssertEqual(savedAccounts, [uuid, "\(uuid).administrator"])
 
+        let credential = try await store.credential(for: endpoint)
+        XCTAssertEqual(credential.token, "client-secret")
         let clientToken = try await store.readToken(for: endpoint)
         XCTAssertEqual(clientToken, "client-secret")
         let administratorToken = try await store.readToken(for: endpoint, role: .administrator)
