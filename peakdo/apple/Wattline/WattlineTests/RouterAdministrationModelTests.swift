@@ -7,6 +7,76 @@ import XCTest
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testRotateStagesReturnedPinWithoutReplacingActivePinAndShowsRestart() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationRotateJSON(pin: appStagedPin)),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+
+        await fixture.model.rotateTLS()
+
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appActivePin)
+        XCTAssertEqual(fixture.model.host?.stagedCertificateFingerprint, appStagedPin)
+        XCTAssertTrue(fixture.model.tlsRestartRequired)
+        XCTAssertNil(fixture.model.tlsError)
+        XCTAssertEqual(fixture.http.calls.last?.path, "/api/v1/tls/rotate")
+    }
+
+    func testRotationCompletionAfterEndpointReplacementDoesNotStageIntoNewHost() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationRotateJSON(pin: appStagedPin)),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+        let rotate = Task { await fixture.model.rotateTLS() }
+        await fixture.http.waitForGateRegistration()
+        let replacement = try RouterHostValidator.validate(
+            "https://replacement.local:8378",
+            displayName: "Replacement router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: appThirdPin
+        )
+
+        await fixture.model.begin(host: replacement)
+        fixture.http.releaseGates()
+        await rotate.value
+
+        XCTAssertEqual(fixture.model.host, replacement)
+        XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
+        let persisted = await fixture.hostStore.hosts()
+        XCTAssertNil(persisted.first?.stagedCertificateFingerprint)
+    }
+
+    func testPromotionPublishesOnlyAtomicallyPromotedHost() async throws {
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        await fixture.model.unlock(token: "boot-admin")
+
+        await fixture.model.promoteStagedTLSPin()
+
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appStagedPin)
+        XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
+        XCTAssertNil(fixture.model.tlsError)
+        XCTAssertEqual(fixture.tlsPromotionHTTP.calls.map(\.path), ["/api/v1/device"])
+        let persisted = await fixture.hostStore.hosts()
+        XCTAssertEqual(persisted.first, fixture.model.host)
+    }
+
     func testUnlockedModelLoadsSettingsAndPublishesOnlyCompletePUTReadback() async throws {
         let original = try administrationSettings(advanced: false, httpPort: 8377)
         let readback = try administrationSettings(advanced: true, httpPort: 9000)
@@ -2293,10 +2363,12 @@ private struct AdministrationFixture {
     let model: RouterAdministrationModel
     let connections: RouterConnectionModel
     let host: RouterHostMetadata
+    let hostStore: RouterHostStore
     let credentialStore: RouterCredentialStore
     let http: AdminScriptedHTTP
     let historyHTTP: AdminScriptedHTTP
     let migrationHTTP: AdminScriptedHTTP
+    let tlsPromotionHTTP: AdminScriptedHTTP
 }
 
 @MainActor
@@ -2310,7 +2382,8 @@ private func makeFixture(
     historyGatedCallNumbers: Set<Int> = [],
     hostTokenID: String? = nil,
     credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend(),
-    migrationResults: [Result<(Data, HTTPURLResponse), Error>] = []
+    migrationResults: [Result<(Data, HTTPURLResponse), Error>] = [],
+    tlsPromotionResults: [Result<(Data, HTTPURLResponse), Error>] = []
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
         "https://router.local:8378",
@@ -2324,9 +2397,14 @@ private func makeFixture(
     let credentialStore = RouterCredentialStore(backend: credentialBackend)
     let hostStore = RouterHostStore(backend: AdministrationHostBackend())
     try await hostStore.save(host)
+    let tlsPromotionHTTP = AdminScriptedHTTP(
+        results: tlsPromotionResults,
+        gateRequests: false
+    )
     let connections = RouterConnectionModel(
         hostStore: hostStore,
         credentialStore: credentialStore,
+        tlsPromotionHTTPFactory: { _ in tlsPromotionHTTP },
         enrollmentClientFactory: { _ in
             RouterEnrollmentClient(httpClient: AdministrationNoopEnrollmentHTTP())
         },
@@ -2378,10 +2456,12 @@ private func makeFixture(
         model: model,
         connections: connections,
         host: host,
+        hostStore: hostStore,
         credentialStore: credentialStore,
         http: http,
         historyHTTP: historyHTTP,
-        migrationHTTP: migrationHTTP
+        migrationHTTP: migrationHTTP,
+        tlsPromotionHTTP: tlsPromotionHTTP
     )
 }
 
@@ -2570,6 +2650,14 @@ private func administrationSettingsJSON(
 private func administrationDeviceJSON(id: String) -> String {
     #"{"id":"\#(id)","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":773,"features_raw":32767,"features":{},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"ota","connection":{"connected":true,"phase":"bootloader","reconnect":"bootloader"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}"#
 }
+
+private func administrationRotateJSON(pin: String) -> String {
+    #"{"sha256":"\#(pin.lowercased())","restart_required":true}"#
+}
+
+private let appActivePin = String(repeating: "0", count: 64)
+private let appStagedPin = String(repeating: "ab", count: 32).uppercased()
+private let appThirdPin = String(repeating: "cd", count: 32).uppercased()
 
 private actor NextClientReadGatedAdministrationBackend: RouterCredentialBackend {
     private var values: [String: Data] = [:]

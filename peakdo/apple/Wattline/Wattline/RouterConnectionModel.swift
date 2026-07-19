@@ -69,6 +69,7 @@ final class RouterConnectionModel {
     typealias EnrollmentClientFactory = @MainActor (
         _ endpoint: RouterEndpoint
     ) throws -> RouterEnrollmentClient
+    typealias TLSPromotionHTTPFactory = RouterTLSPinPromoter.HTTPFactory
 
     private(set) var savedHosts: [RouterHostMetadata] = []
     private(set) var discoveredRouters: [DiscoveredRouter] = []
@@ -83,6 +84,7 @@ final class RouterConnectionModel {
     private let hostStore: RouterHostStore
     let credentialStore: RouterCredentialStore
     private let discovery: RouterDiscovery?
+    private let tlsPinPromoter: RouterTLSPinPromoter
     private let enrollmentClientFactory: EnrollmentClientFactory
     private let transportFactory: TransportFactory
 
@@ -90,12 +92,23 @@ final class RouterConnectionModel {
         hostStore: RouterHostStore,
         credentialStore: RouterCredentialStore,
         discovery: RouterDiscovery? = nil,
+        tlsPromotionHTTPFactory: @escaping TLSPromotionHTTPFactory = { endpoint in
+            HTTPClient(
+                baseURL: try RouterURLSessionFactory.baseURL(for: endpoint),
+                session: try RouterURLSessionFactory.makeMigration(endpoint: endpoint)
+            )
+        },
         enrollmentClientFactory: @escaping EnrollmentClientFactory,
         transportFactory: @escaping TransportFactory
     ) {
         self.hostStore = hostStore
         self.credentialStore = credentialStore
         self.discovery = discovery
+        tlsPinPromoter = RouterTLSPinPromoter(
+            hostStore: hostStore,
+            credentials: credentialStore,
+            httpFactory: tlsPromotionHTTPFactory
+        )
         self.enrollmentClientFactory = enrollmentClientFactory
         self.transportFactory = transportFactory
     }
@@ -284,6 +297,25 @@ final class RouterConnectionModel {
 
     func makeTransport(for host: RouterHostMetadata) throws -> any DeviceTransport {
         try transportFactory(host.endpoint, credentialStore)
+    }
+
+    func stageTLSCertificateFingerprint(
+        _ fingerprint: String,
+        for host: RouterHostMetadata
+    ) async throws -> RouterHostMetadata {
+        let staged = try await hostStore.stageCertificateFingerprint(
+            fingerprint,
+            for: host.id,
+            ifCurrent: host
+        )
+        await reloadSavedHosts()
+        return staged
+    }
+
+    func promoteStagedTLSPin(for hostID: UUID) async throws -> RouterHostMetadata {
+        let promoted = try await tlsPinPromoter.promote(hostID: hostID)
+        await reloadSavedHosts()
+        return promoted
     }
 
     private func persist(host: RouterHostMetadata, token: String) async throws -> RouterHostMetadata {

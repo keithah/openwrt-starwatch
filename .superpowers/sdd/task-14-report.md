@@ -1,41 +1,150 @@
-# Task 14 report — Widget and Activity target configuration
+# Task 14 report — TLS staged-pin rotation and atomic promotion
 
-## Changes
+## Result
 
-- Added the multi-platform `WattlineWidgets` app-extension target to the Xcode project.
-- Linked the `WattlineCore` and `WattlineUI` package products.
-- Configured iOS 17 and macOS 14 deployment floors and conditional widget bundle IDs:
-  `com.keithah.wattline.widgets` on iOS and `com.keithah.wattline.mac.widgets` on macOS.
-- Added the widget app-group entitlement (`group.com.keithah.wattline`) and extension Info.plist.
-- Embedded the extension in the iOS Wattline app through the existing Embed Foundation Extensions phase.
-- Added `NSSupportsLiveActivities = true` to the iOS app Info.plist.
-- Added project configuration regression tests covering target type, package products, bundle IDs,
-  deployment floors, entitlement, embedding, and Live Activity plist configuration.
+Implemented Milestone 3 Task 14 only, starting from reviewed Task 13 head
+`8801d1c094de78a3ca0114792abde25cda62a4e8` on `codex/wattline-phase-2`.
 
-## Verification
+The feature commit subject is exactly `feat: rotate router TLS pins safely`. This report is
+tracked in that commit; the final SHA is returned with the task handoff because recording a
+commit's own SHA inside its contents is self-referential.
 
-- Duplicate pbxproj object-ID audit: passed (no duplicate 24-character object IDs).
-- `git diff --check`: passed.
-- `xcodebuild -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineWidgets -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO`: **BUILD SUCCEEDED**.
-- `xcodebuild -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineWidgets -sdk macosx -destination 'generic/platform=macOS' build CODE_SIGNING_ALLOWED=NO`: **BUILD SUCCEEDED**.
-- `xcodebuild -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineTests -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build-for-testing CODE_SIGNING_ALLOWED=NO`: **TEST BUILD SUCCEEDED**.
-- Runtime `test-without-building` was not run because Xcode requires a concrete simulator device; the generic destination is intentionally build-only.
+## Behavior delivered
 
-No Tasks 15–18 or macOS app work was included.
+- `POST /api/v1/tls/rotate` sends the exact JSON body `{"confirm":true}` through the existing
+  serialized administrator mutation path.
+- Rotation accepts only an exact lowercase 64-character hexadecimal `sha256` and
+  `restart_required: true`; uppercase, short, non-hex, and false-restart replies are rejected.
+- Persisted fingerprints remain normalized uppercase. A staged fingerprint is stored separately
+  and never changes the ordinary endpoint's active fingerprint before promotion.
+- Legacy host JSON without a staged field decodes with `nil` staged state.
+- Promotion constructs exactly one HTTPS trial endpoint with only the staged pin, uses the
+  redirect-rejecting pinned URLSession factory, and sends the client credential only through that
+  staged-pinned client.
+- Promotion calls only `GET /api/v1/device`, normalizes and correlates its device ID, then performs
+  an actor-isolated compare-and-swap from staged to active and clears staged state.
+- Concurrent restaging, host replacement, and conditional-stage replacement are rejected as
+  `hostChanged`; neither the stale trial nor stale rotation response overwrites newer metadata.
+- After promotion, the ordinary endpoint contains only the promoted pin; deterministic leaf-DER
+  tests prove the new bytes match and the old certificate bytes no longer match.
+- The administrator settings UI exposes rotation only for HTTPS hosts, uses a destructive
+  confirmation explaining that the active certificate remains in use until `wattlined` restarts,
+  and exposes “Verify new certificate” only as a separate staged-pin action.
+- App publication is scoped to the captured host/session/admin/request generation. A stale
+  completion after endpoint replacement does not stage into or publish over the replacement.
 
-## Static-review correction
+No TOFU, HTTP downgrade, fallback, automatic promotion, dual-pin trust, public-CA bypass, or
+ordinary reconnect promotion was added.
 
-`Phase2ProjectConfigurationTests` now scopes every assertion to the WattlineWidgets native target and its two build configuration objects. The regression tests explicitly prove that the widget extension alone carries the iOS/macOS floors, conditional bundle identifiers, entitlement/Info.plist paths, and WattlineCore/WattlineUI package dependencies; the iOS Wattline app alone owns the Embed Foundation Extensions phase and is not macOS-capable. This prevents an unrelated target's matching string from making the test pass after a widget configuration mutation.
+## Strict TDD evidence
 
-Verification after correction:
+### Network RED
 
-- WattlineTests generic iOS `build-for-testing`: **TEST BUILD SUCCEEDED**.
-- WattlineWidgets generic iOS build: **BUILD SUCCEEDED**.
-- WattlineWidgets generic macOS build: **BUILD SUCCEEDED**.
-- Runtime XCTest was not run because generic destinations do not provide a concrete simulator device.
+Command:
 
-## Root-path correction
+```text
+swift test --package-path peakdo/apple/WattlineNetwork --filter RouterTLSRotationTests
+```
 
-The configuration test now resolves `#filePath` by removing both `WattlineTests` and `Wattline`, then explicitly addresses `Wattline/Wattline.xcodeproj`, `Wattline/Wattline/Info.plist`, and `Wattline/WattlineWidgets/WattlineWidgets.entitlements` from the Apple project root. This matches the checked-in source layout and prevents accidental dependence on the test bundle's intermediate directory.
+Evidence: `/tmp/wattline-m3-task14-network-red.log`, exit 1. After correcting two test-harness-only
+issues (`.ok` result inference and `await` inside XCTest autoclosures), RED failed specifically for
+the missing `RouterTLSPinPromoter`, `RouterTLSPromotionError`, `rotateTLS`, staged metadata, and
+host-store staging API. No production code existed for the feature at that point.
 
-Verification: generic WattlineTests iOS build-for-testing and generic WattlineWidgets iOS build both succeeded.
+### Network GREEN
+
+Command and result:
+
+```text
+swift test --package-path peakdo/apple/WattlineNetwork --filter RouterTLSRotationTests
+12 tests, 0 failures, exit 0
+```
+
+Evidence: `/tmp/wattline-m3-task14-network-green.log`.
+
+### App RED
+
+Command:
+
+```text
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline \
+  -destination "platform=iOS Simulator,name=Wattline-Tests-2" CODE_SIGNING_ALLOWED=NO \
+  -only-testing:WattlineTests/RouterAdministrationModelTests
+```
+
+Evidence: `/tmp/wattline-m3-task14-app-red.log`, exit 65. The build failed specifically for the
+missing app `rotateTLS`, `promoteStagedTLSPin`, TLS state, and injected promotion HTTP factory.
+
+### Focused compare-and-swap review RED/GREEN
+
+Self-review added `testConditionalStageCannotWriteIntoConcurrentlyReplacedHost`. Its first run
+failed non-vacuously because the compare-and-swap miss returned `invalidHost` rather than
+`hostChanged` (1 test, 1 failure, exit 1). Splitting host validation from expected-host comparison
+was the minimal fix; the next run passed (1 test, 0 failures), and the final 12-test focused suite
+remained green.
+
+### App GREEN
+
+The same focused simulator command passed all 78 `RouterAdministrationModelTests`, including the
+three Task 14 app tests, exit 0. Evidence: `/tmp/wattline-m3-task14-app-green.log`.
+
+## Fresh verification
+
+- `swift test --package-path peakdo/apple/WattlineNetwork --filter RouterTLSRotationTests`:
+  **12 tests, 0 failures**, exit 0.
+- `swift test --package-path peakdo/apple/WattlineNetwork`:
+  **171 tests, 0 failures**, exit 0. Evidence: `/tmp/wattline-m3-task14-network.log`.
+- `swift test --package-path peakdo/apple/WattlineUI`:
+  **42 tests, 0 failures**, exit 0. Evidence: `/tmp/wattline-m3-task14-ui.log`.
+- Focused iOS `RouterAdministrationModelTests`:
+  **78 tests passed**, exit 0.
+- `xcodebuild build -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline
+  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO`:
+  **exit 0**. Evidence: `/tmp/wattline-m3-task14-build.log`.
+- `git diff --check`: exit 0.
+- Placeholder scan of changed production/test files: no `TODO`, `TBD`, `fatalError`, or
+  `preconditionFailure` matches (expected `rg` exit 1).
+- ABI guard retained the original RouterTransport public initializer declarations, including the
+  six-argument initializer, and retained
+  `func credential(for endpoint: RouterEndpoint) async throws -> RouterCredential`.
+- Route/scope audit found only the Task 14 production additions `/api/v1/tls/rotate` and
+  `/api/v1/device`; no Milestone 4/5 surface was introduced.
+- `RouterTLSPinning.swift`, contracts, OEM code, and router repository files are unchanged.
+
+Xcode printed its existing `DVTDeviceOperation` empty-build-number and
+`IDERunDestination: Supported platforms ... is empty` diagnostics, but both the focused test run
+and generic build exited 0.
+
+## Changed files
+
+- `peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterTLSRotation.swift` (new)
+- `peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterHostStore.swift`
+- `peakdo/apple/WattlineNetwork/Tests/WattlineNetworkTests/RouterTLSRotationTests.swift` (new)
+- `peakdo/apple/Wattline/Wattline/RouterConnectionModel.swift`
+- `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterAdministrationModel.swift`
+- `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterSettingsView.swift`
+- `peakdo/apple/Wattline/WattlineTests/RouterAdministrationModelTests.swift`
+- `.superpowers/sdd/task-14-report.md`
+
+## Deviations and rationale
+
+- The brief's prose named `RouterURLSessionFactory.make(endpoint:)` for the production promoter.
+  The dispatch requirement explicitly called out the current redirect-rejecting migration factory,
+  so production uses `makeMigration(endpoint:)`. It preserves the exact staged-only pinning policy
+  while additionally preventing bearer-bearing redirect follow-up requests.
+- Added a conditional staging compare-and-swap overload and one extra Network test. This closes the
+  narrow race between a valid rotation response and concurrent same-ID host replacement; the
+  original simple staging method remains available as specified.
+- Staging also requires an existing active pin. This enforces the no-TOFU requirement for rotation.
+- Ran the explicitly requested generic iOS build in addition to the brief's focused suites.
+- The pre-existing report at this path described an unrelated earlier widget task; it was replaced
+  with the Task 14 evidence required by this dispatch.
+
+## Remaining external concern
+
+Unit and simulator tests prove endpoint construction, staged-only pin policy, redirect rejection,
+credential-call ordering, correlation, persistence, and old-pin policy rejection. They cannot
+perform a real router certificate rollover across a `wattlined` restart. A live-router check should
+confirm the daemon returns the announced lowercase fingerprint, the pre-restart active session
+continues to work, the post-restart staged-only trial succeeds, the old leaf is rejected, and the
+promoted host reconnects normally. No implementation blocker remains.

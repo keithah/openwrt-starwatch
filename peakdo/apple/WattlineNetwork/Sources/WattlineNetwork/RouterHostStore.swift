@@ -27,6 +27,7 @@ public struct RouterHostMetadata: Codable, Equatable, Sendable, Identifiable {
     public let allowsInsecureWAN: Bool
     public let deviceID: String?
     public let certificateFingerprint: String?
+    public let stagedCertificateFingerprint: String?
     public let tokenID: String?
 
     public var endpoint: RouterEndpoint {
@@ -36,6 +37,40 @@ public struct RouterHostMetadata: Codable, Equatable, Sendable, Identifiable {
             port: port,
             certificateFingerprint: certificateFingerprint,
             allowsInsecureWAN: allowsInsecureWAN
+        )
+    }
+}
+
+extension RouterHostMetadata {
+    func stagingCertificateFingerprint(_ value: String) -> RouterHostMetadata {
+        RouterHostMetadata(
+            id: id,
+            displayName: displayName,
+            scheme: scheme,
+            host: host,
+            port: port,
+            reachability: reachability,
+            allowsInsecureWAN: allowsInsecureWAN,
+            deviceID: deviceID,
+            certificateFingerprint: certificateFingerprint,
+            stagedCertificateFingerprint: value,
+            tokenID: tokenID
+        )
+    }
+
+    func promotingStagedCertificateFingerprint(_ value: String) -> RouterHostMetadata {
+        RouterHostMetadata(
+            id: id,
+            displayName: displayName,
+            scheme: scheme,
+            host: host,
+            port: port,
+            reachability: reachability,
+            allowsInsecureWAN: allowsInsecureWAN,
+            deviceID: deviceID,
+            certificateFingerprint: value,
+            stagedCertificateFingerprint: nil,
+            tokenID: tokenID
         )
     }
 }
@@ -107,6 +142,7 @@ public enum RouterHostValidator {
             allowsInsecureWAN: reachability == .wan && scheme == "http" && allowsInsecureWAN,
             deviceID: normalizedDeviceID,
             certificateFingerprint: normalizedFingerprint,
+            stagedCertificateFingerprint: nil,
             tokenID: tokenID
         )
     }
@@ -186,6 +222,56 @@ public actor RouterHostStore {
         current.append(host)
         current.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         try backend.set(try JSONEncoder().encode(current), forKey: key)
+    }
+
+    public func stageCertificateFingerprint(
+        _ fingerprint: String,
+        for id: UUID
+    ) throws -> RouterHostMetadata {
+        try stageCertificateFingerprint(fingerprint, for: id, expectedHost: nil)
+    }
+
+    public func stageCertificateFingerprint(
+        _ fingerprint: String,
+        for id: UUID,
+        ifCurrent expectedHost: RouterHostMetadata
+    ) throws -> RouterHostMetadata {
+        try stageCertificateFingerprint(fingerprint, for: id, expectedHost: expectedHost)
+    }
+
+    private func stageCertificateFingerprint(
+        _ fingerprint: String,
+        for id: UUID,
+        expectedHost: RouterHostMetadata?
+    ) throws -> RouterHostMetadata {
+        guard let normalized = RouterHostValidator.normalizeFingerprint(fingerprint),
+              var host = hosts().first(where: { $0.id == id }),
+              host.scheme == "https",
+              host.certificateFingerprint != nil
+        else { throw RouterTLSPromotionError.invalidHost }
+        if let expectedHost, host != expectedHost {
+            throw RouterTLSPromotionError.hostChanged
+        }
+        host = host.stagingCertificateFingerprint(normalized)
+        try save(host)
+        return host
+    }
+
+    func promoteCertificateFingerprint(
+        for id: UUID,
+        expectedActive: String,
+        expectedStaged: String,
+        expectedDeviceID: String
+    ) throws -> RouterHostMetadata {
+        guard let host = hosts().first(where: { $0.id == id }),
+              host.certificateFingerprint == expectedActive,
+              host.stagedCertificateFingerprint == expectedStaged,
+              DeviceIdentityDeduplicator.normalizedMAC(host.deviceID)
+                == DeviceIdentityDeduplicator.normalizedMAC(expectedDeviceID)
+        else { throw RouterTLSPromotionError.hostChanged }
+        let promoted = host.promotingStagedCertificateFingerprint(expectedStaged)
+        try save(promoted)
+        return promoted
     }
 
     public func remove(id: UUID) throws {

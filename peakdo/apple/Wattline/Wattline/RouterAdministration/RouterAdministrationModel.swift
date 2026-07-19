@@ -56,6 +56,10 @@ final class RouterAdministrationModel {
     private(set) var validatedReplacement: RouterReplacementCandidate?
     private(set) var replacementValidationError: String?
     private(set) var isReplacementValidationRunning = false
+    private(set) var tlsError: String?
+    private(set) var tlsRestartRequired = false
+    private(set) var isTLSRotationRunning = false
+    private(set) var isTLSPromotionRunning = false
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
@@ -72,6 +76,7 @@ final class RouterAdministrationModel {
     private var tokenRequestGeneration: UInt64 = 0
     private var settingsRequestGeneration: UInt64 = 0
     private var replacementRequestGeneration: UInt64 = 0
+    private var tlsRequestGeneration: UInt64 = 0
     private var pairingExpiryTask: Task<Void, Never>?
 
     var replacementCandidates: [RouterHostMetadata] {
@@ -316,6 +321,98 @@ final class RouterAdministrationModel {
             settingsError = message
         case .stale:
             break
+        }
+    }
+
+    func rotateTLS() async {
+        guard let source = host,
+              source.scheme == "https",
+              source.certificateFingerprint != nil,
+              access == .unlocked
+        else { return }
+        tlsRequestGeneration &+= 1
+        let request = tlsRequestGeneration
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
+        isTLSRotationRunning = true
+        tlsError = nil
+        do {
+            let response = try await adminClient.rotateTLS()
+            guard isCurrentTLSOperation(
+                source: source,
+                session: session,
+                adminOperation: adminOperation,
+                request: request
+            ) else { return }
+            let staged = try await connections.stageTLSCertificateFingerprint(
+                response.sha256,
+                for: source
+            )
+            guard isCurrentTLSOperation(
+                source: source,
+                session: session,
+                adminOperation: adminOperation,
+                request: request
+            ) else { return }
+            host = staged
+            tlsRestartRequired = response.restartRequired
+            isTLSRotationRunning = false
+        } catch is CancellationError {
+            guard isCurrentTLSOperation(
+                source: source,
+                session: session,
+                adminOperation: adminOperation,
+                request: request
+            ) else { return }
+            isTLSRotationRunning = false
+        } catch {
+            guard isCurrentTLSOperation(
+                source: source,
+                session: session,
+                adminOperation: adminOperation,
+                request: request
+            ) else { return }
+            isTLSRotationRunning = false
+            if handleAdminFailure(error) {
+                try? await adminClient.clearAdministratorCredential()
+            } else {
+                tlsError = "The certificate rotation failed. Try again."
+            }
+        }
+    }
+
+    func promoteStagedTLSPin() async {
+        guard let source = host,
+              source.scheme == "https",
+              source.stagedCertificateFingerprint != nil,
+              access == .unlocked
+        else { return }
+        tlsRequestGeneration &+= 1
+        let request = tlsRequestGeneration
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
+        isTLSPromotionRunning = true
+        tlsError = nil
+        do {
+            let promoted = try await connections.promoteStagedTLSPin(for: source.id)
+            guard isCurrentTLSOperation(
+                source: source,
+                session: session,
+                adminOperation: adminOperation,
+                request: request
+            ) else { return }
+            host = promoted
+            tlsRestartRequired = false
+            isTLSPromotionRunning = false
+        } catch {
+            guard isCurrentTLSOperation(
+                source: source,
+                session: session,
+                adminOperation: adminOperation,
+                request: request
+            ) else { return }
+            isTLSPromotionRunning = false
+            tlsError = "The new certificate could not be verified."
         }
     }
 
@@ -672,6 +769,19 @@ final class RouterAdministrationModel {
             && access == .unlocked
     }
 
+    private func isCurrentTLSOperation(
+        source: RouterHostMetadata,
+        session: UInt64,
+        adminOperation: UInt64,
+        request: UInt64
+    ) -> Bool {
+        sessionGeneration == session
+            && adminOperationGeneration == adminOperation
+            && tlsRequestGeneration == request
+            && host == source
+            && access == .unlocked
+    }
+
     private static let clientCleanupFailureMessage =
         "Token was revoked, but this device's local client credential could not be removed."
 
@@ -768,6 +878,11 @@ final class RouterAdministrationModel {
         validatedReplacement = nil
         replacementValidationError = nil
         isReplacementValidationRunning = false
+        tlsRequestGeneration &+= 1
+        tlsError = nil
+        tlsRestartRequired = false
+        isTLSRotationRunning = false
+        isTLSPromotionRunning = false
     }
 
     private static func unlockMessage(for error: Error) -> String {

@@ -12,6 +12,7 @@ struct RouterSettingsView: View {
     @State private var confirmsListenerMigration = false
     @State private var confirmsInsecureWANHTTP = false
     @State private var confirmsTokenStoreCutover = false
+    @State private var confirmsTLSRotation = false
 
     var body: some View {
         Group {
@@ -40,6 +41,29 @@ struct RouterSettingsView: View {
                         .autocorrectionDisabled()
                     LabeledContent("SHA-256", value: original.tls.sha256)
                         .fontDesign(.monospaced)
+                    if model.host?.scheme == "https" {
+                        Button(model.isTLSRotationRunning ? "Rotating…" : "Rotate certificate") {
+                            confirmsTLSRotation = true
+                        }
+                        .disabled(model.isTLSRotationRunning || model.isTLSPromotionRunning)
+                        if model.host?.stagedCertificateFingerprint != nil {
+                            Button(
+                                model.isTLSPromotionRunning
+                                    ? "Verifying…"
+                                    : "Verify new certificate"
+                            ) {
+                                Task { await model.promoteStagedTLSPin() }
+                            }
+                            .disabled(model.isTLSRotationRunning || model.isTLSPromotionRunning)
+                        }
+                        if model.tlsRestartRequired {
+                            Text("Restart wattlined on the router, then verify the new certificate.")
+                                .foregroundStyle(.orange)
+                        }
+                        if let message = model.tlsError {
+                            Text(message).foregroundStyle(.orange)
+                        }
+                    }
                 }
 
                 Section {
@@ -108,6 +132,18 @@ struct RouterSettingsView: View {
             original = nil
             confirmations = []
             selectedReplacementID = nil
+        }
+        .confirmationDialog(
+            "Rotate the router certificate?",
+            isPresented: $confirmsTLSRotation,
+            titleVisibility: .visible
+        ) {
+            Button("Rotate certificate", role: .destructive) {
+                Task { await model.rotateTLS() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The current certificate remains active until wattlined on the router restarts. After restart, verify the new certificate before its pin is promoted.")
         }
         .confirmationDialog(
             "Change router listeners?",
