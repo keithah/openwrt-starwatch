@@ -58,6 +58,29 @@ func TestStoreQueryFiltersAndDownsamples(t *testing.T) {
 	}
 }
 
+func TestStoreQuerySortsOutOfOrderPointsAndDropsZeroTimes(t *testing.T) {
+	store := NewStore(10)
+	start := time.Unix(1_700_000_000, 0).UTC()
+	for _, point := range []Point{
+		{Time: start.Add(2 * time.Second), Value: 2},
+		{Time: time.Time{}, Value: 99},
+		{Time: start, Value: 0},
+		{Time: start.Add(time.Second), Value: 1},
+	} {
+		if err := store.Append(LatencyMS, point); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	points, err := store.Query(LatencyMS, start.Add(time.Second), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 2 || points[0].Value != 1 || points[1].Value != 2 {
+		t.Fatalf("points=%#v", points)
+	}
+}
+
 func TestStoreRejectsUnknownSeries(t *testing.T) {
 	store := NewStore(10)
 	if err := store.Append("unknown", Point{}); !errors.Is(err, ErrUnknownSeries) {

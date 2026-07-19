@@ -40,10 +40,14 @@ func NewTieredReaderWithLogger(ram Reader, persistent *SQLiteStore, ramSpan time
 }
 
 func (r *TieredReader) QuerySpan(series string, since time.Time, span time.Duration, limit int) (QueryResult, error) {
+	minuteSpan := 7 * 24 * time.Hour
+	if r.persistent != nil {
+		minuteSpan = r.persistent.MinuteRetention()
+	}
 	tier := TierRAM
-	if span > r.ramSpan && span <= 7*24*time.Hour {
+	if span > r.ramSpan && span <= minuteSpan {
 		tier = TierMinute
-	} else if span > 7*24*time.Hour {
+	} else if span > minuteSpan {
 		tier = TierQuarter
 	}
 	if tier != TierRAM && r.persistent != nil {

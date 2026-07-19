@@ -47,6 +47,12 @@ type SQLiteStore struct {
 	lastFlush         time.Time
 }
 
+const (
+	maxPendingEvents     = 10_000
+	maxPendingOutages    = 10_000
+	maxPendingSpeedtests = 500
+)
+
 const historySchema = `
 CREATE TABLE IF NOT EXISTS minute (
   series TEXT NOT NULL, ts INTEGER NOT NULL, min REAL NOT NULL, avg REAL NOT NULL,
@@ -157,9 +163,15 @@ func (s *SQLiteStore) SetRetention(minute, quarter time.Duration) {
 	s.mu.Unlock()
 }
 
+func (s *SQLiteStore) MinuteRetention() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.options.MinuteRetention
+}
+
 func (s *SQLiteStore) AddEvent(event Event) {
 	s.mu.Lock()
-	s.pending = append(s.pending, event)
+	s.pending = appendBounded(s.pending, event, maxPendingEvents)
 	s.mu.Unlock()
 }
 
@@ -187,7 +199,7 @@ func (s *SQLiteStore) SaveAlertState(state []byte) error {
 
 func (s *SQLiteStore) AddSpeedtest(result Speedtest) {
 	s.mu.Lock()
-	s.pendingSpeedtests = append(s.pendingSpeedtests, result)
+	s.pendingSpeedtests = appendBounded(s.pendingSpeedtests, result, maxPendingSpeedtests)
 	s.mu.Unlock()
 }
 
@@ -196,9 +208,17 @@ func (s *SQLiteStore) SaveOutage(entry outage.Entry) error {
 		return fmt.Errorf("cannot persist ongoing outage")
 	}
 	s.mu.Lock()
-	s.pendingOutages = append(s.pendingOutages, entry)
+	s.pendingOutages = appendBounded(s.pendingOutages, entry, maxPendingOutages)
 	s.mu.Unlock()
 	return nil
+}
+
+func appendBounded[T any](items []T, item T, limit int) []T {
+	if len(items) >= limit {
+		copy(items, items[len(items)-limit+1:])
+		items = items[:limit-1]
+	}
+	return append(items, item)
 }
 
 type aggregate struct {
@@ -333,7 +353,9 @@ func (s *SQLiteStore) Flush(ctx context.Context, ram Reader, now time.Time) erro
 			return rollback(err)
 		}
 	}
-	for table, limit := range map[string]int{"events": 10_000, "outages": 10_000, "speedtests": 500} {
+	for table, limit := range map[string]int{
+		"events": maxPendingEvents, "outages": maxPendingOutages, "speedtests": maxPendingSpeedtests,
+	} {
 		query := fmt.Sprintf("DELETE FROM %s WHERE id NOT IN (SELECT id FROM %s ORDER BY id DESC LIMIT %d)", table, table, limit)
 		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return rollback(err)

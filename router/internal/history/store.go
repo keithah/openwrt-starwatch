@@ -76,6 +76,16 @@ func (s *Store) Query(series string, since time.Time, limit int) ([]Point, error
 	}
 	all := r.snapshot()
 	s.mu.RUnlock()
+	valid := make([]Point, 0, len(all))
+	for _, point := range all {
+		if !point.Time.IsZero() {
+			valid = append(valid, point)
+		}
+	}
+	if !sort.SliceIsSorted(valid, func(i, j int) bool { return valid[i].Time.Before(valid[j].Time) }) {
+		sort.SliceStable(valid, func(i, j int) bool { return valid[i].Time.Before(valid[j].Time) })
+	}
+	all = valid
 
 	start := 0
 	if !since.IsZero() {

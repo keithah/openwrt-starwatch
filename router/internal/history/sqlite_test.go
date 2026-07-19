@@ -301,6 +301,51 @@ func TestTieredReaderSelectsTierBySpan(t *testing.T) {
 	}
 }
 
+func TestTieredReaderUsesConfiguredMinuteRetention(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	ram := NewStore(10)
+	persistent, _ := openTestSQLite(t, now)
+	persistent.SetRetention(48*time.Hour, 30*24*time.Hour)
+	if _, err := persistent.db.Exec(`INSERT INTO quarter(series, ts, min, avg, max, samples) VALUES(?, ?, 5, 6, 7, 1)`,
+		LatencyMS, now.Add(-72*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := NewTieredReader(ram, persistent, 3*time.Hour).QuerySpan(
+		LatencyMS, now.Add(-72*time.Hour), 72*time.Hour, 1000,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Tier != TierQuarter {
+		t.Fatalf("tier=%q want %q", result.Tier, TierQuarter)
+	}
+}
+
+func TestSQLitePreNTPPendingQueuesStayBounded(t *testing.T) {
+	insane := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	store, _ := openTestSQLite(t, insane)
+	for i := 0; i < 10_100; i++ {
+		store.AddEvent(Event{At: insane, Kind: "test"})
+		if err := store.SaveOutage(outage.Entry{Start: insane.Add(time.Duration(i) * time.Second), Duration: time.Second}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 600; i++ {
+		store.AddSpeedtest(Speedtest{At: insane})
+	}
+	if err := store.Flush(context.Background(), NewStore(1), insane); err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.pending) != 10_000 || len(store.pendingOutages) != 10_000 || len(store.pendingSpeedtests) != 500 {
+		t.Fatalf("pending sizes events=%d outages=%d speedtests=%d",
+			len(store.pending), len(store.pendingOutages), len(store.pendingSpeedtests))
+	}
+}
+
 func TestTieredReaderFallsBackToRAMWhenPersistentTierIsEmpty(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	ram := NewStore(10)
