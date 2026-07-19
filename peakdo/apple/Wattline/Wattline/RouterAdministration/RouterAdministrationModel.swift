@@ -268,6 +268,24 @@ final class RouterAdministrationModel {
         tokenRequestGeneration &+= 1
         let requestGeneration = tokenRequestGeneration
         tokensError = nil
+        let revokedClientLease: RouterCredentialLease?
+        if wasCurrentClient, let revokedHost {
+            do {
+                revokedClientLease = try await connections.clientCredentialLease(
+                    for: revokedHost
+                )
+            } catch {
+                guard isCurrentTokenOperation(
+                    session: session,
+                    adminOperation: adminOperation,
+                    request: requestGeneration
+                ) else { return }
+                tokensError = "The request failed. Try again."
+                return
+            }
+        } else {
+            revokedClientLease = nil
+        }
         do {
             try await adminClient.revokeToken(id: token.id)
         } catch is CancellationError {
@@ -287,18 +305,21 @@ final class RouterAdministrationModel {
         }
 
         var clientCleanupFailed = false
-        if wasCurrentClient, let revokedHost {
+        if let revokedHost, let revokedClientLease {
             do {
-                try await connections.returnToEnrollment(revokedHost)
+                try await connections.returnToEnrollment(
+                    revokedHost,
+                    ifCurrent: revokedClientLease
+                )
             } catch {
                 clientCleanupFailed = true
             }
         }
 
-        guard isCurrentTokenOperation(
+        guard isCurrentAdminEndpoint(
             session: session,
             adminOperation: adminOperation,
-            request: requestGeneration
+            endpoint: revokedHost?.endpoint
         ) else { return }
 
         do {
@@ -493,6 +514,17 @@ final class RouterAdministrationModel {
         sessionGeneration == session
             && adminOperationGeneration == adminOperation
             && tokenRequestGeneration == request
+            && access == .unlocked
+    }
+
+    private func isCurrentAdminEndpoint(
+        session: UInt64,
+        adminOperation: UInt64,
+        endpoint: RouterEndpoint?
+    ) -> Bool {
+        sessionGeneration == session
+            && adminOperationGeneration == adminOperation
+            && host?.endpoint == endpoint
             && access == .unlocked
     }
 

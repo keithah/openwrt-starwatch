@@ -222,8 +222,21 @@ final class RouterConnectionModel {
 
     /// After this endpoint's managed token is revoked, remove only the client
     /// credential. The saved host and administrator credential remain intact.
-    func returnToEnrollment(_ host: RouterHostMetadata) async throws {
-        try await credentialStore.deleteToken(for: host.endpoint, role: .client)
+    func clientCredentialLease(
+        for host: RouterHostMetadata
+    ) async throws -> RouterCredentialLease? {
+        try await credentialStore.credentialLease(for: host.endpoint, role: .client)
+    }
+
+    func returnToEnrollment(
+        _ host: RouterHostMetadata,
+        ifCurrent lease: RouterCredentialLease
+    ) async throws {
+        _ = try await credentialStore.deleteToken(
+            for: host.endpoint,
+            role: .client,
+            ifCurrent: lease
+        )
     }
 
     func makeTransport(for host: RouterHostMetadata) throws -> any DeviceTransport {

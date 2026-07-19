@@ -1290,6 +1290,13 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
         XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/tokens/other-token-id",
+            "/api/v1/tokens",
+            "/api/v1/tokens",
+        ])
     }
 
     func testStaleTokenAuthFailureAfterReunlockCannotRelockOrDeleteNewAdmin() async throws {
@@ -1355,6 +1362,117 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(fixture.model.tokensError)
         XCTAssertEqual(fixture.http.calls.map(\.path), [
             "/api/v1/settings", "/api/v1/tokens", "/api/v1/tokens/self-id",
+        ])
+    }
+
+    func testSameEndpointReenrollmentBeforeSelfRevokeCleanupPreservesSuccessorCredential() async throws {
+        let list = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(list),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+                AdminScriptedHTTP.ok("[]"),
+            ],
+            hostTokenID: "self-id"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        fixture.http.gateNextRequest()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await fixture.http.waitForGateRegistration()
+        _ = try await fixture.connections.saveManualHost(
+            address: "https://router.local:8378",
+            displayName: "Garage router re-enrolled",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: String(repeating: "0", count: 64),
+            token: "successor-client-token"
+        )
+        fixture.http.releaseGates()
+        await revoke.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(client, "successor-client-token")
+        XCTAssertEqual(admin, "boot-admin")
+        XCTAssertEqual(fixture.connections.savedHosts.count, 1)
+        XCTAssertEqual(fixture.connections.savedHosts.first?.endpoint, fixture.host.endpoint)
+        XCTAssertEqual(
+            fixture.connections.savedHosts.first?.displayName,
+            "Garage router re-enrolled"
+        )
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/tokens/self-id",
+            "/api/v1/tokens",
+        ])
+    }
+
+    func testSelfRevokeCleanupBeforeSameEndpointReenrollmentLeavesSuccessorSavedLast() async throws {
+        let list = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let backend = FirstDeleteGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(list),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+                AdminScriptedHTTP.ok("[]"),
+            ],
+            hostTokenID: "self-id",
+            credentialBackend: backend
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await backend.waitForFirstDeleteToStart()
+        let reenrollment = Task {
+            try await fixture.connections.saveManualHost(
+                address: "https://router.local:8378",
+                displayName: "Garage router re-enrolled",
+                reachability: .lan,
+                allowsInsecureWAN: false,
+                deviceID: "DC:04:5A:EB:72:2B",
+                certificateFingerprint: String(repeating: "0", count: 64),
+                token: "successor-client-token"
+            )
+        }
+        await Task.yield()
+        await backend.releaseFirstDelete()
+        await revoke.value
+        _ = try await reenrollment.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(client, "successor-client-token")
+        XCTAssertEqual(admin, "boot-admin")
+        XCTAssertEqual(fixture.connections.savedHosts.count, 1)
+        XCTAssertEqual(fixture.connections.savedHosts.first?.endpoint, fixture.host.endpoint)
+        XCTAssertEqual(
+            fixture.connections.savedHosts.first?.displayName,
+            "Garage router re-enrolled"
+        )
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/tokens/self-id",
+            "/api/v1/tokens",
         ])
     }
 
@@ -1503,6 +1621,59 @@ final class RouterAdministrationModelTests: XCTestCase {
             "/api/v1/tokens/self-id",
             "/api/v1/tokens",
         ])
+        let deleteAttempts = await backend.clientDeleteAttempts
+        XCTAssertEqual(deleteAttempts, 1)
+    }
+
+    func testStaleSelfRevokeCleanupLeaseSkipsBackendFailureAndPreservesReenrollment() async throws {
+        let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let backend = ClientDeleteFailingAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(initial),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+                AdminScriptedHTTP.ok("[]"),
+            ],
+            hostTokenID: "self-id",
+            credentialBackend: backend
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        fixture.http.gateNextRequest()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await fixture.http.waitForGateRegistration()
+        _ = try await fixture.connections.saveManualHost(
+            address: "https://router.local:8378",
+            displayName: "Garage router re-enrolled",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: String(repeating: "0", count: 64),
+            token: "successor-client-token"
+        )
+        fixture.http.releaseGates()
+        await revoke.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        let deleteAttempts = await backend.clientDeleteAttempts
+        XCTAssertEqual(client, "successor-client-token")
+        XCTAssertEqual(admin, "boot-admin")
+        XCTAssertEqual(deleteAttempts, 0)
+        XCTAssertEqual(fixture.connections.savedHosts.count, 1)
+        XCTAssertEqual(fixture.connections.savedHosts.first?.endpoint, fixture.host.endpoint)
+        XCTAssertEqual(
+            fixture.connections.savedHosts.first?.displayName,
+            "Garage router re-enrolled"
+        )
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertNil(fixture.model.tokensError)
     }
 
     func testBootstrapTokenRowHasBadgeButNoRevokeActionOrConfirmation() throws {
@@ -1948,12 +2119,16 @@ private actor AdministrationMemoryBackend: RouterCredentialBackend {
 private actor ClientDeleteFailingAdministrationBackend: RouterCredentialBackend {
     private enum DeleteFailure: Error { case denied }
     private var values: [String: Data] = [:]
+    private(set) var clientDeleteAttempts = 0
 
     func read(account: String) async throws -> Data? { values[account] }
     func save(_ data: Data, account: String) async throws { values[account] = data }
 
     func delete(account: String) async throws {
-        guard account.hasSuffix(".administrator") else { throw DeleteFailure.denied }
+        guard account.hasSuffix(".administrator") else {
+            clientDeleteAttempts += 1
+            throw DeleteFailure.denied
+        }
         values[account] = nil
     }
 }

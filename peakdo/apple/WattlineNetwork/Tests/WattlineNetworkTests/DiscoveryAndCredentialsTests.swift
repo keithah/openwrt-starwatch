@@ -336,6 +336,57 @@ final class RouterCredentialStoreTests: XCTestCase {
         XCTAssertEqual(retainedClientToken, "client-secret")
         XCTAssertFalse(String(describing: store).contains("admin-secret"))
     }
+
+    func testConditionalDeletePreservesCredentialSavedAfterCapturedLease() async throws {
+        let backend = CredentialBackendRecorder()
+        let store = RouterCredentialStore(backend: backend)
+        try await store.saveToken("revoked-client-secret", for: endpoint)
+        let captured = try await store.credentialLease(for: endpoint)
+        let lease = try XCTUnwrap(captured)
+
+        try await store.saveToken("successor-client-secret", for: endpoint)
+        let deleted = try await store.deleteToken(for: endpoint, ifCurrent: lease)
+        let finalToken = try await store.readToken(for: endpoint)
+        let operations = await backend.operations
+
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(finalToken, "successor-client-secret")
+        XCTAssertFalse(String(describing: lease).contains("revoked-client-secret"))
+        XCTAssertFalse(String(describing: lease).contains("successor-client-secret"))
+        XCTAssertEqual(operations, [.save, .read, .save, .read])
+    }
+
+    func testSameAccountSaveWaitsForMatchingConditionalDeleteAndWinsLast() async throws {
+        let endpoint = self.endpoint
+        let backend = DeleteGatedCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        try await store.saveToken("revoked-client-secret", for: endpoint)
+        let captured = try await store.credentialLease(for: endpoint)
+        let lease = try XCTUnwrap(captured)
+
+        let cleanup = Task {
+            try await store.deleteToken(for: endpoint, ifCurrent: lease)
+        }
+        await backend.waitForDeleteToStart()
+        let saveStarted = AsyncStream<Void>.makeStream()
+        var saveStartedIterator = saveStarted.stream.makeAsyncIterator()
+        let reenrollment = Task {
+            saveStarted.continuation.yield()
+            try await store.saveToken("successor-client-secret", for: endpoint)
+        }
+        _ = await saveStartedIterator.next()
+        for _ in 0..<10 { await Task.yield() }
+        let overlappedDelete = await backend.saveOverlappedDelete
+
+        await backend.releaseDelete()
+        let deleted = try await cleanup.value
+        try await reenrollment.value
+        let finalToken = try await store.readToken(for: endpoint)
+
+        XCTAssertTrue(deleted)
+        XCTAssertFalse(overlappedDelete)
+        XCTAssertEqual(finalToken, "successor-client-secret")
+    }
 }
 
 private final class DiscoverySourceFixture: RouterDiscoverySource, @unchecked Sendable {
@@ -389,6 +440,45 @@ private actor CredentialBackendRecorder: RouterCredentialBackend {
         operations.append(.delete)
         if let error { throw error }
         values[account] = nil
+    }
+}
+
+private actor DeleteGatedCredentialBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private var deletingAccounts: Set<String> = []
+    private(set) var saveOverlappedDelete = false
+    private var deleteStarted = false
+    private var deleteStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var deleteGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? { values[account] }
+
+    func save(_ data: Data, account: String) async throws {
+        if deletingAccounts.contains(account) {
+            saveOverlappedDelete = true
+        }
+        values[account] = data
+    }
+
+    func delete(account: String) async throws {
+        deletingAccounts.insert(account)
+        deleteStarted = true
+        let waiters = deleteStartedWaiters
+        deleteStartedWaiters = []
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { deleteGate = $0 }
+        values[account] = nil
+        deletingAccounts.remove(account)
+    }
+
+    func waitForDeleteToStart() async {
+        if deleteStarted { return }
+        await withCheckedContinuation { deleteStartedWaiters.append($0) }
+    }
+
+    func releaseDelete() {
+        deleteGate?.resume()
+        deleteGate = nil
     }
 }
 
