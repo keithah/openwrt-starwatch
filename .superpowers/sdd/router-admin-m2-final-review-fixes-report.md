@@ -220,3 +220,98 @@ release, verify against live `wattlined`: exact administrator verification,
 two near-simultaneous token revocations and relists, revoked-token SSE closure,
 self-revocation returning the saved row to PIN/manual enrollment, and visible
 chart gaps/series using real bounded history payloads.
+
+## Follow-up final-review corrections
+
+Commit `b34c3bf3 fix: close router administration race windows` closes the
+three remaining Important concurrency findings from the M2 re-review.
+
+### Public token reads share the mutation FIFO
+
+- Public `tokens()` calls now acquire the same FIFO used by revoke workflows.
+- `revokeTokenAndReload` uses a private ungated token-list helper while it owns
+  the FIFO, avoiding recursive acquisition and preserving atomic
+  DELETE-plus-authoritative-readback ordering.
+- The former permissive overlap regressions now express FIFO ordering. A
+  public reload submitted while DELETE is gated issues no request until the
+  revoke workflow completes, then publishes the post-revoke list.
+- Same-session list/error and stale-session tests were updated to submit their
+  second reload asynchronously and release the older gate before awaiting it.
+
+TDD evidence:
+
+1. RED focused model test failed because the public reload issued a fourth HTTP
+   call while DELETE was still gated.
+2. GREEN identical focused test passed after the shared FIFO/private-helper
+   split.
+3. The first full model-class run exposed four obsolete await-before-release
+   test arrangements as a test-only deadlock. It was interrupted, the live
+   XCTest log identified
+   `testDurableSelfRevokeAfterReunlockDoesNotRelistThroughNewAdminSession`, and
+   all four overlapping reload tests were revised around the FIFO contract.
+   Their focused run passed 4/4, then the model class passed 70/70.
+
+### Queued no-lease mutations retain their original attachment
+
+- No-lease revoke, open-pairing, and close-pairing calls capture their
+  attachment lease before entering the FIFO.
+- After acquiring the FIFO they check cancellation and validate/use that exact
+  lease, so a queued action for endpoint A cannot mutate replacement endpoint
+  B.
+- The no-lease revoke-and-reload overload was audited and made explicit; its
+  lease is also captured before delegating to the queued overload.
+
+TDD evidence:
+
+1. RED Network run executed three deterministic replacement races. All three
+   incorrectly completed through B instead of throwing `CancellationError`,
+   producing six assertions failures.
+2. GREEN identical run passed 3/3. Each regression gates a blocker mutation on
+   A, queues the operation, attaches B, releases A, and proves B received zero
+   mutation requests.
+
+### Per-host credential-availability publication versions
+
+- Bulk saved-host refreshes reserve a publication version independently for
+  every endpoint and retain that version with the read result.
+- Targeted `returnToEnrollment` refresh reserves a newer version before the
+  conditional delete. Publication succeeds only when the endpoint's version
+  remains current, so an older bulk result cannot overwrite newer enrollment
+  truth while unrelated host results still publish.
+
+TDD evidence:
+
+1. RED focused model test gated a bulk refresh on a second saved host after the
+   first host had been read, completed self-revoke for the first host, then
+   released the older bulk refresh. The old implementation overwrote the first
+   host back to `.available`.
+2. GREEN identical focused test passed with final `.enrollmentRequired` and
+   `.manualRouterEnrollment`. It also proves both saved hosts remain, the
+   revoked host's client credential is nil, and its administrator credential
+   plus the other host's client/administrator credentials are preserved.
+
+### Follow-up verification
+
+- `swift test --package-path peakdo/apple/WattlineNetwork`
+  - PASS: 147 tests, 0 failures.
+- `swift test --package-path peakdo/apple/WattlineUI`
+  - PASS: 33 tests, 0 failures.
+- Focused `RouterAdministrationModelTests` simulator run
+  - PASS: 70 tests, 0 failures.
+- `xcodebuild test -quiet -project peakdo/apple/Wattline/Wattline.xcodeproj
+  -scheme Wattline -destination 'platform=iOS Simulator,name=Wattline-Tests-2'
+  CODE_SIGNING_ALLOWED=NO`
+  - PASS: result bundle reports 247 tests, 0 failures, 0 skipped on iPhone 17e,
+    iOS Simulator 26.5.
+  - Xcode again emitted transient debugger-version/UI-runner launch diagnostics
+    while retrying; the command completed exit 0 and the result bundle reports
+    Passed.
+- `xcodebuild build -quiet -project peakdo/apple/Wattline/Wattline.xcodeproj
+  -scheme Wattline -destination 'generic/platform=iOS Simulator'
+  CODE_SIGNING_ALLOWED=NO`
+  - PASS, exit 0.
+- `git diff --check`
+  - PASS, no whitespace errors.
+
+From `a2ba8556` through `b34c3bf3`: 1 source/test commit, 4 files changed,
+344 insertions, 28 deletions.
