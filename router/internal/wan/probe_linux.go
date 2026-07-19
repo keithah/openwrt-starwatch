@@ -16,9 +16,14 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-type systemProber struct{ sequence atomic.Uint32 }
+type systemProber struct {
+	sequence atomic.Uint32
+	lookupIP func(context.Context, string, string) ([]net.IP, error)
+}
 
-func newSystemProber() Prober { return &systemProber{} }
+func newSystemProber() Prober {
+	return &systemProber{lookupIP: net.DefaultResolver.LookupIP}
+}
 
 func (p *systemProber) Probe(ctx context.Context, interfaceName, host string) (time.Duration, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -31,6 +36,10 @@ func (p *systemProber) Probe(ctx context.Context, interfaceName, host string) (t
 }
 
 func (p *systemProber) icmp(ctx context.Context, interfaceName, host string) (time.Duration, error, bool) {
+	address, err := p.resolveIPv4(ctx, host)
+	if err != nil {
+		return 0, err, false
+	}
 	listen := net.ListenConfig{Control: bindControl(interfaceName)}
 	connection, err := listen.ListenPacket(ctx, "ip4:icmp", "0.0.0.0")
 	if err != nil {
@@ -51,7 +60,7 @@ func (p *systemProber) icmp(ctx context.Context, interfaceName, host string) (ti
 	}
 	_ = connection.SetDeadline(deadline)
 	start := time.Now()
-	if _, err := connection.WriteTo(payload, &net.IPAddr{IP: net.ParseIP(host)}); err != nil {
+	if _, err := connection.WriteTo(payload, &net.IPAddr{IP: address}); err != nil {
 		return 0, err, true
 	}
 	buffer := make([]byte, 1500)
@@ -69,6 +78,26 @@ func (p *systemProber) icmp(ctx context.Context, interfaceName, host string) (ti
 			return time.Since(start), nil, true
 		}
 	}
+}
+
+func (p *systemProber) resolveIPv4(ctx context.Context, host string) (net.IP, error) {
+	if address := net.ParseIP(host).To4(); address != nil {
+		return address, nil
+	}
+	lookup := p.lookupIP
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIP
+	}
+	addresses, err := lookup(ctx, "ip4", host)
+	if err != nil {
+		return nil, err
+	}
+	for _, address := range addresses {
+		if ipv4 := address.To4(); ipv4 != nil {
+			return ipv4, nil
+		}
+	}
+	return nil, fmt.Errorf("resolve %s: no IPv4 address", host)
 }
 
 func (p *systemProber) udp(ctx context.Context, interfaceName, host string) (time.Duration, error) {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 const pristineOpenWrtMwan3 = `mwan3.globals=globals
@@ -130,6 +132,110 @@ func TestRefreshOmitsMwanWhenAbsent(t *testing.T) {
 	runner := &fakeRunner{errors: map[string]error{"ubus call mwan3 status": errors.New("missing"), "mwan3 interfaces": errors.New("missing")}}
 	if status := NewManager(Options{Runner: runner}).Refresh(context.Background()); status != nil {
 		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestRefreshRetainsLastGoodStatusOnTransientFailure(t *testing.T) {
+	runner := &fakeRunner{outputs: map[string]string{
+		"ubus call mwan3 status": `{"interfaces":{"wan":{"status":"online"}},"active_interfaces":["wan"]}`,
+	}, errors: map[string]error{}}
+	manager := NewManager(Options{Runner: runner})
+	first := manager.Refresh(context.Background())
+	if first == nil || len(first.ActiveInterfaces) != 1 || first.ActiveInterfaces[0] != "wan" {
+		t.Fatalf("first=%+v", first)
+	}
+	runner.errors["ubus call mwan3 status"] = errors.New("temporary ubus failure")
+	runner.errors["mwan3 interfaces"] = errors.New("temporary cli failure")
+	second := manager.Refresh(context.Background())
+	if second == nil || len(second.ActiveInterfaces) != 1 || second.ActiveInterfaces[0] != "wan" {
+		t.Fatalf("transient failure discarded last-good status: %+v", second)
+	}
+	if snapshot := manager.Snapshot(); snapshot == nil || len(snapshot.ActiveInterfaces) != 1 || snapshot.ActiveInterfaces[0] != "wan" {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+}
+
+type serialApplyRunner struct {
+	mu          sync.Mutex
+	active      int
+	maxActive   int
+	firstBatch  chan struct{}
+	secondBatch chan struct{}
+	release     chan struct{}
+	commands    []string
+}
+
+func (r *serialApplyRunner) Run(_ context.Context, name string, args []string, _ string) ([]byte, error) {
+	command := name + " " + strings.Join(args, " ")
+	r.mu.Lock()
+	r.commands = append(r.commands, command)
+	if command != "uci batch" {
+		r.mu.Unlock()
+		switch command {
+		case "ubus call mwan3 status":
+			return []byte(`{"interfaces":{"wan":{"status":"online"},"wwan":{"status":"online"}}}`), nil
+		case "uci show mwan3":
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}
+	r.active++
+	if r.active > r.maxActive {
+		r.maxActive = r.active
+	}
+	if r.active == 1 {
+		select {
+		case r.firstBatch <- struct{}{}:
+		default:
+		}
+	} else {
+		select {
+		case r.secondBatch <- struct{}{}:
+		default:
+		}
+	}
+	r.mu.Unlock()
+	<-r.release
+	r.mu.Lock()
+	r.active--
+	r.mu.Unlock()
+	return nil, nil
+}
+
+func TestApplySerializesConcurrentChanges(t *testing.T) {
+	runner := &serialApplyRunner{
+		firstBatch: make(chan struct{}, 1), secondBatch: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(runner.release) }) })
+	manager := NewManager(Options{
+		Runner: runner, Interfaces: func(context.Context) []string { return []string{"wan", "wwan"} },
+		GLManaged: func(context.Context) bool { return false },
+	})
+	errors := make(chan error, 2)
+	go func() { errors <- manager.Apply(context.Background(), "wan") }()
+	select {
+	case <-runner.firstBatch:
+	case <-time.After(time.Second):
+		t.Fatal("first apply did not reach UCI batch")
+	}
+	go func() { errors <- manager.Apply(context.Background(), "wan") }()
+	select {
+	case <-runner.secondBatch:
+		t.Fatal("concurrent apply entered UCI batch before the first completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release.Do(func() { close(runner.release) })
+	for range 2 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.maxActive != 1 {
+		t.Fatalf("maximum concurrent batches=%d", runner.maxActive)
 	}
 }
 
@@ -262,7 +368,7 @@ func TestAssistAppliesExactlyProposedStarwatchChanges(t *testing.T) {
 			batchIndex = index
 		}
 	}
-	if batchIndex < 0 || batchIndex+1 >= len(runner.commands) || runner.commands[batchIndex+1] != "mwan3 restart" || !strings.Contains(runner.stdin[batchIndex], "starwatch_primary") {
+	if batchIndex < 0 || batchIndex+1 >= len(runner.commands) || runner.commands[batchIndex+1] != "mwan3 reload" || !strings.Contains(runner.stdin[batchIndex], "starwatch_primary") {
 		t.Fatalf("commands=%#v stdin=%#v", runner.commands, runner.stdin)
 	}
 	batch := runner.stdin[batchIndex]

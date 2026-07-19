@@ -47,6 +47,7 @@ var ErrAssistUnavailable = errors.New("failover assist unavailable")
 type Manager struct {
 	options    Options
 	mu         sync.RWMutex
+	applyMu    sync.Mutex
 	status     *dish.MWANStatus
 	lastActive []string
 	haveActive bool
@@ -130,9 +131,12 @@ func (m *Manager) Refresh(ctx context.Context) *dish.MWANStatus {
 		}
 		m.lastActive, m.haveActive = active, true
 	}
-	m.status = cloneStatus(status)
+	if status != nil {
+		m.status = cloneStatus(status)
+	}
+	result := cloneStatus(m.status)
 	m.mu.Unlock()
-	return cloneStatus(status)
+	return result
 }
 
 func (m *Manager) Assist(ctx context.Context, primary string) AssistResult {
@@ -173,6 +177,8 @@ func (m *Manager) Assist(ctx context.Context, primary string) AssistResult {
 }
 
 func (m *Manager) Apply(ctx context.Context, primary string) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 	result := m.Assist(ctx, primary)
 	if !result.Available {
 		return fmt.Errorf("%w: %s", ErrAssistUnavailable, result.Reason)
@@ -181,7 +187,7 @@ func (m *Manager) Apply(ctx context.Context, primary string) error {
 	if _, err := m.options.Runner.Run(ctx, "uci", []string{"batch"}, batch); err != nil {
 		return err
 	}
-	if _, err := m.options.Runner.Run(ctx, "mwan3", []string{"restart"}, ""); err != nil {
+	if _, err := m.options.Runner.Run(ctx, "mwan3", []string{"reload"}, ""); err != nil {
 		return err
 	}
 	m.Refresh(ctx)
