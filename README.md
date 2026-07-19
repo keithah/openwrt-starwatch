@@ -148,6 +148,18 @@ make -C package feed-artifact
 # unsigned local staging: package/out/pages/{Packages,Packages.gz,install.sh,*.ipk}
 ```
 
+To sign a local feed when an OpenWrt usign private key is available, pass it
+explicitly; leaving `SIGN_KEY` unset remains a deliberate no-op:
+
+```sh
+make -C package SIGN_KEY=/secure/path/feed.sec feed-artifact
+# package/out/pages/Packages.sig is now included
+```
+
+Unsigned local indexes are development artifacts, not an authenticity check.
+Install from the HTTPS production feed with its pinned public key, or verify a
+release asset checksum from GitHub before installing it directly.
+
 Version-tag and explicit manual GitHub Actions runs publish that verified
 artifact to `https://keithah.github.io/openwrt-starwatch/`. Pull requests and
 ordinary `main` pushes run the same build and tests without deploying. The

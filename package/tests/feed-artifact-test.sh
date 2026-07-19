@@ -53,6 +53,23 @@ done <"$tmp/filenames"
 
 cmp -s "$root/install.sh" "$pages/install.sh"
 
+cat >"$tmp/usign" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>'$tmp/usign.log'
+output=''
+while [ "\$#" -gt 0 ]; do
+	if [ "\$1" = '-x' ]; then output="\$2"; shift 2; else shift; fi
+done
+[ -n "\$output" ]
+printf 'test signature\n' >"\$output"
+EOF
+chmod +x "$tmp/usign"
+printf 'test private key\n' >"$tmp/feed.sec"
+
+make -C "$root" OUT="$out" VERSION="$version" SIGN_KEY="$tmp/feed.sec" USIGN="$tmp/usign" feed-artifact
+[ -s "$pages/Packages.sig" ]
+grep -F -- "-S -m Packages -s $tmp/feed.sec -x Packages.sig" "$tmp/usign.log" >/dev/null
+
 if make -C "$root" OUT="$out" signed-feed-artifact >"$tmp/unsigned.log" 2>&1; then
 	echo 'signed artifact unexpectedly succeeded without a signing key' >&2
 	exit 1

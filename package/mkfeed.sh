@@ -20,4 +20,16 @@ for ipk in *.ipk; do
 done
 
 gzip -9 -c Packages > Packages.gz
+
+SIGN_KEY="${SIGN_KEY:-}"
+USIGN="${USIGN:-usign}"
+rm -f Packages.sig
+if [ -n "$SIGN_KEY" ]; then
+	command -v "$USIGN" >/dev/null 2>&1 || {
+		echo "usign not found: $USIGN" >&2
+		exit 1
+	}
+	"$USIGN" -S -m Packages -s "$SIGN_KEY" -x Packages.sig
+fi
+
 echo "wrote $OUT/Packages and $OUT/Packages.gz ($(grep -c '^Package:' Packages) packages)"

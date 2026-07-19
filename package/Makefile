@@ -12,6 +12,7 @@ STARWATCHD_IPK := $(OUT)/starwatchd_$(VERSION)_$(ARCH).ipk
 LUCI_IPK := $(OUT)/luci-app-starwatch_$(VERSION)_all.ipk
 GLAPP_IPK := $(OUT)/gl-app-starwatch_$(VERSION)_all.ipk
 USIGN ?= usign
+SIGN_KEY ?=
 SIGNING_KEY ?=
 VERIFY_KEY ?= starwatch-feed.pub
 
@@ -44,8 +45,10 @@ test:
 feed: all
 	index_dir=$$(mktemp -d "$(OUT)/.feed-index.XXXXXX") && \
 	cp $(STARWATCHD_IPK) $(LUCI_IPK) $(GLAPP_IPK) "$$index_dir/" && \
-	sh mkfeed.sh "$$index_dir" && \
+	SIGN_KEY="$(SIGN_KEY)" USIGN="$(USIGN)" sh mkfeed.sh "$$index_dir" && \
 	cp "$$index_dir/Packages" "$$index_dir/Packages.gz" $(OUT)/ && \
+	rm -f $(OUT)/Packages.sig && \
+	{ [ ! -f "$$index_dir/Packages.sig" ] || cp "$$index_dir/Packages.sig" $(OUT)/; } && \
 	rm -rf "$$index_dir"
 
 # feed-artifact: stage only the static files published as the opkg feed.
@@ -53,6 +56,7 @@ feed-artifact: feed
 	rm -rf $(OUT)/pages
 	mkdir -p $(OUT)/pages
 	cp $(OUT)/Packages $(OUT)/Packages.gz $(STARWATCHD_IPK) $(LUCI_IPK) $(GLAPP_IPK) install.sh $(OUT)/pages/
+	if [ -f $(OUT)/Packages.sig ]; then cp $(OUT)/Packages.sig $(OUT)/pages/; fi
 
 # Deployable feeds retain OpenWrt's global signature checks. The public key is
 # pinned by install.sh; the private key is supplied only by GitHub Actions.
