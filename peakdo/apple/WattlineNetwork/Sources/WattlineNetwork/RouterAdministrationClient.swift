@@ -77,6 +77,10 @@ public actor RouterAdministrationClient {
     public func verifyStoredAdministrator() async throws {
         guard let endpoint, let http else { throw RouterAdministrationError.notAttached }
         let requestGeneration = generation
+        await acquireCredentialPersistence()
+        defer { releaseCredentialPersistence() }
+        guard generation == requestGeneration else { throw CancellationError() }
+        try Task.checkCancellation()
         guard let token = try await credentials.readToken(
             for: endpoint,
             role: .administrator
@@ -87,14 +91,13 @@ public actor RouterAdministrationClient {
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch NetworkError.unauthorized {
-            await acquireCredentialPersistence()
-            defer { releaseCredentialPersistence() }
             guard generation == requestGeneration else { throw CancellationError() }
             try Task.checkCancellation()
             try? await credentials.deleteToken(for: endpoint, role: .administrator)
             guard generation == requestGeneration else { throw CancellationError() }
             throw RouterAdministrationError.invalidAdministratorToken
         } catch NetworkError.api(403, RouterAPIErrorCode.adminRequired, _) {
+            guard generation == requestGeneration else { throw CancellationError() }
             throw RouterAdministrationError.clientTokenRejected
         }
         guard generation == requestGeneration else { throw CancellationError() }

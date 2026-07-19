@@ -75,7 +75,6 @@ final class RouterAdministrationModelTests: XCTestCase {
             results: [
                 .failure(NetworkError.unauthorized),
                 AdminScriptedHTTP.ok("{}"),
-                AdminScriptedHTTP.ok("{}"),
             ],
             credentialBackend: backend
         )
@@ -87,14 +86,20 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         let staleBegin = Task { await fixture.model.begin(host: fixture.host) }
         await backend.waitForFirstDeleteToStart()
-        await fixture.model.begin(host: fixture.host)
-        let replacementUnlock = Task {
-            await fixture.model.unlock(token: "current-admin")
-        }
-        await fixture.http.waitForCallCount(3)
+        let replacementBegin = Task { await fixture.model.begin(host: fixture.host) }
+        while fixture.model.access != .verifying { await Task.yield() }
         await backend.releaseFirstDelete()
         await staleBegin.value
-        await replacementUnlock.value
+        await replacementBegin.value
+
+        XCTAssertEqual(fixture.model.access, .locked)
+        let cleared = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        XCTAssertNil(cleared)
+
+        await fixture.model.unlock(token: "current-admin")
 
         XCTAssertEqual(fixture.model.host, fixture.host)
         XCTAssertEqual(fixture.model.access, .unlocked)
@@ -122,6 +127,46 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.access, .unlocked)
         let saveCount = await backend.saveCount
         XCTAssertEqual(saveCount, 1)
+    }
+
+    func testReplacementStoredVerificationWaitsForExplicitClearAndObservesNoCredential() async throws {
+        let backend = FirstDeleteGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok("{}"),
+            ],
+            gateRequests: true,
+            credentialBackend: backend
+        )
+        try await fixture.credentialStore.saveToken(
+            "stored-admin",
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        let initialBegin = Task { await fixture.model.begin(host: fixture.host) }
+        await fixture.http.waitForGateRegistration()
+        fixture.http.releaseGates()
+        await initialBegin.value
+        XCTAssertEqual(fixture.model.access, .unlocked)
+
+        let clear = Task { await fixture.model.lock() }
+        await backend.waitForFirstDeleteToStart()
+        let replacementBegin = Task { await fixture.model.begin(host: fixture.host) }
+        while fixture.model.access != .verifying { await Task.yield() }
+        await backend.releaseFirstDelete()
+        fixture.http.releaseGates()
+        await clear.value
+        await replacementBegin.value
+
+        XCTAssertEqual(fixture.model.host, fixture.host)
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertEqual(fixture.http.calls.count, 1)
+        let stored = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        XCTAssertNil(stored)
     }
 
     func testLockInvalidatesInFlightUnlockSaveAndLeavesNoCredential() async throws {
@@ -279,6 +324,7 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     private var scripted: [Result<(Data, HTTPURLResponse), Error>]
     private var recorded: [Call] = []
     private var gates: [CheckedContinuation<Void, Never>] = []
+    private var pendingGateReleases = 0
     private var gateRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
     private var callCountWaiters: [(minimum: Int, continuation: CheckedContinuation<Void, Never>)] = []
     private let shouldGate: Bool
@@ -316,16 +362,22 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     ) async throws -> (Data, HTTPURLResponse) {
         if shouldGate {
             await withCheckedContinuation { gate in
-                let (gateWaiters, callWaiters) = lock.withLock {
+                let (shouldResumeGate, gateWaiters, callWaiters) = lock.withLock {
                     recorded.append(Call(method: method, path: path, token: token))
-                    gates.append(gate)
+                    let shouldResumeGate = pendingGateReleases > 0
+                    if shouldResumeGate {
+                        pendingGateReleases -= 1
+                    } else {
+                        gates.append(gate)
+                    }
                     let gateWaiters = gateRegistrationWaiters
                     gateRegistrationWaiters = []
                     let callWaiters = removeSatisfiedCallCountWaiters()
-                    return (gateWaiters, callWaiters)
+                    return (shouldResumeGate, gateWaiters, callWaiters)
                 }
                 gateWaiters.forEach { $0.resume() }
                 callWaiters.forEach { $0.resume() }
+                if shouldResumeGate { gate.resume() }
             }
         } else {
             let callWaiters = lock.withLock {
@@ -362,7 +414,11 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     }
 
     func releaseGates() {
-        let pending = lock.withLock {
+        let pending: [CheckedContinuation<Void, Never>] = lock.withLock {
+            guard !gates.isEmpty else {
+                pendingGateReleases += 1
+                return []
+            }
             let pending = gates
             gates.removeAll()
             return pending
