@@ -115,6 +115,12 @@ final class RouterConnectionModel {
                 else { return }
                 self.discoveredRouters = routers
             }
+            guard !Task.isCancelled,
+                  let self,
+                  self.discoveryGeneration == generation
+            else { return }
+            self.discoveryError = "Router discovery stopped. Check Local Network access and try again."
+            self.discoveryTask = nil
         }
     }
 
@@ -123,6 +129,7 @@ final class RouterConnectionModel {
         discoveryTask?.cancel()
         discoveryTask = nil
         discoveredRouters = []
+        discoveryError = nil
     }
 
     func reloadSavedHosts() async {
@@ -327,8 +334,9 @@ final class RouterConnectionModel {
         for router in discoveredRouters {
             let routerIdentity = Self.snapshot(for: router)
             let host = savedHosts.first { Self.matches($0, router: router) }
-            if let index = records.firstIndex(where: {
-                DeviceIdentityDeduplicator.merge(ble: $0.identity, router: routerIdentity) != nil
+            if let index = records.firstIndex(where: { record in
+                guard let identity = record.identity else { return false }
+                return DeviceIdentityDeduplicator.merge(ble: identity, router: routerIdentity) != nil
             }) {
                 let existing = records[index]
                 records[index] = AppDeviceConnectionRecord(

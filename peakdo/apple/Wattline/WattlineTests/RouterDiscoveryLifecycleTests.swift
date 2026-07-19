@@ -70,6 +70,84 @@ final class RouterDiscoveryLifecycleTests: XCTestCase {
         XCTAssertEqual(presentation.transportLabels, ["BT", "Router"])
     }
 
+    func testIdentitylessBluetoothDeviceAndDiscoveredRouterRemainDistinct() async throws {
+        let source = RecordingRouterDiscoverySource()
+        let model = makeModel(discovery: RouterDiscovery(source: source))
+        let bluetooth = DiscoveredDevice(
+            id: UUID(),
+            localName: "Unidentified Link-Power",
+            rssi: -38,
+            mode: .application
+        )
+
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 1 }
+        source.yield([serviceRecord(id: "DC:04:5A:EB:72:2B")], session: 0)
+        try await waitUntil { await model.discoveredRouters.count == 1 }
+
+        let records = model.scanRecords(bluetooth: [bluetooth], identities: [:])
+
+        XCTAssertEqual(records.count, 2)
+        let bluetoothRecord = try XCTUnwrap(records.first { $0.bluetoothDevice == bluetooth })
+        XCTAssertEqual(bluetoothRecord.transportOptions, [.bluetooth])
+        XCTAssertNil(bluetoothRecord.discoveredRouter)
+        XCTAssertEqual(ScanRecordPresentation(record: bluetoothRecord).primaryAction, .connectBluetooth)
+
+        let routerRecord = try XCTUnwrap(records.first { $0.discoveredRouter != nil })
+        XCTAssertNil(routerRecord.bluetoothDevice)
+        XCTAssertEqual(routerRecord.transportOptions, [.router])
+        XCTAssertEqual(ScanRecordPresentation(record: routerRecord).primaryAction, .enrollRouter)
+    }
+
+    func testNaturalDiscoveryFinishPublishesErrorAndAllowsRestart() async throws {
+        let source = RecordingRouterDiscoverySource()
+        let model = makeModel(discovery: RouterDiscovery(source: source))
+
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 1 }
+        source.finish(session: 0)
+
+        try await waitUntil { await model.discoveryError != nil }
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 2 }
+        XCTAssertNil(model.discoveryError)
+    }
+
+    func testStopDiscoveryClearsResultsAndError() async throws {
+        let source = RecordingRouterDiscoverySource()
+        let model = makeModel(discovery: RouterDiscovery(source: source))
+
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 1 }
+        source.yield([serviceRecord(id: "DC:04:5A:EB:72:2B")], session: 0)
+        try await waitUntil { await model.discoveredRouters.count == 1 }
+        source.finish(session: 0)
+        try await waitUntil { await model.discoveryError != nil }
+
+        model.stopDiscovery()
+
+        XCTAssertTrue(model.discoveredRouters.isEmpty)
+        XCTAssertNil(model.discoveryError)
+    }
+
+    func testStaleGenerationFinishCannotPublishErrorIntoReplacementSession() async throws {
+        let source = RecordingRouterDiscoverySource()
+        let model = makeModel(discovery: RouterDiscovery(source: source))
+
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 1 }
+        model.stopDiscovery()
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 2 }
+
+        source.finish(session: 0)
+        source.yield([serviceRecord(id: "AA:BB:CC:DD:EE:FF")], session: 1)
+        try await waitUntil { await model.discoveredRouters.count == 1 }
+
+        XCTAssertNil(model.discoveryError)
+        XCTAssertEqual(model.discoveredRouters.first?.deviceID, "AABBCCDDEEFF")
+    }
+
     func testRouterOnlyDiscoveryPresentsEnrollmentAsPrimaryAction() async throws {
         let source = RecordingRouterDiscoverySource()
         let model = makeModel(discovery: RouterDiscovery(source: source))
@@ -144,6 +222,13 @@ private final class RecordingRouterDiscoverySource: RouterDiscoverySource, @unch
             guard continuations.indices.contains(session) else { return }
             continuations[session].yield(records)
         }
+    }
+
+    func finish(session: Int) {
+        let continuation = lock.withLock {
+            continuations.indices.contains(session) ? continuations[session] : nil
+        }
+        continuation?.finish()
     }
 }
 
