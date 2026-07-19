@@ -66,14 +66,16 @@ struct ScanView: View {
                                     }
                                     .buttonStyle(.plain)
 
-                                    if presentation.offersRouterAction || record.routerHost != nil {
+                                    if presentation.offersRouterAction
+                                        || presentation.offersRouterAdministration {
                                         Menu {
                                             if presentation.offersRouterAction {
                                                 Button(record.routerHost == nil ? "Enroll with router" : "Connect via router") {
                                                     performRouterAction(record)
                                                 }
                                             }
-                                            if let host = record.routerHost {
+                                            if presentation.offersRouterAdministration,
+                                               let host = record.routerHost {
                                                 Button("Router administration") {
                                                     administrationHost = host
                                                 }
@@ -178,6 +180,7 @@ struct ScanRecordPresentation: Equatable, Sendable {
     let transportLabels: [String]
     let primaryAction: ScanPrimaryAction
     let offersRouterAction: Bool
+    let offersRouterAdministration: Bool
 
     init(record: AppDeviceConnectionRecord) {
         title = record.bluetoothDevice?.localName
@@ -203,6 +206,7 @@ struct ScanRecordPresentation: Equatable, Sendable {
         }
         offersRouterAction = record.bluetoothDevice != nil
             && (record.routerHost != nil || record.discoveredRouter != nil)
+        offersRouterAdministration = record.routerHost != nil
     }
 }
 

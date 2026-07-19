@@ -18,6 +18,7 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
     private let lock = NSLock()
     private var results: [Result<(Data, HTTPURLResponse), Error>]
     private var pendingGates: [CheckedContinuation<Void, Never>] = []
+    private var gateRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
     private var _calls: [Call] = []
     private let gateRequests: Bool
 
@@ -56,17 +57,36 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
         body: Data?,
         token: String
     ) async throws -> (Data, HTTPURLResponse) {
-        lock.withLock {
-            _calls.append(Call(method: method, path: path, body: body, token: token))
-        }
         if gateRequests {
-            await withCheckedContinuation { continuation in
-                lock.withLock { pendingGates.append(continuation) }
+            await withCheckedContinuation { gate in
+                let waiters = lock.withLock {
+                    _calls.append(Call(method: method, path: path, body: body, token: token))
+                    pendingGates.append(gate)
+                    let waiters = gateRegistrationWaiters
+                    gateRegistrationWaiters = []
+                    return waiters
+                }
+                waiters.forEach { $0.resume() }
+            }
+        } else {
+            lock.withLock {
+                _calls.append(Call(method: method, path: path, body: body, token: token))
             }
         }
         let next = lock.withLock { results.isEmpty ? nil : results.removeFirst() }
         guard let next else { throw NetworkError.decode("ScriptedRouterHTTPClient exhausted") }
         return try next.get()
+    }
+
+    func waitForGateRegistration() async {
+        await withCheckedContinuation { continuation in
+            let isAlreadyRegistered = lock.withLock {
+                guard pendingGates.isEmpty else { return true }
+                gateRegistrationWaiters.append(continuation)
+                return false
+            }
+            if isAlreadyRegistered { continuation.resume() }
+        }
     }
 
     func releaseGates() {

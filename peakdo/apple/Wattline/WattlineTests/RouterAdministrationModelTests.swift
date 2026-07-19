@@ -77,18 +77,76 @@ final class RouterAdministrationModelTests: XCTestCase {
         await fixture.model.begin(host: fixture.host)
 
         let unlock = Task { await fixture.model.unlock(token: "boot-admin") }
-        while fixture.http.calls.isEmpty { await Task.yield() }
+        await fixture.http.waitForGateRegistration()
         await fixture.model.end()
         fixture.http.releaseGates()
         await unlock.value
 
         XCTAssertEqual(fixture.model.access, .locked)
     }
+
+    func testAppModelOwnsInjectedAdministrationBoundToSuppliedConnections() async throws {
+        let fixture = try await makeFixture(results: [AdminScriptedHTTP.ok("{}")])
+        let suite = "RouterAdministrationModelTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let app = AppModel(
+            persistence: AppPersistence(defaults: defaults),
+            transportFactory: { fatalError("Bluetooth transport must remain lazy") },
+            snapshotCoordinator: nil,
+            widgetReloadAdapter: nil,
+            routerConnections: fixture.connections,
+            routerAdministration: fixture.model
+        )
+
+        XCTAssertTrue(app.routerConnections === fixture.connections)
+        XCTAssertTrue(app.routerAdministration === fixture.model)
+        await app.routerAdministration.begin(host: fixture.host)
+        await app.routerAdministration.unlock(token: "injected-admin")
+
+        let stored = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        XCTAssertEqual(stored, "injected-admin")
+        XCTAssertEqual(fixture.http.calls.map(\.token), ["injected-admin"])
+    }
+
+    func testScanPresentationOffersAdministrationOnlyForSavedHost() async throws {
+        let fixture = try await makeFixture(results: [])
+        let saved = AppDeviceConnectionRecord(
+            id: "saved",
+            identity: nil,
+            bluetoothDevice: nil,
+            discoveredRouter: nil,
+            routerHost: fixture.host,
+            transportOptions: [.router],
+            preferredTransport: .router
+        )
+        let unsaved = AppDeviceConnectionRecord(
+            id: "unsaved",
+            identity: nil,
+            bluetoothDevice: DiscoveredDevice(
+                id: UUID(),
+                localName: "Link-Power",
+                rssi: -40,
+                mode: .application
+            ),
+            discoveredRouter: nil,
+            routerHost: nil,
+            transportOptions: [.bluetooth],
+            preferredTransport: .bluetooth
+        )
+
+        XCTAssertTrue(ScanRecordPresentation(record: saved).offersRouterAdministration)
+        XCTAssertFalse(ScanRecordPresentation(record: unsaved).offersRouterAdministration)
+    }
 }
 
 @MainActor
 private struct AdministrationFixture {
     let model: RouterAdministrationModel
+    let connections: RouterConnectionModel
     let host: RouterHostMetadata
     let credentialStore: RouterCredentialStore
     let http: AdminScriptedHTTP
@@ -122,7 +180,11 @@ private func makeFixture(
         adminClient: RouterAdministrationClient(credentials: credentialStore) { _ in http }
     )
     return AdministrationFixture(
-        model: model, host: host, credentialStore: credentialStore, http: http
+        model: model,
+        connections: connections,
+        host: host,
+        credentialStore: credentialStore,
+        http: http
     )
 }
 
@@ -137,6 +199,7 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     private var scripted: [Result<(Data, HTTPURLResponse), Error>]
     private var recorded: [Call] = []
     private var gates: [CheckedContinuation<Void, Never>] = []
+    private var gateRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
     private let shouldGate: Bool
 
     init(results: [Result<(Data, HTTPURLResponse), Error>], gateRequests: Bool) {
@@ -170,17 +233,36 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         body: Data?,
         token: String
     ) async throws -> (Data, HTTPURLResponse) {
-        lock.withLock {
-            recorded.append(Call(method: method, path: path, token: token))
-        }
         if shouldGate {
-            await withCheckedContinuation { continuation in
-                lock.withLock { gates.append(continuation) }
+            await withCheckedContinuation { gate in
+                let waiters = lock.withLock {
+                    recorded.append(Call(method: method, path: path, token: token))
+                    gates.append(gate)
+                    let waiters = gateRegistrationWaiters
+                    gateRegistrationWaiters = []
+                    return waiters
+                }
+                waiters.forEach { $0.resume() }
+            }
+        } else {
+            lock.withLock {
+                recorded.append(Call(method: method, path: path, token: token))
             }
         }
         let result = lock.withLock { scripted.isEmpty ? nil : scripted.removeFirst() }
         guard let result else { throw NetworkError.decode("admin HTTP fixture exhausted") }
         return try result.get()
+    }
+
+    func waitForGateRegistration() async {
+        await withCheckedContinuation { continuation in
+            let isAlreadyRegistered = lock.withLock {
+                guard gates.isEmpty else { return true }
+                gateRegistrationWaiters.append(continuation)
+                return false
+            }
+            if isAlreadyRegistered { continuation.resume() }
+        }
     }
 
     func releaseGates() {

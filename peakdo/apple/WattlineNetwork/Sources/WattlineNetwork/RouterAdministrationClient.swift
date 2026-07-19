@@ -23,6 +23,11 @@ public actor RouterAdministrationClient {
     private var generation: UInt64 = 0
     private var endpoint: RouterEndpoint?
     private var http: (any RouterHTTPClient)?
+    // Saving and stale rollback form one critical section. A successor using the
+    // same credential account waits until rollback finishes, then revalidates
+    // its generation and persists last.
+    private var credentialPersistenceActive = false
+    private var credentialPersistenceWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(credentials: RouterCredentialStore, httpFactory: @escaping HTTPFactory) {
         self.credentials = credentials
@@ -54,10 +59,14 @@ public actor RouterAdministrationClient {
             throw CancellationError()
         } catch NetworkError.unauthorized {
             throw RouterAdministrationError.invalidAdministratorToken
-        } catch NetworkError.api(_, RouterAPIErrorCode.adminRequired, _) {
+        } catch NetworkError.api(403, RouterAPIErrorCode.adminRequired, _) {
             throw RouterAdministrationError.clientTokenRejected
         }
         guard generation == requestGeneration else { throw CancellationError() }
+        await acquireCredentialPersistence()
+        defer { releaseCredentialPersistence() }
+        guard generation == requestGeneration else { throw CancellationError() }
+        try Task.checkCancellation()
         try await credentials.saveToken(token, for: endpoint, role: .administrator)
         guard generation == requestGeneration else {
             try? await credentials.deleteToken(for: endpoint, role: .administrator)
@@ -88,5 +97,21 @@ public actor RouterAdministrationClient {
         } catch NetworkError.unauthorized {
             throw RouterAdministrationError.invalidAdministratorToken
         }
+    }
+
+    private func acquireCredentialPersistence() async {
+        guard credentialPersistenceActive else {
+            credentialPersistenceActive = true
+            return
+        }
+        await withCheckedContinuation { credentialPersistenceWaiters.append($0) }
+    }
+
+    private func releaseCredentialPersistence() {
+        guard !credentialPersistenceWaiters.isEmpty else {
+            credentialPersistenceActive = false
+            return
+        }
+        credentialPersistenceWaiters.removeFirst().resume()
     }
 }

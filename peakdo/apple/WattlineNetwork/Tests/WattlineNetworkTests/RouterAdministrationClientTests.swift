@@ -71,6 +71,29 @@ final class RouterAdministrationClientTests: XCTestCase {
         XCTAssertNil(stored)
     }
 
+    func testAdminRequiredWithWrongStatusIsNotClassifiedAsClientToken() async throws {
+        let expected = NetworkError.api(
+            status: 409,
+            code: .adminRequired,
+            message: "Pairing state conflict"
+        )
+        let http = ScriptedRouterHTTPClient(results: [.failure(expected)])
+        let (client, store) = makeClient(http: http)
+        try await client.attach(endpoint: endpoint)
+
+        do {
+            try await client.verifyAdministrator(token: "boot-admin")
+            XCTFail("expected API error")
+        } catch let error as NetworkError {
+            XCTAssertEqual(error, expected)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        XCTAssertNil(stored)
+    }
+
     func testStaleGenerationVerificationCannotSaveUnderReplacedEndpoint() async throws {
         let http = ScriptedRouterHTTPClient(
             results: [ScriptedRouterHTTPClient.ok("{}")],
@@ -80,7 +103,7 @@ final class RouterAdministrationClientTests: XCTestCase {
         try await client.attach(endpoint: endpoint)
 
         let verification = Task { try await client.verifyAdministrator(token: "boot-admin") }
-        while http.calls.isEmpty { await Task.yield() }
+        await http.waitForGateRegistration()
         try await client.attach(endpoint: otherEndpoint)
         http.releaseGates()
 
@@ -117,6 +140,63 @@ final class RouterAdministrationClientTests: XCTestCase {
         let newStored = try await store.readToken(for: otherEndpoint, role: .administrator)
         XCTAssertNil(oldStored)
         XCTAssertNil(newStored)
+    }
+
+    func testSameAccountSuccessorCredentialSurvivesStaleSaveCompletion() async throws {
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok("{}"),
+            ScriptedRouterHTTPClient.ok("{}"),
+        ])
+        let backend = FirstSaveGatedCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        let client = RouterAdministrationClient(credentials: store) { _ in http }
+        try await client.attach(endpoint: endpoint)
+
+        let stale = Task {
+            try await client.verifyAdministrator(token: "stale-admin")
+        }
+        await backend.waitForFirstSaveToStart()
+        try await client.attach(endpoint: endpoint)
+
+        let successor = Task {
+            try await client.verifyAdministrator(token: "current-admin")
+        }
+        while http.calls.count < 2 { await Task.yield() }
+        await backend.releaseFirstSave()
+        try await successor.value
+
+        do {
+            try await stale.value
+            XCTFail("expected stale save to be discarded")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        XCTAssertEqual(stored, "current-admin")
+    }
+
+    func testSameAccountStaleSaveWithoutSuccessorLeavesNoCredential() async throws {
+        let http = ScriptedRouterHTTPClient(results: [ScriptedRouterHTTPClient.ok("{}")])
+        let backend = FirstSaveGatedCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        let client = RouterAdministrationClient(credentials: store) { _ in http }
+        try await client.attach(endpoint: endpoint)
+
+        let stale = Task {
+            try await client.verifyAdministrator(token: "stale-admin")
+        }
+        await backend.waitForFirstSaveToStart()
+        try await client.attach(endpoint: endpoint)
+        await backend.releaseFirstSave()
+
+        do {
+            try await stale.value
+            XCTFail("expected stale save to be discarded")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        XCTAssertNil(stored)
     }
 
     func testCancelledURLErrorMapsToCancellationErrorAndDetachRequiresReattach() async throws {
@@ -205,5 +285,39 @@ private actor AdministrationCredentialBackend: RouterCredentialBackend {
     func releaseSave() {
         saveGate?.resume()
         saveGate = nil
+    }
+}
+
+private actor FirstSaveGatedCredentialBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private var saveCount = 0
+    private var firstSaveStarted = false
+    private var firstSaveStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstSaveGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? { values[account] }
+
+    func save(_ data: Data, account: String) async throws {
+        saveCount += 1
+        if saveCount == 1 {
+            firstSaveStarted = true
+            let waiters = firstSaveStartedWaiters
+            firstSaveStartedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { firstSaveGate = $0 }
+        }
+        values[account] = data
+    }
+
+    func delete(account: String) async throws { values[account] = nil }
+
+    func waitForFirstSaveToStart() async {
+        if firstSaveStarted { return }
+        await withCheckedContinuation { firstSaveStartedWaiters.append($0) }
+    }
+
+    func releaseFirstSave() {
+        firstSaveGate?.resume()
+        firstSaveGate = nil
     }
 }
