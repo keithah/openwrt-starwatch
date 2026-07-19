@@ -6,7 +6,7 @@ import WattlineUI
 struct RouterHistoryView: View {
     let model: RouterAdministrationModel
 
-    private var presentation: RouterHistoryPresentation {
+    private var history: RouterHistoryPresentation {
         RouterHistoryPresentation(
             points: model.history.map {
                 RouterHistoryPoint(
@@ -18,17 +18,54 @@ struct RouterHistoryView: View {
         )
     }
 
+    private var presentation: RouterHistoryScreenPresentation {
+        RouterHistoryScreenPresentation(
+            history: history,
+            loadState: loadState
+        )
+    }
+
+    private var loadState: RouterHistoryLoadState {
+        switch model.historyLoadState {
+        case .neverLoaded: .neverLoaded
+        case .initialLoading: .initialLoading
+        case .loaded: .loaded
+        case .failed:
+            .failed(message: model.historyError ?? "Could not load router history.")
+        case .refreshing: .refreshing
+        }
+    }
+
     var body: some View {
         Group {
-            if presentation.isEmpty {
+            if presentation.showsInitialProgress || presentation.showsEmptyRefreshProgress {
+                ProgressView("Loading history…")
+                    .frame(maxWidth: .infinity)
+            } else if let message = presentation.emptyFailureMessage {
+                ContentUnavailableView {
+                    Label("History unavailable", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                }
+            } else if presentation.showsSuccessfulEmpty {
                 ContentUnavailableView {
                     Label("No history yet", systemImage: "chart.xyaxis.line")
                 } description: {
                     Text("The router records about one sample per minute while it can reach the Link-Power.")
                 }
-            } else {
+            } else if presentation.showsNeverLoaded {
+                ContentUnavailableView {
+                    Label("History not loaded", systemImage: "chart.xyaxis.line")
+                } description: {
+                    Text("Open this router to load its recorded history.")
+                }
+            } else if presentation.showsCharts {
                 VStack(alignment: .leading, spacing: 16) {
-                    Chart(presentation.points, id: \.at) { point in
+                    if presentation.showsRefreshProgress {
+                        ProgressView("Refreshing history…")
+                    }
+
+                    Chart(presentation.history.points, id: \.at) { point in
                         LineMark(
                             x: .value("Time", point.at),
                             y: .value("Battery %", point.level)
@@ -37,7 +74,10 @@ struct RouterHistoryView: View {
                     .chartYScale(domain: 0...100)
                     .frame(minHeight: 160)
 
-                    Chart(presentation.powerPoints.filter { $0.watts != nil }, id: \.at) { point in
+                    Chart(
+                        presentation.history.powerPoints.filter { $0.watts != nil },
+                        id: \.at
+                    ) { point in
                         LineMark(
                             x: .value("Time", point.at),
                             y: .value("Watts", point.watts ?? 0)
@@ -45,15 +85,18 @@ struct RouterHistoryView: View {
                     }
                     .frame(minHeight: 120)
 
-                    if let fetchedAt = presentation.fetchedAt {
+                    if let fetchedAt = presentation.history.fetchedAt {
                         Text("Fetched \(fetchedAt.formatted(date: .omitted, time: .standard))")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
+
+                    if let message = presentation.failureMessage {
+                        Text(message).foregroundStyle(.orange)
+                    }
                 }
             }
         }
-        .task { await model.reloadHistory() }
     }
 }

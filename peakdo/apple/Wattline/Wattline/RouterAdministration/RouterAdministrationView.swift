@@ -20,9 +20,6 @@ struct RouterAdministrationView: View {
 
                 Section("History") {
                     RouterHistoryView(model: admin)
-                    if let message = admin.historyError {
-                        Text(message).foregroundStyle(.orange)
-                    }
                     Button("Refresh history") {
                         Task { await admin.reloadHistory() }
                     }
@@ -62,7 +59,7 @@ struct RouterAdministrationView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .task { await admin.begin(host: host) }
+            .task(id: host.endpoint.peripheralID) { await admin.open(host: host) }
             .onDisappear { Task { await admin.end() } }
         }
     }

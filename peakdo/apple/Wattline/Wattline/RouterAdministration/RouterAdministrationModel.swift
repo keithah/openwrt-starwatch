@@ -11,18 +11,28 @@ final class RouterAdministrationModel {
         case unlocked
     }
 
+    enum HistoryLoadState: Equatable {
+        case neverLoaded
+        case initialLoading
+        case loaded
+        case failed
+        case refreshing
+    }
+
     private(set) var host: RouterHostMetadata?
     private(set) var access: AdminAccess = .locked
     private(set) var adminError: String?
     private(set) var history: [RouterHistorySample] = []
     private(set) var historyFetchedAt: Date?
     private(set) var historyError: String?
+    private(set) var historyLoadState: HistoryLoadState = .neverLoaded
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
     private let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient
     private let now: () -> Date
     private var sessionGeneration: UInt64 = 0
+    private var historyRequestGeneration: UInt64 = 0
 
     init(
         connections: RouterConnectionModel,
@@ -36,7 +46,40 @@ final class RouterAdministrationModel {
         self.now = now
     }
 
+    static func production(
+        connections: RouterConnectionModel,
+        httpFactory: @escaping RouterAdministrationClient.HTTPFactory = {
+            try HTTPClient(endpoint: $0)
+        }
+    ) -> RouterAdministrationModel {
+        let credentials = connections.credentialStore
+        return RouterAdministrationModel(
+            connections: connections,
+            adminClient: RouterAdministrationClient(
+                credentials: credentials,
+                httpFactory: httpFactory
+            ),
+            historyClientFactory: { endpoint in
+                RouterHistoryClient(
+                    httpClient: try httpFactory(endpoint),
+                    credentials: credentials,
+                    endpoint: endpoint
+                )
+            }
+        )
+    }
+
     func begin(host: RouterHostMetadata) async {
+        _ = await beginSession(host: host)
+    }
+
+    func open(host: RouterHostMetadata) async {
+        let generation = await beginSession(host: host)
+        guard !Task.isCancelled, sessionGeneration == generation else { return }
+        await reloadHistory()
+    }
+
+    private func beginSession(host: RouterHostMetadata) async -> UInt64 {
         sessionGeneration &+= 1
         let generation = sessionGeneration
         self.host = host
@@ -45,23 +88,25 @@ final class RouterAdministrationModel {
         history = []
         historyFetchedAt = nil
         historyError = nil
+        historyLoadState = .neverLoaded
         do {
             try await adminClient.attach(endpoint: host.endpoint)
         } catch {
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == generation else { return generation }
             adminError = "Could not prepare a connection to this router."
-            return
+            return generation
         }
-        guard sessionGeneration == generation else { return }
+        guard sessionGeneration == generation else { return generation }
         access = .verifying
         do {
             try await adminClient.verifyStoredAdministrator()
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == generation else { return generation }
             access = .unlocked
         } catch {
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == generation else { return generation }
             access = .locked
         }
+        return generation
     }
 
     func end() async {
@@ -72,22 +117,33 @@ final class RouterAdministrationModel {
         history = []
         historyFetchedAt = nil
         historyError = nil
+        historyLoadState = .neverLoaded
         await adminClient.detach()
     }
 
     func reloadHistory() async {
         guard let host else { return }
         let generation = sessionGeneration
+        historyRequestGeneration &+= 1
+        let requestGeneration = historyRequestGeneration
+        historyError = nil
+        historyLoadState = historyFetchedAt == nil ? .initialLoading : .refreshing
         do {
             let client = try historyClientFactory(host.endpoint)
             let samples = try await client.fetch()
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == generation,
+                  historyRequestGeneration == requestGeneration
+            else { return }
             history = samples
             historyFetchedAt = now()
             historyError = nil
+            historyLoadState = .loaded
         } catch {
-            guard sessionGeneration == generation else { return }
+            guard sessionGeneration == generation,
+                  historyRequestGeneration == requestGeneration
+            else { return }
             historyError = "Could not load router history."
+            historyLoadState = .failed
         }
     }
 

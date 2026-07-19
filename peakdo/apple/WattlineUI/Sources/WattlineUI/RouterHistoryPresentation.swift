@@ -44,3 +44,55 @@ public struct RouterHistoryPresentation: Equatable, Sendable {
         self.fetchedAt = fetchedAt
     }
 }
+
+public enum RouterHistoryLoadState: Equatable, Sendable {
+    case neverLoaded
+    case initialLoading
+    case loaded
+    case failed(message: String)
+    case refreshing
+}
+
+public struct RouterHistoryScreenPresentation: Equatable, Sendable {
+    public let history: RouterHistoryPresentation
+    public let loadState: RouterHistoryLoadState
+
+    public init(
+        history: RouterHistoryPresentation,
+        loadState: RouterHistoryLoadState
+    ) {
+        self.history = history
+        self.loadState = loadState
+    }
+
+    public var showsCharts: Bool { !history.isEmpty }
+
+    public var showsNeverLoaded: Bool {
+        history.isEmpty && loadState == .neverLoaded
+    }
+
+    public var showsInitialProgress: Bool {
+        history.isEmpty && loadState == .initialLoading
+    }
+
+    public var showsSuccessfulEmpty: Bool {
+        history.isEmpty && loadState == .loaded
+    }
+
+    public var showsRefreshProgress: Bool {
+        !history.isEmpty && loadState == .refreshing
+    }
+
+    public var showsEmptyRefreshProgress: Bool {
+        history.isEmpty && loadState == .refreshing
+    }
+
+    public var failureMessage: String? {
+        guard case let .failed(message) = loadState else { return nil }
+        return message
+    }
+
+    public var emptyFailureMessage: String? {
+        history.isEmpty ? failureMessage : nil
+    }
+}

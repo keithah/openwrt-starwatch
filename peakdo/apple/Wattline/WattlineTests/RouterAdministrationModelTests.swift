@@ -6,6 +6,181 @@ import XCTest
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testProductionFactorySharesSuppliedConnectionCredentialsAcrossRoles() async throws {
+        let fixture = try await makeFixture(results: [])
+        let http = AdminScriptedHTTP(
+            results: [AdminScriptedHTTP.ok("[]"), AdminScriptedHTTP.ok("{}")],
+            gateRequests: false
+        )
+        let model = RouterAdministrationModel.production(
+            connections: fixture.connections,
+            httpFactory: { _ in http }
+        )
+
+        await model.open(host: fixture.host)
+        await model.unlock(token: "boot-admin")
+
+        XCTAssertEqual(http.calls, [
+            AdminScriptedHTTP.Call(
+                method: "GET", path: "/api/v1/history", token: "wlt_client"
+            ),
+            AdminScriptedHTTP.Call(
+                method: "GET", path: "/api/v1/settings", token: "boot-admin"
+            ),
+        ])
+        let storedAdmin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        XCTAssertEqual(storedAdmin, "boot-admin")
+    }
+
+    func testOpenEstablishesHostThenFetchesHistoryExactlyOnce() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok("[]")]
+        )
+
+        await fixture.model.open(host: fixture.host)
+
+        XCTAssertEqual(fixture.model.host, fixture.host)
+        XCTAssertEqual(fixture.model.historyLoadState, .loaded)
+        XCTAssertEqual(fixture.historyHTTP.calls, [AdminScriptedHTTP.Call(
+            method: "GET",
+            path: "/api/v1/history",
+            token: "wlt_client"
+        )])
+    }
+
+    func testInitialHistoryFailureTransitionsThroughLoadingWithoutFabricatingEmptySuccess() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [.failure(NetworkError.timeout)],
+            historyGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+        XCTAssertEqual(fixture.model.historyLoadState, .neverLoaded)
+
+        let reload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+
+        XCTAssertEqual(fixture.model.historyLoadState, .initialLoading)
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertNil(fixture.model.historyError)
+
+        fixture.historyHTTP.releaseGates()
+        await reload.value
+
+        XCTAssertEqual(fixture.model.historyLoadState, .failed)
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertEqual(fixture.model.historyError, "Could not load router history.")
+    }
+
+    func testSuccessfulEmptyHistoryIsLoadedRatherThanNeverLoaded() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok("[]")]
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        await fixture.model.reloadHistory()
+
+        XCTAssertEqual(fixture.model.historyLoadState, .loaded)
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertNotNil(fixture.model.historyFetchedAt)
+        XCTAssertNil(fixture.model.historyError)
+    }
+
+    func testRefreshingExistingHistoryClearsErrorAndPreservesSamplesWhileLoading() async throws {
+        let existing = #"[{"at":"2026-07-17T19:58:00Z","level":41,"status":-1}]"#
+        let refreshed = #"[{"at":"2026-07-17T20:00:00Z","level":89,"status":1}]"#
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [
+                AdminScriptedHTTP.ok(existing),
+                .failure(NetworkError.timeout),
+                AdminScriptedHTTP.ok(refreshed),
+            ],
+            historyGatedCallNumbers: [3]
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.reloadHistory()
+        await fixture.model.reloadHistory()
+        XCTAssertEqual(fixture.model.history.first?.level, 41)
+        XCTAssertEqual(fixture.model.historyLoadState, .failed)
+        XCTAssertNotNil(fixture.model.historyError)
+
+        let reload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+
+        XCTAssertEqual(fixture.model.historyLoadState, .refreshing)
+        XCTAssertEqual(fixture.model.history.first?.level, 41)
+        XCTAssertNil(fixture.model.historyError)
+
+        fixture.historyHTTP.releaseGates()
+        await reload.value
+
+        XCTAssertEqual(fixture.model.historyLoadState, .loaded)
+        XCTAssertEqual(fixture.model.history.first?.level, 89)
+        XCTAssertNil(fixture.model.historyError)
+    }
+
+    func testOlderSameSessionHistorySuccessCannotOverwriteNewerSuccess() async throws {
+        let older = #"[{"at":"2026-07-17T19:58:00Z","level":41,"status":-1}]"#
+        let newer = #"[{"at":"2026-07-17T20:00:00Z","level":89,"status":1}]"#
+        let newerFetchedAt = Date(timeIntervalSince1970: 1_800_000_100)
+        let staleFetchedAt = Date(timeIntervalSince1970: 1_800_000_200)
+        var clockValues = [newerFetchedAt, staleFetchedAt]
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok(older), AdminScriptedHTTP.ok(newer)],
+            now: { clockValues.removeFirst() },
+            historyGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        let olderReload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+        let newerReload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForCallCount(2)
+        fixture.historyHTTP.releaseNewestGate()
+        await newerReload.value
+        XCTAssertEqual(fixture.model.history.first?.level, 89)
+        XCTAssertEqual(fixture.model.historyFetchedAt, newerFetchedAt)
+
+        fixture.historyHTTP.releaseGates()
+        await olderReload.value
+
+        XCTAssertEqual(fixture.model.history.first?.level, 89)
+        XCTAssertEqual(fixture.model.historyFetchedAt, newerFetchedAt)
+        XCTAssertEqual(clockValues, [staleFetchedAt])
+    }
+
+    func testOlderSameSessionHistoryErrorCannotOverwriteNewerSuccess() async throws {
+        let newer = #"[{"at":"2026-07-17T20:00:00Z","level":89,"status":1}]"#
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [.failure(NetworkError.timeout), AdminScriptedHTTP.ok(newer)],
+            historyGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        let olderReload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+        let newerReload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForCallCount(2)
+        fixture.historyHTTP.releaseNewestGate()
+        await newerReload.value
+        XCTAssertEqual(fixture.model.history.first?.level, 89)
+        XCTAssertNil(fixture.model.historyError)
+
+        fixture.historyHTTP.releaseGates()
+        await olderReload.value
+
+        XCTAssertEqual(fixture.model.history.first?.level, 89)
+        XCTAssertNil(fixture.model.historyError)
+    }
+
     func testReloadHistoryIsLazyStampsFetchTimeAndQuarantinesStaleSessions() async throws {
         let sample = #"[{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]"#
         let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
@@ -62,6 +237,47 @@ final class RouterAdministrationModelTests: XCTestCase {
         fixture.historyHTTP.releaseGates()
         await reload.value
 
+        XCTAssertNil(fixture.model.historyError)
+    }
+
+    func testHistorySuccessReleasedAfterReplacementBeginDoesNotPublish() async throws {
+        let stale = #"[{"at":"2026-07-17T19:59:00Z","level":12,"status":-1}]"#
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok(stale)],
+            historyGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+        let staleReload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+
+        await fixture.model.begin(host: fixture.host)
+        fixture.historyHTTP.releaseGates()
+        await staleReload.value
+
+        XCTAssertEqual(fixture.model.host, fixture.host)
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertNil(fixture.model.historyFetchedAt)
+        XCTAssertNil(fixture.model.historyError)
+    }
+
+    func testHistoryErrorReleasedAfterReplacementBeginDoesNotPublish() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [.failure(NetworkError.timeout)],
+            historyGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+        let staleReload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+
+        await fixture.model.begin(host: fixture.host)
+        fixture.historyHTTP.releaseGates()
+        await staleReload.value
+
+        XCTAssertEqual(fixture.model.host, fixture.host)
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertNil(fixture.model.historyFetchedAt)
         XCTAssertNil(fixture.model.historyError)
     }
 
@@ -360,6 +576,7 @@ private func makeFixture(
     now: @escaping () -> Date = { Date() },
     gateRequests: Bool = false,
     historyGateRequests: Bool = false,
+    historyGatedCallNumbers: Set<Int> = [],
     credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend()
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
@@ -382,7 +599,8 @@ private func makeFixture(
     let http = AdminScriptedHTTP(results: results, gateRequests: gateRequests)
     let historyHTTP = AdminScriptedHTTP(
         results: historyResults,
-        gateRequests: historyGateRequests
+        gateRequests: historyGateRequests,
+        gatedCallNumbers: historyGatedCallNumbers
     )
     let model = RouterAdministrationModel(
         connections: connections,
@@ -422,10 +640,17 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     private var gateRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
     private var callCountWaiters: [(minimum: Int, continuation: CheckedContinuation<Void, Never>)] = []
     private let shouldGate: Bool
+    private let gatedCallNumbers: Set<Int>
+    private var startedCallCount = 0
 
-    init(results: [Result<(Data, HTTPURLResponse), Error>], gateRequests: Bool) {
+    init(
+        results: [Result<(Data, HTTPURLResponse), Error>],
+        gateRequests: Bool,
+        gatedCallNumbers: Set<Int> = []
+    ) {
         scripted = results
         shouldGate = gateRequests
+        self.gatedCallNumbers = gatedCallNumbers
     }
 
     var calls: [Call] {
@@ -454,7 +679,12 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         body: Data?,
         token: String
     ) async throws -> (Data, HTTPURLResponse) {
-        if shouldGate {
+        let (result, shouldGateRequest) = lock.withLock {
+            startedCallCount += 1
+            let result = scripted.isEmpty ? nil : scripted.removeFirst()
+            return (result, shouldGate || gatedCallNumbers.contains(startedCallCount))
+        }
+        if shouldGateRequest {
             await withCheckedContinuation { gate in
                 let (shouldResumeGate, gateWaiters, callWaiters) = lock.withLock {
                     recorded.append(Call(method: method, path: path, token: token))
@@ -480,7 +710,6 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
             }
             callWaiters.forEach { $0.resume() }
         }
-        let result = lock.withLock { scripted.isEmpty ? nil : scripted.removeFirst() }
         guard let result else { throw NetworkError.decode("admin HTTP fixture exhausted") }
         return try result.get()
     }
@@ -518,6 +747,13 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
             return pending
         }
         pending.forEach { $0.resume() }
+    }
+
+    func releaseNewestGate() {
+        let gate: CheckedContinuation<Void, Never>? = lock.withLock {
+            gates.popLast()
+        }
+        gate?.resume()
     }
 
     private func removeSatisfiedCallCountWaiters() -> [CheckedContinuation<Void, Never>] {
