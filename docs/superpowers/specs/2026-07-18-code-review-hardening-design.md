@@ -22,7 +22,7 @@ SQLite uses WAL, `synchronous=FULL`, and a five-second `busy_timeout`. WAL suppl
 
 UCI writes sync the temporary file before close, rename it atomically, and sync the parent directory after rename. UCI parsing decodes the writer's apostrophe escape and rejects newline-bearing endpoint updates. Rule fields that have no persisted UCI option are rejected rather than accepted transiently. Configuration callbacks run after releasing the manager lock.
 
-The tiered reader obtains its minute/quarter boundary from the SQLite store's configured minute retention. Pre-NTP pending queues are bounded, and RAM queries discard zero timestamps and sort an out-of-order snapshot before binary search. Fixed `parseSpan` values already eliminate the reviewed arbitrary-day overflow path; tests preserve that invariant. Obstruction PNG rendering already encodes into a buffer before the HTTP response is started, so no production change is needed there.
+The tiered reader obtains its minute/quarter boundary from the SQLite store's configured minute retention. Pre-NTP pending queues are bounded, and RAM queries discard zero timestamps and sort an out-of-order snapshot before binary search. Fixed `parseSpan` values already eliminate the reviewed arbitrary-day overflow path; tests preserve that invariant. Obstruction PNG rendering moves to an in-memory buffer so encode failures occur before content type or status is committed.
 
 ## Alert lifecycle and delivery
 
@@ -48,12 +48,10 @@ The live client returns immediately after a WebSocket 1008 unauthorized close, w
 
 ## Already-correct review items
 
-Three cited findings describe code that no longer exists on the reviewed `main` tip:
+Two cited findings describe code that no longer exists on the reviewed `main` tip:
 
 - Production opkg publication already creates and verifies `Packages.sig`; this work adds only the requested optional local signing path and supporting documentation/tests.
 - `parseSpan` is a fixed lookup over `15m`, `3h`, `24h`, `7d`, and `30d`; there is no numeric-day multiplication that can overflow.
-- Obstruction PNG output is buffered before headers are written, so encode failure cannot produce a second `WriteHeader`.
-
 These paths are verified by tests rather than rewritten.
 
 ## Verification
