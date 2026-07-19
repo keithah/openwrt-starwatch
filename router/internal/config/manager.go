@@ -437,16 +437,47 @@ func cloneConfig(cfg *Config) *Config {
 	return &result
 }
 
+type atomicSyncFile interface {
+	Name() string
+	Chmod(os.FileMode) error
+	WriteString(string) (int, error)
+	Sync() error
+	Close() error
+}
+
+type atomicWriteOperations struct {
+	createTemp    func(string, string) (atomicSyncFile, error)
+	remove        func(string) error
+	rename        func(string, string) error
+	openDirectory func(string) (atomicSyncFile, error)
+}
+
 func atomicWrite(path, source string) error {
+	return atomicWriteWithOperations(path, source, atomicWriteOperations{
+		createTemp: func(directory, pattern string) (atomicSyncFile, error) {
+			return os.CreateTemp(directory, pattern)
+		},
+		remove: os.Remove,
+		rename: os.Rename,
+		openDirectory: func(path string) (atomicSyncFile, error) {
+			return os.Open(path)
+		},
+	})
+}
+
+func atomicWriteWithOperations(path, source string, operations atomicWriteOperations) error {
 	dir := filepath.Dir(path)
-	file, err := os.CreateTemp(dir, ".starwatch-*")
+	file, err := operations.createTemp(dir, ".starwatch-*")
 	if err != nil {
 		return err
 	}
 	name := file.Name()
-	defer os.Remove(name)
+	defer operations.remove(name)
 	if err = file.Chmod(0o600); err == nil {
 		_, err = file.WriteString(source)
+	}
+	if err == nil {
+		err = file.Sync()
 	}
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
@@ -454,5 +485,16 @@ func atomicWrite(path, source string) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if err := operations.rename(name, path); err != nil {
+		return err
+	}
+	directory, err := operations.openDirectory(dir)
+	if err != nil {
+		return err
+	}
+	err = directory.Sync()
+	if closeErr := directory.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }

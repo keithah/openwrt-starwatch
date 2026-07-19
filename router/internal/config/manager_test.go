@@ -15,6 +15,86 @@ type managerEvents struct{ items []history.Event }
 
 func (e *managerEvents) AddEvent(item history.Event) { e.items = append(e.items, item) }
 
+type atomicTestFile struct {
+	name    string
+	label   string
+	calls   *[]string
+	syncErr error
+}
+
+func (f *atomicTestFile) Name() string { return f.name }
+func (f *atomicTestFile) Chmod(os.FileMode) error {
+	*f.calls = append(*f.calls, f.label+"-chmod")
+	return nil
+}
+func (f *atomicTestFile) WriteString(source string) (int, error) {
+	*f.calls = append(*f.calls, f.label+"-write")
+	return len(source), nil
+}
+func (f *atomicTestFile) Sync() error {
+	*f.calls = append(*f.calls, f.label+"-sync")
+	return f.syncErr
+}
+func (f *atomicTestFile) Close() error {
+	*f.calls = append(*f.calls, f.label+"-close")
+	return nil
+}
+
+func TestAtomicWriteSyncsFileAndParentDirectory(t *testing.T) {
+	var calls []string
+	temporary := &atomicTestFile{name: "/etc/config/.starwatch-test", label: "file", calls: &calls}
+	directory := &atomicTestFile{name: "/etc/config", label: "dir", calls: &calls}
+	operations := atomicWriteOperations{
+		createTemp: func(directory, pattern string) (atomicSyncFile, error) {
+			calls = append(calls, "create:"+directory+":"+pattern)
+			return temporary, nil
+		},
+		remove: func(path string) error {
+			calls = append(calls, "remove:"+path)
+			return nil
+		},
+		rename: func(oldPath, newPath string) error {
+			calls = append(calls, "rename:"+oldPath+":"+newPath)
+			return nil
+		},
+		openDirectory: func(path string) (atomicSyncFile, error) {
+			calls = append(calls, "open-dir:"+path)
+			return directory, nil
+		},
+	}
+	if err := atomicWriteWithOperations("/etc/config/starwatch", "config starwatch\n", operations); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"create:/etc/config:.starwatch-*", "file-chmod", "file-write", "file-sync", "file-close",
+		"rename:/etc/config/.starwatch-test:/etc/config/starwatch", "open-dir:/etc/config", "dir-sync", "dir-close",
+		"remove:/etc/config/.starwatch-test",
+	}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls=%v want=%v", calls, want)
+	}
+}
+
+func TestAtomicWriteDoesNotRenameAfterFileSyncFailure(t *testing.T) {
+	var calls []string
+	temporary := &atomicTestFile{name: "/etc/config/.starwatch-test", label: "file", calls: &calls, syncErr: errors.New("sync failed")}
+	operations := atomicWriteOperations{
+		createTemp: func(string, string) (atomicSyncFile, error) { return temporary, nil },
+		remove:     func(string) error { calls = append(calls, "remove"); return nil },
+		rename:     func(string, string) error { calls = append(calls, "rename"); return nil },
+		openDirectory: func(string) (atomicSyncFile, error) {
+			calls = append(calls, "open-dir")
+			return nil, nil
+		},
+	}
+	if err := atomicWriteWithOperations("/etc/config/starwatch", "source", operations); err == nil || !strings.Contains(err.Error(), "sync failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Contains(strings.Join(calls, "|"), "rename") || strings.Contains(strings.Join(calls, "|"), "open-dir") {
+		t.Fatalf("calls after sync failure=%v", calls)
+	}
+}
+
 func TestManagerWriteFailureDoesNotPublishRuntimeCandidate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "starwatch")
 	if err := os.WriteFile(path, []byte("config starwatch 'main'\n option probe_interval '2'\n"), 0o600); err != nil {
