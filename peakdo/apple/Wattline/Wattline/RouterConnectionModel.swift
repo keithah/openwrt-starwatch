@@ -278,8 +278,9 @@ final class RouterConnectionModel {
         for host in savedHosts {
             let matchingIndex = records.firstIndex { record in
                 if let routerIdentity = routerIdentities[host.endpoint.peripheralID],
+                   let identity = record.identity,
                    DeviceIdentityDeduplicator.merge(
-                       ble: record.identity,
+                       ble: identity,
                        router: routerIdentity
                    ) != nil {
                     return true

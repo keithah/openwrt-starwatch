@@ -17,6 +17,12 @@ final class RouterEnrollmentRoute: CustomStringConvertible, CustomDebugStringCon
     }
 
     @discardableResult
+    func consume(text: String) -> Bool {
+        guard let input = try? RouterPairingInputParser.parse(text: text) else { return false }
+        return consume(input)
+    }
+
+    @discardableResult
     func consume(_ input: RouterPairingInput) -> Bool {
         payload = input.payload
         return true

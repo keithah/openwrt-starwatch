@@ -54,11 +54,10 @@ struct RouterPairingEntryView: View {
 
     @discardableResult
     private func consume(_ value: String) -> Bool {
-        guard let input = try? RouterPairingInputParser.parse(text: value) else {
+        guard model.routerEnrollmentRoute.consume(text: value) else {
             errorMessage = "That is not a valid wattlined pairing code."
             return false
         }
-        model.routerEnrollmentRoute.consume(input)
         pairingText = ""
         errorMessage = nil
         dismiss()

@@ -32,6 +32,38 @@ final class RouterAppWiringTests: XCTestCase {
         XCTAssertEqual(records.first { $0.routerHost?.id == otherHost.id }?.transportOptions, [.router])
     }
 
+    func testKnownRouterIdentityDoesNotMergeIntoIdentitylessSavedHostRecord() async throws {
+        let fixture = makeFixture()
+        let firstHost = try host(
+            name: "First router",
+            address: "192.168.8.1:8377",
+            mac: "DC:04:5A:EB:72:2B"
+        )
+        let secondHost = try host(
+            name: "Second router",
+            address: "192.168.9.1:8377",
+            mac: "AA:BB:CC:DD:EE:FF"
+        )
+        try await fixture.hostStore.save(firstHost)
+        try await fixture.hostStore.save(secondHost)
+        await fixture.model.reloadSavedHosts()
+        fixture.model.record(identity: identity(
+            id: secondHost.endpoint.peripheralID,
+            mac: "AA:BB:CC:DD:EE:FF",
+            cid: 0x0305
+        ))
+
+        let records = fixture.model.records(bluetooth: [])
+
+        XCTAssertEqual(records.count, 2)
+        let first = try XCTUnwrap(records.first { $0.routerHost?.id == firstHost.id })
+        XCTAssertNil(first.identity)
+        XCTAssertEqual(first.transportOptions, [.router])
+        let second = try XCTUnwrap(records.first { $0.routerHost?.id == secondHost.id })
+        XCTAssertEqual(second.identity?.macAddress, "AA:BB:CC:DD:EE:FF")
+        XCTAssertEqual(second.transportOptions, [.router])
+    }
+
     func testRouterEndpointCapabilitiesRemoveUnsupportedSurfacesStructurally() {
         XCTAssertEqual(RouterConnectionModel.canonicalClientEndpoints, [.controls, .usbCLimit])
 
@@ -272,13 +304,17 @@ final class RouterAppWiringTests: XCTestCase {
         )
     }
 
-    nonisolated private static func identity(mac: String?, cid: UInt16?) -> DeviceIdentitySnapshot {
+    nonisolated private static func identity(
+        id: UUID = UUID(),
+        mac: String?,
+        cid: UInt16?
+    ) -> DeviceIdentitySnapshot {
         let features: FeatureFlags = [
             .batteryCapacity, .dcPort, .dcControl, .dcScheduler,
             .usbPort, .usbPowerLimit, .usbOutputControl, .shutdown,
         ]
         return DeviceIdentitySnapshot(
-            peripheralID: UUID(),
+            peripheralID: id,
             advertisedName: "Link-Power",
             mode: .application,
             modelNumber: "BP4SL3V2",
@@ -292,8 +328,12 @@ final class RouterAppWiringTests: XCTestCase {
         )
     }
 
-    private func identity(mac: String?, cid: UInt16?) -> DeviceIdentitySnapshot {
-        Self.identity(mac: mac, cid: cid)
+    private func identity(
+        id: UUID = UUID(),
+        mac: String?,
+        cid: UInt16?
+    ) -> DeviceIdentitySnapshot {
+        Self.identity(id: id, mac: mac, cid: cid)
     }
 
     private func testPersistence() -> AppPersistence {

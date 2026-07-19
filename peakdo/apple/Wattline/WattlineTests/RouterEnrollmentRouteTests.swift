@@ -52,25 +52,13 @@ final class RouterEnrollmentRouteTests: XCTestCase {
         XCTAssertEqual(model.routerEnrollmentRoute.payload?.deviceID, "DC045AEB722B")
     }
 
-    func testTextAndImagePairingSurfacesRouteParsedInputWithoutURLReparse() throws {
-        let projectDirectory = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let enrollmentSource = try String(contentsOf:
-            projectDirectory.appendingPathComponent("Wattline/RouterEnrollment/RouterEnrollmentView.swift"),
-            encoding: .utf8
-        )
-        let recognitionSource = try String(contentsOf:
-            projectDirectory.appendingPathComponent("Wattline/RouterEnrollment/QRCodeRecognition.swift"),
-            encoding: .utf8
-        )
+    func testRouteConsumesWhitespacePaddedPairingText() {
+        let route = RouterEnrollmentRoute()
 
-        XCTAssertTrue(enrollmentSource.contains("RouterPairingInputParser.parse(text: value)"))
-        XCTAssertTrue(enrollmentSource.contains("routerEnrollmentRoute.consume(input)"))
-        XCTAssertFalse(enrollmentSource.contains("URL(string: value"))
-        XCTAssertTrue(recognitionSource.contains("RouterPairingInputParser.parse(text: value)"))
-        XCTAssertTrue(recognitionSource.contains("route.consume(input)"))
-        XCTAssertFalse(recognitionSource.contains("URL(string: value"))
+        XCTAssertTrue(route.consume(text:
+            "  wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456\n"
+        ))
+        XCTAssertEqual(route.payload?.deviceID, "DC045AEB722B")
     }
 
     func testRouteAcceptsAlreadyParsedPairingInput() throws {
@@ -117,7 +105,7 @@ final class RouterEnrollmentRouteTests: XCTestCase {
     func testImageImporterPublishesRecognizedPairingPayload() async throws {
         let route = RouterEnrollmentRoute()
         let recognizer = EnrollmentRouteQRRecognizer(payload:
-            "wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456"
+            "  wattline://pair?v=1&id=DC045AEB722B&host=router.local&http=8377&pin=123456\n"
         )
         let importer = RouterPairingImageImporter(recognizer: recognizer, route: route)
 
