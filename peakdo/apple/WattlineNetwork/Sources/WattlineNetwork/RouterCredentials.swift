@@ -9,6 +9,11 @@ public protocol RouterCredentialBackend: Sendable {
     func delete(account: String) async throws
 }
 
+public enum RouterCredentialRole: String, Sendable {
+    case client
+    case administrator
+}
+
 public actor RouterCredentialStore: RouterCredentialProvider,
     CustomStringConvertible, CustomDebugStringConvertible
 {
@@ -21,9 +26,12 @@ public actor RouterCredentialStore: RouterCredentialProvider,
     public nonisolated var description: String { "RouterCredentialStore([REDACTED])" }
     public nonisolated var debugDescription: String { description }
 
-    public func readToken(for endpoint: RouterEndpoint) async throws -> String? {
+    public func readToken(
+        for endpoint: RouterEndpoint,
+        role: RouterCredentialRole = .client
+    ) async throws -> String? {
         do {
-            guard let data = try await backend.read(account: account(for: endpoint)),
+            guard let data = try await backend.read(account: account(for: endpoint, role: role)),
                   let token = String(data: data, encoding: .utf8),
                   !token.isEmpty
             else { return nil }
@@ -35,10 +43,14 @@ public actor RouterCredentialStore: RouterCredentialProvider,
         }
     }
 
-    public func saveToken(_ token: String, for endpoint: RouterEndpoint) async throws {
+    public func saveToken(
+        _ token: String,
+        for endpoint: RouterEndpoint,
+        role: RouterCredentialRole = .client
+    ) async throws {
         guard !token.isEmpty else { throw NetworkError.unauthorized }
         do {
-            try await backend.save(Data(token.utf8), account: account(for: endpoint))
+            try await backend.save(Data(token.utf8), account: account(for: endpoint, role: role))
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -46,9 +58,12 @@ public actor RouterCredentialStore: RouterCredentialProvider,
         }
     }
 
-    public func deleteToken(for endpoint: RouterEndpoint) async throws {
+    public func deleteToken(
+        for endpoint: RouterEndpoint,
+        role: RouterCredentialRole = .client
+    ) async throws {
         do {
-            try await backend.delete(account: account(for: endpoint))
+            try await backend.delete(account: account(for: endpoint, role: role))
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -63,8 +78,9 @@ public actor RouterCredentialStore: RouterCredentialProvider,
         return RouterCredential(token: token)
     }
 
-    private func account(for endpoint: RouterEndpoint) -> String {
-        endpoint.peripheralID.uuidString
+    private func account(for endpoint: RouterEndpoint, role: RouterCredentialRole) -> String {
+        let base = endpoint.peripheralID.uuidString
+        return role == .client ? base : "\(base).administrator"
     }
 }
 

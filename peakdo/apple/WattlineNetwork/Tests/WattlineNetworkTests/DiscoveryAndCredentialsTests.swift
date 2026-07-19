@@ -304,6 +304,36 @@ final class RouterCredentialStoreTests: XCTestCase {
 
         XCTAssertEqual(token, "bearer-secret")
     }
+
+    func testCredentialRolesUseDistinctAccountsAndPreserveClientAccount() async throws {
+        let backend = CredentialBackendRecorder()
+        let store = RouterCredentialStore(backend: backend)
+
+        try await store.saveToken("client-secret", for: endpoint)
+        try await store.saveToken("admin-secret", for: endpoint, role: .administrator)
+
+        let uuid = endpoint.peripheralID.uuidString
+        let savedAccounts = await backend.savedAccounts
+        XCTAssertEqual(savedAccounts, [uuid, "\(uuid).administrator"])
+
+        let clientToken = try await store.readToken(for: endpoint)
+        XCTAssertEqual(clientToken, "client-secret")
+        let administratorToken = try await store.readToken(for: endpoint, role: .administrator)
+        XCTAssertEqual(
+            administratorToken,
+            "admin-secret"
+        )
+
+        try await store.deleteToken(for: endpoint, role: .administrator)
+        let deletedAdministratorToken = try await store.readToken(
+            for: endpoint,
+            role: .administrator
+        )
+        XCTAssertNil(deletedAdministratorToken)
+        let retainedClientToken = try await store.readToken(for: endpoint)
+        XCTAssertEqual(retainedClientToken, "client-secret")
+        XCTAssertFalse(String(describing: store).contains("admin-secret"))
+    }
 }
 
 private final class DiscoverySourceFixture: RouterDiscoverySource, @unchecked Sendable {
@@ -338,6 +368,7 @@ private actor CredentialBackendRecorder: RouterCredentialBackend {
     enum Operation: Equatable { case save, read, delete }
     private var values: [String: Data] = [:]
     private(set) var operations: [Operation] = []
+    private(set) var savedAccounts: [String] = []
     private let error: Error?
     init(error: Error? = nil) { self.error = error }
 
@@ -349,6 +380,7 @@ private actor CredentialBackendRecorder: RouterCredentialBackend {
     func save(_ data: Data, account: String) async throws {
         operations.append(.save)
         if let error { throw error }
+        savedAccounts.append(account)
         values[account] = data
     }
     func delete(account: String) async throws {
