@@ -1,7 +1,7 @@
 {
 	"luci-app-starwatch": {
 		"description": "Open the Starwatch dashboard",
-		"read": {
+		"write": {
 			"ubus": { "starwatch": ["token"] }
 		}
 	}

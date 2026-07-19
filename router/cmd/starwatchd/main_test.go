@@ -28,10 +28,13 @@ func TestBindAddr(t *testing.T) {
 	}
 }
 
-func TestNewHTTPServerSetsReadHeaderTimeout(t *testing.T) {
+func TestNewHTTPServerSetsSafeTimeoutsWithoutBreakingWebSockets(t *testing.T) {
 	server := newHTTPServer("127.0.0.1:9633", http.NewServeMux())
-	if server.ReadHeaderTimeout != 5*time.Second {
-		t.Fatalf("timeout: %v", server.ReadHeaderTimeout)
+	if server.ReadHeaderTimeout != 5*time.Second || server.IdleTimeout != 60*time.Second {
+		t.Fatalf("timeouts: read_header=%v idle=%v", server.ReadHeaderTimeout, server.IdleTimeout)
+	}
+	if server.ReadTimeout != 0 || server.WriteTimeout != 0 {
+		t.Fatalf("stream-breaking timeouts: read=%v write=%v", server.ReadTimeout, server.WriteTimeout)
 	}
 }
 

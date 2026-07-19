@@ -159,7 +159,7 @@ func NewServer(deps Deps) *server {
 	mux.HandleFunc("GET /api/wan", s.auth(s.wan))
 	mux.HandleFunc("GET /api/outages", s.auth(s.outages))
 	mux.HandleFunc("GET /api/events", s.auth(s.events))
-	mux.HandleFunc("GET /api/ws", s.auth(s.websocket))
+	mux.HandleFunc("GET /api/ws", s.websocketAuth(s.websocket))
 	mux.HandleFunc("POST /api/control/{action}", s.auth(s.control))
 	mux.HandleFunc("GET /api/obstruction-map", s.auth(s.obstructionMap))
 	mux.HandleFunc("GET /api/speedtest", s.auth(s.speedtestStatus))
@@ -350,6 +350,14 @@ func (s *server) writeWS(connection *websocket.Conn, value any) bool {
 }
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return s.authenticate(next, false)
+}
+
+func (s *server) websocketAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.authenticate(next, true)
+}
+
+func (s *server) authenticate(next http.HandlerFunc, allowQueryToken bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		configuredToken := s.deps.Token
 		if s.deps.TokenProvider != nil {
@@ -364,7 +372,7 @@ func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 		if strings.HasPrefix(authorization, "Bearer ") {
 			token = strings.TrimPrefix(authorization, "Bearer ")
 		}
-		if token == "" {
+		if token == "" && allowQueryToken {
 			token = r.URL.Query().Get("token")
 		}
 		if subtle.ConstantTimeCompare([]byte(token), []byte(configuredToken)) != 1 {

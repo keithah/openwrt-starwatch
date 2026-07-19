@@ -14,7 +14,7 @@ The existing intermittently failing `TestWebSocketDisconnectsWhenBoundedEventBuf
 
 All API and WebSocket values pass through one type-preserving finite-number sanitizer immediately before encoding. It recursively clones values, turns non-finite float pointers into `nil`, and replaces non-finite scalar or slice floats with zero where the existing Go type cannot represent JSON `null`. Types with their own JSON marshaler, notably `time.Time`, remain intact. HTTP responses are marshaled before headers are committed, preventing truncated `200` responses. WebSocket values are sanitized before the injectable writer is called, so both production and test writers receive JSON-safe data.
 
-Query-string tokens are accepted only by `/api/ws`; all other API routes require `Authorization: Bearer`. The coder/websocket origin policy remains unchanged. The HTTP server gains bounded header/read and idle timeouts but no write timeout.
+Query-string tokens are accepted only by `/api/ws`; all other API routes require `Authorization: Bearer`. The coder/websocket origin policy remains unchanged. The HTTP server gains an idle timeout while retaining its header timeout. Read and write timeouts remain zero because their connection deadlines can survive HTTP hijacking and terminate long-lived WebSockets.
 
 ## Storage durability and history correctness
 

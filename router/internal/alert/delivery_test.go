@@ -4,15 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 func TestDispatcherRetriesWebhookThreeTimesWithExponentialBackoff(t *testing.T) {
 	var calls atomic.Int32
@@ -91,5 +99,27 @@ func TestDispatcherQueueDropsOldestAndLogsWarning(t *testing.T) {
 	}
 	if !bytes.Contains(output.Bytes(), []byte("dropping oldest")) {
 		t.Fatalf("log: %q", output.String())
+	}
+}
+
+func TestDispatcherFailureLogDoesNotExposeEndpointSecret(t *testing.T) {
+	const endpoint = "https://hooks.example.test/services/secret-token"
+	var output bytes.Buffer
+	dispatcher := NewDispatcher(DeliveryOptions{
+		WebhookURL: endpoint,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		})},
+		Backoff: time.Millisecond,
+		Sleep:   func(context.Context, time.Duration) error { return nil },
+		Logf:    log.New(&output, "", 0).Printf,
+	})
+	dispatcher.deliver(context.Background(), Notification{Alert: "dish_unreachable"})
+	logged := output.String()
+	if strings.Contains(logged, endpoint) || strings.Contains(logged, "secret-token") {
+		t.Fatalf("secret endpoint leaked in log: %q", logged)
+	}
+	if !strings.Contains(logged, "dish_unreachable") || !strings.Contains(logged, "webhook") {
+		t.Fatalf("log lacks safe context: %q", logged)
 	}
 }

@@ -1,5 +1,5 @@
 config starwatch 'main'
-	# Listen on LAN so the embedded dashboard can be opened directly or framed.
+	# Listen on all router addresses; OpenWrt firewall policy must restrict this to trusted LANs.
 	option listen '0.0.0.0'
 	option port '9633'
 	# Generated on first install when blank.

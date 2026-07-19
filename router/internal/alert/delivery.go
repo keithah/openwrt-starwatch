@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -90,14 +93,32 @@ func (d *Dispatcher) deliver(ctx context.Context, notification Notification) {
 	d.mu.Unlock()
 	if webhookURL != "" {
 		if err := d.webhook(ctx, notification, webhookURL); err != nil {
-			d.options.Logf("starwatchd: webhook delivery failed: %v", err)
+			d.options.Logf("starwatchd: webhook delivery failed for %s: %s", notification.Alert, safeDeliveryError(err))
 		}
 	}
 	if ntfyURL != "" {
 		if err := d.ntfy(ctx, notification, ntfyURL); err != nil {
-			d.options.Logf("starwatchd: ntfy delivery failed: %v", err)
+			d.options.Logf("starwatchd: ntfy delivery failed for %s: %s", notification.Alert, safeDeliveryError(err))
 		}
 	}
+}
+
+func safeDeliveryError(err error) string {
+	var requestError *url.Error
+	if errors.As(err, &requestError) {
+		switch {
+		case errors.Is(requestError.Err, context.DeadlineExceeded):
+			return "request timed out"
+		case errors.Is(requestError.Err, context.Canceled):
+			return "request canceled"
+		default:
+			return "network request failed"
+		}
+	}
+	if strings.HasPrefix(err.Error(), "HTTP ") {
+		return err.Error()
+	}
+	return fmt.Sprintf("%T", err)
 }
 
 func (d *Dispatcher) webhook(ctx context.Context, notification Notification, endpoint string) error {

@@ -380,7 +380,7 @@ func flushHistory(ctx context.Context, persistent *history.SQLiteStore, ram hist
 }
 
 func newHTTPServer(address string, handler http.Handler) *http.Server {
-	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: time.Minute}
 }
 
 func warnEmptyToken(token string, logf func(string, ...any)) {

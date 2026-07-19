@@ -269,7 +269,7 @@ func TestFailoverAssistGETAndConflictPOST(t *testing.T) {
 	}
 }
 
-func TestAuthAcceptsBearerAndQueryToken(t *testing.T) {
+func TestAuthRequiresBearerExceptForWebSocket(t *testing.T) {
 	handler, _ := testHandler(t, "secret", 10)
 	for name, response := range map[string]*httptest.ResponseRecorder{
 		"missing": request(handler, http.MethodGet, "/api/status", ""),
@@ -282,8 +282,8 @@ func TestAuthAcceptsBearerAndQueryToken(t *testing.T) {
 	if response := request(handler, http.MethodGet, "/api/status", "secret"); response.Code != http.StatusOK {
 		t.Fatalf("bearer: %d", response.Code)
 	}
-	if response := request(handler, http.MethodGet, "/api/status?token=secret", ""); response.Code != http.StatusOK {
-		t.Fatalf("query: %d", response.Code)
+	if response := request(handler, http.MethodGet, "/api/status?token=secret", ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("non-websocket query token: %d", response.Code)
 	}
 }
 

@@ -84,7 +84,7 @@ go test ./...
 - [ ] Run tests and observe URL leakage, broad query-token acceptance, and missing timeouts.
 - [ ] Add `safeDeliveryError(err)` returning only network class or HTTP status; logs include endpoint kind and alert name, never URL.
 - [ ] Permit query tokens only in the WebSocket auth wrapper. Preserve default coder/websocket same-origin checks.
-- [ ] Set `ReadTimeout: 15*time.Second` and `IdleTimeout: 60*time.Second`; leave `WriteTimeout` zero.
+- [ ] Set `IdleTimeout: 60*time.Second`; leave `ReadTimeout` and `WriteTimeout` zero because hijacked WebSocket connections can retain those deadlines.
 - [ ] Move LuCI token RPC to write scope, confirm GL has no equivalent ACL, and document the firewall reliance of `0.0.0.0`.
 - [ ] Run focused tests, JSON-parse ACL, run full gate, and commit `fix(security): tighten API and integration boundaries`.
 

@@ -176,6 +176,8 @@ The safe subset is also editable from the dashboard.
 
 ```uci
 config starwatch 'main'
+    # The default all-address bind relies on OpenWrt firewall policy to limit
+    # dashboard/API access to trusted LANs.
     option listen '0.0.0.0'
     option port '9633'
     option token ''
