@@ -63,6 +63,10 @@ struct RouterAdministrationView: View {
                     }
                 }
 
+                if presentation.visibleSections.contains(.routerConfiguration) {
+                    RouterSettingsView(model: admin)
+                }
+
                 if let message = admin.adminError {
                     Section { Text(message).foregroundStyle(.orange) }
                 }

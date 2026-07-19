@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import WattlineNetwork
+import WattlineUI
 
 @MainActor
 @Observable
@@ -47,10 +48,19 @@ final class RouterAdministrationModel {
     private(set) var isPairingQRLoading = false
     private(set) var tokens: [RouterTokenMetadata] = []
     private(set) var tokensError: String?
+    private(set) var settings: RouterSettings?
+    private(set) var settingsError: String?
+    private(set) var settingsRestartRequired = false
+    private(set) var isSettingsLoading = false
+    private(set) var isSettingsSaving = false
+    private(set) var validatedReplacement: RouterReplacementCandidate?
+    private(set) var replacementValidationError: String?
+    private(set) var isReplacementValidationRunning = false
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
     private let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient
+    private let endpointMigrationValidator: RouterEndpointMigrationValidator
     private let now: () -> Date
     private let pairingExpirySleep: PairingExpirySleep
     private var sessionGeneration: UInt64 = 0
@@ -60,12 +70,28 @@ final class RouterAdministrationModel {
     private var pairingStatusRequestGeneration: UInt64 = 0
     private var pairingQRRequestGeneration: UInt64 = 0
     private var tokenRequestGeneration: UInt64 = 0
+    private var settingsRequestGeneration: UInt64 = 0
+    private var replacementRequestGeneration: UInt64 = 0
     private var pairingExpiryTask: Task<Void, Never>?
+
+    var replacementCandidates: [RouterHostMetadata] {
+        var candidates = connections.savedHosts
+        for router in connections.discoveredRouters {
+            guard !candidates.contains(where: { $0.endpoint == router.endpoint }),
+                  let host = Self.hostMetadata(for: router)
+            else { continue }
+            candidates.append(host)
+        }
+        return candidates
+            .filter { $0.endpoint != host?.endpoint }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
 
     init(
         connections: RouterConnectionModel,
         adminClient: RouterAdministrationClient,
         historyClientFactory: @escaping (RouterEndpoint) throws -> RouterHistoryClient,
+        endpointMigrationValidator: RouterEndpointMigrationValidator,
         now: @escaping () -> Date = { Date() },
         pairingExpirySleep: @escaping PairingExpirySleep = { deadline in
             let remaining = max(0, deadline.timeIntervalSinceNow)
@@ -75,6 +101,7 @@ final class RouterAdministrationModel {
         self.connections = connections
         self.adminClient = adminClient
         self.historyClientFactory = historyClientFactory
+        self.endpointMigrationValidator = endpointMigrationValidator
         self.now = now
         self.pairingExpirySleep = pairingExpirySleep
     }
@@ -98,7 +125,11 @@ final class RouterAdministrationModel {
                     credentials: credentials,
                     endpoint: endpoint
                 )
-            }
+            },
+            endpointMigrationValidator: RouterEndpointMigrationValidator(
+                credentials: credentials,
+                httpFactory: httpFactory
+            )
         )
     }
 
@@ -129,6 +160,7 @@ final class RouterAdministrationModel {
         tokenRequestGeneration &+= 1
         tokens = []
         tokensError = nil
+        clearSettingsState()
         do {
             try await adminClient.attach(endpoint: host.endpoint)
         } catch {
@@ -170,6 +202,7 @@ final class RouterAdministrationModel {
         tokenRequestGeneration &+= 1
         tokens = []
         tokensError = nil
+        clearSettingsState()
         clearPairingSecrets()
         pairingError = nil
         await adminClient.detach()
@@ -221,12 +254,14 @@ final class RouterAdministrationModel {
             else { return }
             access = .locked
             clearPairingSecrets()
+            clearSettingsState()
         } catch {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation
             else { return }
             access = .locked
             clearPairingSecrets()
+            clearSettingsState()
             adminError = Self.unlockMessage(for: error)
         }
     }
@@ -237,7 +272,101 @@ final class RouterAdministrationModel {
         access = .locked
         adminError = nil
         clearPairingSecrets()
+        clearSettingsState()
         try? await adminClient.clearAdministratorCredential()
+    }
+
+    func reloadSettings() async {
+        settingsRequestGeneration &+= 1
+        let request = settingsRequestGeneration
+        isSettingsLoading = true
+        settingsError = nil
+        let result = await performAdmin({ client in
+            try await client.settings()
+        }, isCurrent: { [weak self] in
+            self?.settingsRequestGeneration == request
+        })
+        guard settingsRequestGeneration == request else { return }
+        isSettingsLoading = false
+        switch result {
+        case let .success(value):
+            settings = value
+            settingsError = nil
+        case let .failure(message):
+            settingsError = message
+        case .stale:
+            break
+        }
+    }
+
+    func saveSettings(_ patch: RouterSettingsPatch) async {
+        settingsRequestGeneration &+= 1
+        let request = settingsRequestGeneration
+        isSettingsSaving = true
+        settingsError = nil
+        let result = await performAdmin({ client in
+            try await client.updateSettings(patch)
+        }, isCurrent: { [weak self] in
+            self?.settingsRequestGeneration == request
+        })
+        guard settingsRequestGeneration == request else { return }
+        isSettingsSaving = false
+        switch result {
+        case let .success(value):
+            settings = value.settings
+            settingsRestartRequired = value.restartRequired
+        case let .failure(message):
+            settingsError = message
+        case .stale:
+            break
+        }
+    }
+
+    func validateReplacement(_ candidate: RouterHostMetadata) async {
+        guard let source = host,
+              access == .unlocked,
+              let expectedDeviceID = source.deviceID,
+              replacementCandidates.contains(where: { $0.endpoint == candidate.endpoint })
+        else {
+            validatedReplacement = nil
+            replacementValidationError = "Select a known router endpoint."
+            return
+        }
+        replacementRequestGeneration &+= 1
+        let request = replacementRequestGeneration
+        let session = sessionGeneration
+        validatedReplacement = nil
+        replacementValidationError = nil
+        isReplacementValidationRunning = true
+        do {
+            let validated = try await endpointMigrationValidator.validate(
+                sourceEndpoint: source.endpoint,
+                candidate: candidate.endpoint,
+                expectedDeviceID: expectedDeviceID
+            )
+            guard sessionGeneration == session,
+                  replacementRequestGeneration == request,
+                  host?.endpoint == source.endpoint,
+                  access == .unlocked
+            else { return }
+            validatedReplacement = RouterReplacementCandidate(
+                scheme: validated.endpoint.scheme,
+                host: validated.endpoint.host,
+                port: validated.endpoint.port,
+                validation: .verified(deviceID: validated.deviceID)
+            )
+            replacementValidationError = nil
+            isReplacementValidationRunning = false
+        } catch {
+            guard sessionGeneration == session,
+                  replacementRequestGeneration == request,
+                  host?.endpoint == source.endpoint,
+                  access == .unlocked
+            else { return }
+            validatedReplacement = nil
+            replacementValidationError = "Could not verify this replacement endpoint."
+            isReplacementValidationRunning = false
+        }
     }
 
     func reloadTokens() async {
@@ -626,8 +755,22 @@ final class RouterAdministrationModel {
         adminOperationGeneration &+= 1
         access = .locked
         clearPairingSecrets()
+        clearSettingsState()
         adminError = "The administrator session is no longer valid."
         return true
+    }
+
+    private func clearSettingsState() {
+        settingsRequestGeneration &+= 1
+        replacementRequestGeneration &+= 1
+        settings = nil
+        settingsError = nil
+        settingsRestartRequired = false
+        isSettingsLoading = false
+        isSettingsSaving = false
+        validatedReplacement = nil
+        replacementValidationError = nil
+        isReplacementValidationRunning = false
     }
 
     private static func unlockMessage(for error: Error) -> String {
@@ -640,12 +783,29 @@ final class RouterAdministrationModel {
             "Could not verify the administrator token. Try again."
         }
     }
+
+    private static func hostMetadata(for router: DiscoveredRouter) -> RouterHostMetadata? {
+        var components = URLComponents()
+        components.scheme = router.endpoint.scheme
+        components.host = router.endpoint.host
+        components.port = router.endpoint.port
+        guard let address = components.string else { return nil }
+        return try? RouterHostValidator.validate(
+            address,
+            displayName: router.serviceName,
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: router.deviceID,
+            certificateFingerprint: router.endpoint.certificateFingerprint
+        )
+    }
 }
 
 struct RouterAdministrationPresentation: Equatable {
     enum Section: Equatable {
         case clientEnrollment
         case apiClients
+        case routerConfiguration
     }
 
     let showsHistory: Bool
@@ -659,6 +819,8 @@ struct RouterAdministrationPresentation: Equatable {
         showsClientSections = true
         showsAdministratorSections = access == .unlocked
         showsUnlockField = access != .unlocked
-        visibleSections = access == .unlocked ? [.clientEnrollment, .apiClients] : []
+        visibleSections = access == .unlocked
+            ? [.clientEnrollment, .apiClients, .routerConfiguration]
+            : []
     }
 }

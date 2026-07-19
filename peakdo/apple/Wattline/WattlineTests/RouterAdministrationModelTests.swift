@@ -1,11 +1,118 @@
 import Foundation
 import WattlineCore
 import WattlineNetwork
+import WattlineUI
 import XCTest
 @testable import Wattline
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testUnlockedModelLoadsSettingsAndPublishesOnlyCompletePUTReadback() async throws {
+        let original = try administrationSettings(advanced: false, httpPort: 8377)
+        let readback = try administrationSettings(advanced: true, httpPort: 9000)
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: false, httpPort: 8377)),
+            AdminScriptedHTTP.ok(
+                administrationSettingsJSON(advanced: true, httpPort: 9000, restartRequired: true)
+            ),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+
+        await fixture.model.reloadSettings()
+        XCTAssertEqual(fixture.model.settings, original)
+
+        await fixture.model.saveSettings(.init(http: .init(port: 9000), advanced: true))
+
+        XCTAssertEqual(fixture.model.settings, readback)
+        XCTAssertEqual(fixture.model.settings?.http.port, 9000)
+        XCTAssertTrue(fixture.model.settingsRestartRequired)
+    }
+
+    func testSettingsSectionIsStructurallyAbsentWhileAdministratorLocked() {
+        XCTAssertFalse(
+            RouterAdministrationPresentation(access: .locked)
+                .visibleSections.contains(.routerConfiguration)
+        )
+        XCTAssertTrue(
+            RouterAdministrationPresentation(access: .unlocked)
+                .visibleSections.contains(.routerConfiguration)
+        )
+    }
+
+    func testControlRequestNeverPublishesDraftBeforeReadbackCompletes() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: false, httpPort: 8377)),
+            AdminScriptedHTTP.ok(
+                administrationSettingsJSON(advanced: true, httpPort: 8377, restartRequired: false)
+            ),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadSettings()
+        fixture.http.gateNextRequest()
+
+        let save = Task { await fixture.model.saveSettings(.init(advanced: true)) }
+        await fixture.http.waitForGateRegistration()
+
+        XCTAssertFalse(try XCTUnwrap(fixture.model.settings).advanced)
+        fixture.http.releaseGates()
+        await save.value
+    }
+
+    func testSaveCompletingAfterEndpointReplacementDoesNotPublish() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: false, httpPort: 8377)),
+            AdminScriptedHTTP.ok(
+                administrationSettingsJSON(advanced: true, httpPort: 8377, restartRequired: false)
+            ),
+            AdminScriptedHTTP.ok("{}"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadSettings()
+        fixture.http.gateNextRequest()
+
+        let save = Task { await fixture.model.saveSettings(.init(advanced: true)) }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.begin(host: fixture.host)
+        fixture.http.releaseGates()
+        await save.value
+
+        XCTAssertNotEqual(fixture.model.settings?.advanced, true)
+    }
+
+    func testReplacementCandidateBecomesVerifiedOnlyAfterCorrelatedProbe() async throws {
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            migrationResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let candidate = try await fixture.connections.saveManualHost(
+            address: "http://router.local:8377",
+            displayName: "Garage router HTTP",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil,
+            token: "candidate-client"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+
+        await fixture.model.validateReplacement(candidate)
+
+        XCTAssertEqual(
+            fixture.model.validatedReplacement?.validation,
+            .verified(deviceID: "DC:04:5A:EB:72:2B")
+        )
+        XCTAssertEqual(fixture.migrationHTTP.calls.map(\.path), ["/api/v1/device"])
+    }
+
     func testProductionFactorySharesSuppliedConnectionCredentialsAcrossRoles() async throws {
         let fixture = try await makeFixture(results: [])
         let http = AdminScriptedHTTP(
@@ -2189,6 +2296,7 @@ private struct AdministrationFixture {
     let credentialStore: RouterCredentialStore
     let http: AdminScriptedHTTP
     let historyHTTP: AdminScriptedHTTP
+    let migrationHTTP: AdminScriptedHTTP
 }
 
 @MainActor
@@ -2201,7 +2309,8 @@ private func makeFixture(
     historyGateRequests: Bool = false,
     historyGatedCallNumbers: Set<Int> = [],
     hostTokenID: String? = nil,
-    credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend()
+    credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend(),
+    migrationResults: [Result<(Data, HTTPURLResponse), Error>] = []
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
         "https://router.local:8378",
@@ -2229,6 +2338,7 @@ private func makeFixture(
         gateRequests: historyGateRequests,
         gatedCallNumbers: historyGatedCallNumbers
     )
+    let migrationHTTP = AdminScriptedHTTP(results: migrationResults, gateRequests: false)
     let adminClient = RouterAdministrationClient(credentials: credentialStore) { _ in http }
     let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient = { endpoint in
         RouterHistoryClient(
@@ -2243,6 +2353,10 @@ private func makeFixture(
             connections: connections,
             adminClient: adminClient,
             historyClientFactory: historyClientFactory,
+            endpointMigrationValidator: RouterEndpointMigrationValidator(
+                credentials: credentialStore,
+                httpFactory: { _ in migrationHTTP }
+            ),
             now: now,
             pairingExpirySleep: pairingExpirySleep
         )
@@ -2251,6 +2365,10 @@ private func makeFixture(
             connections: connections,
             adminClient: adminClient,
             historyClientFactory: historyClientFactory,
+            endpointMigrationValidator: RouterEndpointMigrationValidator(
+                credentials: credentialStore,
+                httpFactory: { _ in migrationHTTP }
+            ),
             now: now
         )
     }
@@ -2262,7 +2380,8 @@ private func makeFixture(
         host: host,
         credentialStore: credentialStore,
         http: http,
-        historyHTTP: historyHTTP
+        historyHTTP: historyHTTP,
+        migrationHTTP: migrationHTTP
     )
 }
 
@@ -2427,6 +2546,29 @@ private actor AdministrationMemoryBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
     func save(_ data: Data, account: String) async throws { values[account] = data }
     func delete(account: String) async throws { values[account] = nil }
+}
+
+private func administrationSettings(
+    advanced: Bool,
+    httpPort: Int
+) throws -> RouterSettings {
+    try JSONDecoder().decode(
+        RouterSettings.self,
+        from: Data(administrationSettingsJSON(advanced: advanced, httpPort: httpPort).utf8)
+    )
+}
+
+private func administrationSettingsJSON(
+    advanced: Bool,
+    httpPort: Int,
+    restartRequired: Bool? = nil
+) -> String {
+    let restart = restartRequired.map { ",\"restart_required\":\($0)" } ?? ""
+    return #"{"http":{"enabled":true,"addr4":"0.0.0.0","addr6":"::","port":\#(httpPort)},"https":{"enabled":true,"addr4":"0.0.0.0","addr6":"::","port":8378},"tls":{"cert":"/etc/wattline/tls/server.crt","key":"/etc/wattline/tls/server.key","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"token_store":"/etc/wattline/tokens.json","pairing_ttl":"5m0s","pairing_always_on":false,"advanced":\#(advanced),"mdns":{"enabled":true,"interfaces":["br-lan"]},"wan_access":false,"ble_pin":"020555"\#(restart)}"#
+}
+
+private func administrationDeviceJSON(id: String) -> String {
+    #"{"id":"\#(id)","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":773,"features_raw":32767,"features":{},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"ota","connection":{"connected":true,"phase":"bootloader","reconnect":"bootloader"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}"#
 }
 
 private actor NextClientReadGatedAdministrationBackend: RouterCredentialBackend {
