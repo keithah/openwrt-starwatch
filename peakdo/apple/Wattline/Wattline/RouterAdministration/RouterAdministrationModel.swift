@@ -23,12 +23,14 @@ final class RouterAdministrationModel {
 
     enum PairingDisplayState: Equatable {
         case unknown
+        case loading
         case open
         case closed
         case expired
+        case failed
 
         var canOpenPairing: Bool { self == .closed || self == .expired }
-        var canRefresh: Bool { self == .expired }
+        var canRefresh: Bool { self == .unknown || self == .expired || self == .failed }
     }
 
     private(set) var host: RouterHostMetadata?
@@ -347,6 +349,7 @@ final class RouterAdministrationModel {
 
     private func expirePairingSecrets() {
         invalidatePairingSecrets(displayState: .expired)
+        pairingError = nil
     }
 
     private func invalidatePairingSecrets(displayState: PairingDisplayState) {
@@ -415,8 +418,11 @@ final class RouterAdministrationModel {
         _ operation: (RouterAdministrationClient) async throws -> Value,
         apply: (Value) -> Void
     ) async {
+        guard host != nil, access == .unlocked else { return }
         pairingStatusRequestGeneration &+= 1
         let requestGeneration = pairingStatusRequestGeneration
+        invalidatePairingSecrets(displayState: .loading)
+        pairingError = nil
         let result = await performPairingAdmin(operation) {
             pairingStatusRequestGeneration == requestGeneration
         }
@@ -426,6 +432,7 @@ final class RouterAdministrationModel {
             apply(value)
             pairingError = nil
         case let .failure(message):
+            invalidatePairingSecrets(displayState: .failed)
             pairingError = message
         case .stale:
             break

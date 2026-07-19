@@ -665,6 +665,41 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.http.calls.map(\.path), ["/api/v1/settings"])
     }
 
+    func testInitialPairingReloadTransitionsFromLoadingToActionableFailure() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            .failure(NetworkError.timeout),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let reload = Task { await fixture.model.reloadPairingMode() }
+        await fixture.http.waitForGateRegistration()
+
+        XCTAssertEqual(fixture.model.pairingDisplayState, .loading)
+        XCTAssertFalse(fixture.model.pairingDisplayState.canRefresh)
+
+        fixture.http.releaseGates()
+        await reload.value
+
+        XCTAssertEqual(fixture.model.pairingDisplayState, .failed)
+        XCTAssertTrue(fixture.model.pairingDisplayState.canRefresh)
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+        XCTAssertEqual(fixture.model.pairingError, "The request failed. Try again.")
+    }
+
+    func testPairingReloadWhileLockedDoesNotClaimAnActiveLoad() async throws {
+        let fixture = try await makeFixture(results: [])
+        await fixture.model.begin(host: fixture.host)
+
+        await fixture.model.reloadPairingMode()
+
+        XCTAssertEqual(fixture.model.pairingDisplayState, .unknown)
+        XCTAssertEqual(fixture.http.calls, [])
+    }
+
     func testLockAndSessionEndClearPairingSecrets() async throws {
         let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
         let fixture = try await makeFixture(results: [
@@ -880,6 +915,7 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         XCTAssertEqual(fixture.model.pairingStatus?.pin, "654321")
         XCTAssertNil(fixture.model.pairingError)
+        XCTAssertEqual(fixture.model.pairingDisplayState, .open)
     }
 
     func testClosedReadbackInvalidatesInFlightQRAndPreservesConfirmedClosedTruth() async throws {
@@ -976,6 +1012,33 @@ final class RouterAdministrationModelTests: XCTestCase {
         )
     }
 
+    func testBackgroundThenForegroundFailureTransitionsUnknownToLoadingToRetryableFailure() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            .failure(NetworkError.timeout),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        fixture.model.pairingDidEnterBackground()
+        XCTAssertEqual(fixture.model.pairingDisplayState, .unknown)
+        fixture.http.gateNextRequest()
+
+        let foreground = Task { await fixture.model.pairingDidBecomeActive() }
+        await fixture.http.waitForGateRegistration()
+        XCTAssertEqual(fixture.model.pairingDisplayState, .loading)
+
+        fixture.http.releaseGates()
+        await foreground.value
+
+        XCTAssertEqual(fixture.model.pairingDisplayState, .failed)
+        XCTAssertTrue(fixture.model.pairingDisplayState.canRefresh)
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
+
     func testScheduledExpiryClearsSecretsAndOffersRecoveryActionsAtExactDeadline() async throws {
         let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
         let start = ISO8601DateFormatter().date(from: "2026-07-18T00:00:00Z")!
@@ -1012,6 +1075,32 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.pairingDisplayState, .expired)
         XCTAssertTrue(fixture.model.pairingDisplayState.canOpenPairing)
         XCTAssertTrue(fixture.model.pairingDisplayState.canRefresh)
+    }
+
+    func testExpiryClearsObsoletePairingErrorSoExpiredStateOwnsMessaging() async throws {
+        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        var currentTime = ISO8601DateFormatter().date(from: "2026-07-18T00:00:00Z")!
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(openBody),
+                .failure(NetworkError.timeout),
+            ],
+            now: { currentTime }
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        await fixture.model.loadPairingQR()
+        XCTAssertEqual(fixture.model.pairingError, "The request failed. Try again.")
+
+        currentTime = ISO8601DateFormatter().date(from: "2026-07-18T00:06:00Z")!
+        fixture.model.expirePairingSecretsIfNeeded()
+
+        XCTAssertEqual(fixture.model.pairingDisplayState, .expired)
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+        XCTAssertNil(fixture.model.pairingError)
     }
 
     func testNewStatusReplacesExpiryTaskAndEndCancelsReplacement() async throws {

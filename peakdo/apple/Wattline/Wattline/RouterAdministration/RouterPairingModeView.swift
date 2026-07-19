@@ -9,6 +9,8 @@ struct RouterPairingModeView: View {
     var body: some View {
         Group {
             switch model.pairingDisplayState {
+            case .loading:
+                ProgressView("Checking pairing status…")
             case .open:
                 if let status = model.pairingStatus {
                     if let pin = status.pin {
@@ -66,8 +68,20 @@ struct RouterPairingModeView: View {
                 Button("Refresh pairing status") {
                     Task { await model.reloadPairingMode() }
                 }
+            case .failed:
+                Text("Pairing status is unavailable.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Refresh pairing status") {
+                    Task { await model.reloadPairingMode() }
+                }
             case .unknown:
-                ProgressView("Checking pairing status…")
+                Text("Pairing status has not been checked.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Refresh pairing status") {
+                    Task { await model.reloadPairingMode() }
+                }
             }
             if let message = model.pairingError {
                 Text(message).foregroundStyle(.orange)
