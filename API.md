@@ -14,9 +14,11 @@ state.
 ## Conventions
 
 - The default origin is `http://<router>:9633`.
-- Every `/api/*` route requires `Authorization: Bearer <token>`.
-- `?token=<token>` is also accepted for browser and WebSocket bootstrap. Clients
-  should avoid it elsewhere because URLs are commonly logged.
+- Every `/api/*` route requires `Authorization: Bearer <token>`, except that
+  `/api/ws` also accepts `?token=<token>` because browser WebSocket APIs cannot
+  set an Authorization header. Query tokens are rejected on every other API
+  route. The SPA may receive a bootstrap token in its page URL, removes it from
+  browser history, and then uses the Bearer header for REST requests.
 - JSON request bodies generally reject unknown fields and have a 128 KiB limit.
   `POST /api/control/{action}` is an exception: it accepts unknown fields and
   has a 64 KiB limit. Every PATCH handler must call

@@ -208,6 +208,22 @@ loss (20%), path RTT (300 ms), path clear hold (300 seconds), and daily
 obstruction (2%). Changes to listen address, port, token, dish address, RAM
 capacity, database path, or flush cadence require a service restart.
 
+Starwatch treats abrupt router power loss as routine. SQLite uses WAL mode with
+full synchronous commits and a five-second busy timeout; corrupt-database
+recovery remains enabled. UCI updates sync the replacement file and its parent
+directory before reporting success. Alert firing/resolve and failover state is
+stored in SQLite, so a daemon restart neither repeats an unchanged firing nor
+forgets the later resolve. Webhook and ntfy delivery use independent bounded
+workers, preventing one slow endpoint from blocking the other or the alert
+evaluation loop.
+
+Telemetry serialization converts non-finite protobuf floats to safe JSON
+values, preserving the REST and WebSocket streams during degraded links. A
+dish speed-test status call has a two-second RPC deadline; transient
+`Unavailable` responses are retried, while only `Unimplemented` marks the RPC
+unsupported. MWAN polling retains its last-good snapshot across transient ubus
+failures, and failover applies are serialized through `mwan3 reload`.
+
 Useful service commands:
 
 ```sh
@@ -218,8 +234,10 @@ logread -e starwatchd
 
 ## API summary
 
-All `/api/*` routes require `Authorization: Bearer <token>`; browser clients
-may use `?token=` for WebSocket and bootstrap access. Read the generated token
+All `/api/*` routes require `Authorization: Bearer <token>`. Only `/api/ws`
+also accepts `?token=` because browser WebSocket APIs cannot set that header.
+The SPA can receive a token in its page URL for bootstrap, removes it from the
+URL, and uses Bearer authentication for REST calls. Read the generated token
 with `uci get starwatch.main.token`.
 
 | Endpoint | Purpose |

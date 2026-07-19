@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Sanitizes non-finite dish telemetry before REST or WebSocket encoding, so a
+  degraded link cannot truncate status JSON or force one-second reconnects.
+- Uses crash-safe SQLite WAL/FULL mode with a busy timeout, bounds pre-NTP
+  pending data, follows configured history retention, and fsyncs UCI file and
+  directory updates before reporting success.
+- Persists alert/failover runtime state, resolves active rules when disabled,
+  isolates webhook and ntfy workers, redacts endpoint secrets, and stops
+  retrying terminal HTTP 4xx responses.
+- Restricts query-string API tokens to the WebSocket endpoint, moves LuCI token
+  retrieval to write ACL scope, and adds an idle timeout without imposing a
+  WebSocket-breaking write timeout.
+- Retains last-good MWAN state on ubus failures, serializes `mwan3 reload`,
+  resolves hostname probes before ICMP, and bounds dish speed-test status RPCs.
+- Makes UCI apostrophe escaping round-trip safe, rejects line-breaking delivery
+  URLs and non-persistable rule edits, and invokes live config callbacks outside
+  the manager lock.
+- Hardens the SPA for empty API responses, WebSocket authorization failures,
+  partial settings, blank numeric inputs, stable list identity, and null chart
+  gaps; buffers obstruction PNGs before committing response headers.
+
 ## 0.1.1 — 2026-07-18
 
 - Makes dashboard telemetry strictly dish-gRPC sourced, with no router-counter

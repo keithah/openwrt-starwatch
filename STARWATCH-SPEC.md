@@ -99,7 +99,7 @@ No Starlink account, no cloud API, no telemetry leaves the router. Everything wo
 
 ```
 config starwatch 'main'
-    option listen        '0.0.0.0'      # SPA must be reachable from LAN
+    option listen        '0.0.0.0'      # all-address bind; firewall limits trusted LAN access
     option port          '9633'
     option token         '<generated>'  # uci-defaults fills if empty
     option dish_addr     '192.168.100.1:9200'
@@ -269,13 +269,18 @@ Backfill from `get_history` on startup fills gaps ≤ 15 min, so daemon restarts
 
 ### 8.3 Flash-wear budget
 
-Single transaction flush every `flush_secs` (default 300 s): ~5 minute-rows × ~12 series plus any events ≈ **a few KB per flush, ~1–2 MB/day** worst case before sqlite page reuse. Journal mode `MEMORY` with full-file fsync at flush (power-loss tolerance = lose ≤ 5 min of aggregates; RAM tier + dish backfill re-covers on restart). Acceptable on eMMC/NOR at this volume.
+Single transaction flush every `flush_secs` (default 300 s): ~5 minute-rows × ~12 series plus any events ≈ **a few KB per flush, ~1–2 MB/day** worst case before sqlite page reuse. SQLite uses WAL journaling, `synchronous=FULL`, and a 5 s busy timeout so an interrupted transaction has an on-disk recovery journal. The current in-memory interval can still lose up to one flush period; dish history backfill recovers overlapping telemetry after restart. Acceptable on eMMC/NOR at this volume.
 
 ---
 
 ## 9. HTTP API
 
-Bearer token (`Authorization: Bearer <token>` or `?token=` for the iframe bootstrap). Listens on `listen:port` (default `0.0.0.0:9633`). CORS disabled; the SPA is same-origin.
+Bearer token (`Authorization: Bearer <token>`) on every REST endpoint. Only
+`/api/ws` also accepts `?token=` because the browser WebSocket constructor
+cannot set Authorization headers. An iframe/page bootstrap token is removed
+from the URL and used as a Bearer token by the SPA. Listens on `listen:port`
+(default `0.0.0.0:9633`, relying on the OpenWrt firewall to restrict access to
+trusted LANs). CORS is disabled; the SPA and WebSocket remain same-origin.
 
 | Endpoint | Method | Returns |
 |---|---|---|
