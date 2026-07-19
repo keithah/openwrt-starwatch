@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
@@ -38,14 +39,19 @@ func (s *server) obstructionMap(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if strings.Contains(r.Header.Get("Accept"), "image/png") {
-		w.Header().Set("Content-Type", "image/png")
-		if err := renderObstructionPNG(w, grid); err != nil {
+		var encoded bytes.Buffer
+		if err := renderObstructionPNG(&encoded, grid); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = encoded.WriteTo(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, grid)
 }
+
+var encodeObstructionPNG = png.Encode
 
 func renderObstructionPNG(destination io.Writer, grid *dish.ObstructionMap) error {
 	if grid == nil || grid.Rows == 0 || grid.Cols == 0 || uint64(grid.Rows)*uint64(grid.Cols) > uint64(len(grid.SNR)) {
@@ -71,5 +77,5 @@ func renderObstructionPNG(destination io.Writer, grid *dish.ObstructionMap) erro
 			result.SetNRGBA(col, row, pixel)
 		}
 	}
-	return png.Encode(destination, result)
+	return encodeObstructionPNG(destination, result)
 }

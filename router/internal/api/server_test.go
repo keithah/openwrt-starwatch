@@ -345,6 +345,13 @@ func TestHistoryValidatesSeriesAndSpan(t *testing.T) {
 	}
 }
 
+func TestParseSpanRejectsHugeDayCount(t *testing.T) {
+	span, err := parseSpan("999999999999999999999999999999d")
+	if err == nil || span != 0 {
+		t.Fatalf("span=%v err=%v", span, err)
+	}
+}
+
 func TestWANEndpointAndStatusExposeWANSnapshot(t *testing.T) {
 	store := history.NewStore(10)
 	wan := wanStub{snapshot: dish.WANStatus{Available: true, Interface: "wan0", Up: true, RouterDownBPS: 123}}
