@@ -346,7 +346,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 func (s *server) writeWS(connection *websocket.Conn, value any) bool {
 	ctx, cancel := context.WithTimeout(s.ctx, s.deps.WSWriteTimeout)
 	defer cancel()
-	return s.deps.WSWrite(ctx, connection, value) == nil
+	return s.deps.WSWrite(ctx, connection, jsonSafeClone(value)) == nil
 }
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -376,9 +376,14 @@ func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
+	encoded, err := json.Marshal(jsonSafeClone(value))
+	if err != nil {
+		http.Error(w, "could not encode response", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(append(encoded, '\n'))
 }
 
 func (s *server) status(w http.ResponseWriter, _ *http.Request) {

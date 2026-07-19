@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,6 +44,20 @@ func (s outageStub) Query(time.Time, int) ([]outage.Entry, error) { return s.ent
 type eventStub struct{ events []history.Event }
 
 func (s eventStub) QueryEvents(time.Time, int) ([]history.Event, error) { return s.events, nil }
+
+type signalingSubscriber struct {
+	bus   *liveevent.Bus
+	ready chan struct{}
+}
+
+func (s signalingSubscriber) Subscribe(capacity int) (<-chan liveevent.Message, func()) {
+	messages, cancel := s.bus.Subscribe(capacity)
+	select {
+	case s.ready <- struct{}{}:
+	default:
+	}
+	return messages, cancel
+}
 
 type alertDeliveryStub struct{ notifications []alert.Notification }
 
@@ -489,12 +504,101 @@ func TestWebSocketDoesNotPublishStaleDishAsLiveWhenWANOnly(t *testing.T) {
 	}
 }
 
+func TestStatusSanitizesNonFiniteFloats(t *testing.T) {
+	nan := float32(math.NaN())
+	positiveInf := float32(math.Inf(1))
+	handler := NewServer(Deps{
+		Token: "secret",
+		Snapshot: snapshotStub{snapshot: dish.Snapshot{
+			Topology:      dish.TopologyFull,
+			DishReachable: true,
+			Dish: &dish.Status{
+				LatencyMS: nan,
+				DropRate:  positiveInf,
+				PowerW:    &nan,
+				Obstruction: &dish.Obstruction{
+					FractionObstructed: float32(math.Inf(-1)),
+				},
+			},
+			WAN: dish.WANStatus{RouterDownBPS: positiveInf},
+		}},
+		History: history.NewStore(1),
+	})
+	defer handler.Close()
+
+	response := request(handler, http.MethodGet, "/api/status", "secret")
+	if response.Code != http.StatusOK || !json.Valid(response.Body.Bytes()) {
+		t.Fatalf("status code=%d valid=%v body=%q", response.Code, json.Valid(response.Body.Bytes()), response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	dishPayload := payload["dish"].(map[string]any)
+	if dishPayload["latency_ms"] != float64(0) || dishPayload["drop_rate"] != float64(0) || dishPayload["power_w"] != nil {
+		t.Fatalf("dish payload=%#v", dishPayload)
+	}
+	if payload["wan"].(map[string]any)["router_down_bps"] != float64(0) {
+		t.Fatalf("wan payload=%#v", payload["wan"])
+	}
+}
+
+func TestObstructionMapSanitizesNonFiniteSNR(t *testing.T) {
+	provider := &obstructionStub{snapshot: dish.Snapshot{Topology: dish.TopologyFull, DishReachable: true}, grid: &dish.ObstructionMap{
+		Rows: 1, Cols: 2, FetchedAt: time.Now(), SNR: []float32{float32(math.NaN()), float32(math.Inf(1))},
+	}}
+	handler := NewServer(Deps{Token: "secret", Snapshot: snapshotStub{}, Obstruction: provider, History: history.NewStore(1), Now: time.Now})
+	defer handler.Close()
+	response := request(handler, http.MethodGet, "/api/obstruction-map", "secret")
+	if response.Code != http.StatusOK || !json.Valid(response.Body.Bytes()) {
+		t.Fatalf("map code=%d valid=%v body=%q", response.Code, json.Valid(response.Body.Bytes()), response.Body.String())
+	}
+	var payload struct {
+		SNR []float32 `json:"snr"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.SNR) != 2 || payload.SNR[0] != 0 || payload.SNR[1] != 0 {
+		t.Fatalf("snr=%v", payload.SNR)
+	}
+}
+
+func TestWebSocketSanitizesNonFiniteFloats(t *testing.T) {
+	var encoded []byte
+	handler := NewServer(Deps{
+		Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1),
+		WSWrite: func(_ context.Context, _ *websocket.Conn, value any) error {
+			var err error
+			encoded, err = json.Marshal(value)
+			return err
+		},
+	})
+	defer handler.Close()
+	nan := float32(math.NaN())
+	if ok := handler.writeWS(nil, dish.Snapshot{Dish: &dish.Status{LatencyMS: nan, PowerW: &nan}}); !ok {
+		t.Fatal("writeWS rejected non-finite snapshot")
+	}
+	if !json.Valid(encoded) {
+		t.Fatalf("invalid websocket JSON: %q", encoded)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	dishPayload := payload["dish"].(map[string]any)
+	if dishPayload["latency_ms"] != float64(0) || dishPayload["power_w"] != nil {
+		t.Fatalf("dish payload=%#v", dishPayload)
+	}
+}
+
 func TestWebSocketDisconnectsWhenBoundedEventBufferOverflows(t *testing.T) {
 	bus := liveevent.NewBus()
+	subscribed := make(chan struct{}, 1)
 	writeStarted := make(chan struct{}, 1)
 	unblock := make(chan struct{})
 	handler := NewServer(Deps{
-		Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), Live: bus,
+		Token: "secret", Snapshot: snapshotStub{}, History: history.NewStore(1), Live: signalingSubscriber{bus: bus, ready: subscribed},
 		WSInterval: time.Hour, WSBuffer: 1, WSWriteTimeout: time.Second,
 		WSWrite: func(ctx context.Context, _ *websocket.Conn, _ any) error {
 			select {
@@ -515,6 +619,11 @@ func TestWebSocketDisconnectsWhenBoundedEventBufferOverflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.CloseNow()
+	select {
+	case <-subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("websocket did not subscribe to live events")
+	}
 	bus.Publish(liveevent.Message{Kind: "one"})
 	select {
 	case <-writeStarted:
