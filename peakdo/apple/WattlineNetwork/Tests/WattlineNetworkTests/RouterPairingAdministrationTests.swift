@@ -369,6 +369,120 @@ final class RouterPairingAdministrationTests: XCTestCase {
             XCTAssertTrue(error is CancellationError)
         }
     }
+
+    func testQueuedOpenPairingModeCannotMutateReplacementAttachment() async throws {
+        let (client, oldHTTP, replacementHTTP) = try await makeReplacementRaceClient(
+            replacementResult: ScriptedRouterHTTPClient.ok(
+                #"{"open":true,"expires_at":"2026-07-17T20:05:00Z","pin":"123456"}"#
+            )
+        )
+        let blocker = Task { try await client.revokeToken(id: "blocker") }
+        await oldHTTP.waitForGateRegistration()
+        let submitted = expectation(description: "open pairing mode submitted")
+        let queued = Task {
+            submitted.fulfill()
+            return try await client.openPairingMode()
+        }
+        await fulfillment(of: [submitted], timeout: 1)
+        for _ in 0..<100 { await Task.yield() }
+
+        try await client.attach(endpoint: replacementEndpoint)
+        oldHTTP.releaseGates()
+        let blockerResult = try await blocker.value
+        XCTAssertEqual(blockerResult, "blocker")
+        do {
+            _ = try await queued.value
+            XCTFail("expected queued open cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        XCTAssertEqual(oldHTTP.calls.map(\.path), ["/api/v1/tokens/blocker"])
+        XCTAssertTrue(replacementHTTP.calls.isEmpty)
+    }
+
+    func testQueuedClosePairingModeCannotMutateReplacementAttachment() async throws {
+        let (client, oldHTTP, replacementHTTP) = try await makeReplacementRaceClient(
+            replacementResult: ScriptedRouterHTTPClient.ok(#"{"open":false}"#)
+        )
+        let blocker = Task { try await client.revokeToken(id: "blocker") }
+        await oldHTTP.waitForGateRegistration()
+        let submitted = expectation(description: "close pairing mode submitted")
+        let queued = Task {
+            submitted.fulfill()
+            try await client.closePairingMode()
+        }
+        await fulfillment(of: [submitted], timeout: 1)
+        for _ in 0..<100 { await Task.yield() }
+
+        try await client.attach(endpoint: replacementEndpoint)
+        oldHTTP.releaseGates()
+        let blockerResult = try await blocker.value
+        XCTAssertEqual(blockerResult, "blocker")
+        do {
+            try await queued.value
+            XCTFail("expected queued close cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        XCTAssertEqual(oldHTTP.calls.map(\.path), ["/api/v1/tokens/blocker"])
+        XCTAssertTrue(replacementHTTP.calls.isEmpty)
+    }
+
+    func testQueuedNoLeaseRevokeCannotMutateReplacementAttachment() async throws {
+        let (client, oldHTTP, replacementHTTP) = try await makeReplacementRaceClient(
+            replacementResult: ScriptedRouterHTTPClient.ok(#"{"revoked":"queued"}"#)
+        )
+        let blocker = Task { try await client.revokeToken(id: "blocker") }
+        await oldHTTP.waitForGateRegistration()
+        let submitted = expectation(description: "no-lease revoke submitted")
+        let queued = Task {
+            submitted.fulfill()
+            return try await client.revokeToken(id: "queued")
+        }
+        await fulfillment(of: [submitted], timeout: 1)
+        for _ in 0..<100 { await Task.yield() }
+
+        try await client.attach(endpoint: replacementEndpoint)
+        oldHTTP.releaseGates()
+        let blockerResult = try await blocker.value
+        XCTAssertEqual(blockerResult, "blocker")
+        do {
+            _ = try await queued.value
+            XCTFail("expected queued revoke cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        XCTAssertEqual(oldHTTP.calls.map(\.path), ["/api/v1/tokens/blocker"])
+        XCTAssertTrue(replacementHTTP.calls.isEmpty)
+    }
+
+    private func makeReplacementRaceClient(
+        replacementResult: Result<(Data, HTTPURLResponse), Error>
+    ) async throws -> (
+        RouterAdministrationClient,
+        ScriptedRouterHTTPClient,
+        ScriptedRouterHTTPClient
+    ) {
+        let oldHTTP = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(#"{"revoked":"blocker"}"#)],
+            gateRequests: true
+        )
+        let replacementHTTP = ScriptedRouterHTTPClient(results: [replacementResult])
+        let backend = PairingCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        try await store.saveToken("old-admin", for: endpoint, role: .administrator)
+        try await store.saveToken(
+            "replacement-admin", for: replacementEndpoint, role: .administrator
+        )
+        let client = RouterAdministrationClient(credentials: store) { [endpoint] requested in
+            requested == endpoint ? oldHTTP : replacementHTTP
+        }
+        try await client.attach(endpoint: endpoint)
+        return (client, oldHTTP, replacementHTTP)
+    }
 }
 
 private actor PairingCredentialBackend: RouterCredentialBackend {

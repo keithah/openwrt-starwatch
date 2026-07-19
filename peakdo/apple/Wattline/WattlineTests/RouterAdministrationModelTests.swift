@@ -1221,6 +1221,80 @@ final class RouterAdministrationModelTests: XCTestCase {
         )
     }
 
+    func testOlderBulkCredentialRefreshCannotOverwriteSelfRevokeEnrollmentState() async throws {
+        let listBefore = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let backend = SpecificClientReadGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(listBefore),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+                AdminScriptedHTTP.ok("[]"),
+            ],
+            hostTokenID: "self-id",
+            credentialBackend: backend
+        )
+        let otherHost = try await fixture.connections.saveManualHost(
+            address: "https://other.local:8378",
+            displayName: "Zulu router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: String(repeating: "2", count: 64),
+            token: "other-client"
+        )
+        try await fixture.credentialStore.saveToken(
+            "other-admin", for: otherHost.endpoint, role: .administrator
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        let selfToken = try XCTUnwrap(fixture.model.tokens.first)
+        await backend.gateNextClientRead(
+            account: otherHost.endpoint.peripheralID.uuidString
+        )
+
+        let olderBulkRefresh = Task { await fixture.connections.reloadSavedHosts() }
+        await backend.waitForClientReadToStart()
+        await fixture.model.revoke(selfToken)
+
+        var record = try XCTUnwrap(
+            fixture.connections.scanRecords(bluetooth: [], identities: [:])
+                .first { $0.routerHost?.id == fixture.host.id }
+        )
+        XCTAssertEqual(record.routerClientCredentialAvailability, .enrollmentRequired)
+
+        await backend.releaseClientRead()
+        await olderBulkRefresh.value
+
+        record = try XCTUnwrap(
+            fixture.connections.scanRecords(bluetooth: [], identities: [:])
+                .first { $0.routerHost?.id == fixture.host.id }
+        )
+        XCTAssertEqual(record.routerClientCredentialAvailability, .enrollmentRequired)
+        XCTAssertEqual(
+            ScanRecordPresentation(record: record).primaryAction,
+            .manualRouterEnrollment
+        )
+        XCTAssertEqual(fixture.connections.savedHosts, [fixture.host, otherHost])
+        let primaryClient = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint
+        )
+        let primaryAdmin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        let otherClient = try await fixture.credentialStore.readToken(
+            for: otherHost.endpoint
+        )
+        let otherAdmin = try await fixture.credentialStore.readToken(
+            for: otherHost.endpoint, role: .administrator
+        )
+        XCTAssertNil(primaryClient)
+        XCTAssertEqual(primaryAdmin, "boot-admin")
+        XCTAssertEqual(otherClient, "other-client")
+        XCTAssertEqual(otherAdmin, "other-admin")
+    }
+
     func testRevokingAnotherClientPreservesThisEndpointsCredential() async throws {
         let list = #"[{"id":"other-token-id","label":"Other phone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
         let fixture = try await makeFixture(
@@ -1300,7 +1374,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.tokens.count, 1)
     }
 
-    func testNewerTokenListWinsOverOlderSameSessionList() async throws {
+    func testConcurrentSameSessionTokenReloadsPublishFIFOLists() async throws {
         let older = #"[{"id":"older","label":"Older","created_at":"2026-07-17T19:00:00Z","last_seen_at":null,"bootstrap":false}]"#
         let newer = #"[{"id":"newer","label":"Newer","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
         let fixture = try await makeFixture(results: [
@@ -1314,17 +1388,21 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         let olderReload = Task { await fixture.model.reloadTokens() }
         await fixture.http.waitForGateRegistration()
-        await fixture.model.reloadTokens()
-        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+        let newerReload = Task { await fixture.model.reloadTokens() }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings", "/api/v1/tokens",
+        ])
 
         fixture.http.releaseGates()
         await olderReload.value
+        await newerReload.value
 
         XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
         XCTAssertNil(fixture.model.tokensError)
     }
 
-    func testNewerTokenListWinsOverOlderSameSessionError() async throws {
+    func testConcurrentSameSessionTokenReloadRecoversAfterFIFOError() async throws {
         let newer = #"[{"id":"newer","label":"Newer","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
@@ -1337,24 +1415,27 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         let olderReload = Task { await fixture.model.reloadTokens() }
         await fixture.http.waitForGateRegistration()
-        await fixture.model.reloadTokens()
+        let newerReload = Task { await fixture.model.reloadTokens() }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings", "/api/v1/tokens",
+        ])
         fixture.http.releaseGates()
         await olderReload.value
+        await newerReload.value
 
         XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
         XCTAssertNil(fixture.model.tokensError)
     }
 
-    func testOlderRevokeRelistCannotOverwriteNewerTokenReload() async throws {
+    func testTokenReloadWaitsForInFlightRevokeWorkflowAndPublishesPostRevokeList() async throws {
         let initial = #"[{"id":"other-token-id","label":"Other","created_at":"2026-07-17T19:00:00Z","last_seen_at":null,"bootstrap":false}]"#
-        let newer = #"[{"id":"newer","label":"Newer","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
-        let staleRelist = #"[{"id":"stale","label":"Stale","created_at":"2026-07-17T18:00:00Z","last_seen_at":null,"bootstrap":false}]"#
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
             AdminScriptedHTTP.ok(initial),
             AdminScriptedHTTP.ok(#"{"revoked":"other-token-id"}"#),
-            AdminScriptedHTTP.ok(newer),
-            AdminScriptedHTTP.ok(staleRelist),
+            AdminScriptedHTTP.ok("[]"),
+            AdminScriptedHTTP.ok("[]"),
         ])
         await fixture.model.begin(host: fixture.host)
         await fixture.model.unlock(token: "boot-admin")
@@ -1364,13 +1445,25 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         let revoke = Task { await fixture.model.revoke(token) }
         await fixture.http.waitForGateRegistration()
-        await fixture.model.reloadTokens()
-        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+        let reloadStarted = expectation(description: "token reload submitted")
+        let reload = Task {
+            reloadStarted.fulfill()
+            await fixture.model.reloadTokens()
+        }
+        await fulfillment(of: [reloadStarted], timeout: 1)
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/tokens/other-token-id",
+        ])
 
         fixture.http.releaseGates()
         await revoke.value
+        await reload.value
 
-        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+        XCTAssertEqual(fixture.model.tokens, [])
         XCTAssertNil(fixture.model.tokensError)
         XCTAssertEqual(fixture.http.calls.map(\.path), [
             "/api/v1/settings",
@@ -1397,9 +1490,11 @@ final class RouterAdministrationModelTests: XCTestCase {
         await fixture.http.waitForGateRegistration()
         await fixture.model.lock()
         await fixture.model.unlock(token: "new-admin")
-        await fixture.model.reloadTokens()
+        let currentReload = Task { await fixture.model.reloadTokens() }
+        for _ in 0..<100 { await Task.yield() }
         fixture.http.releaseGates()
         await staleReload.value
+        await currentReload.value
 
         XCTAssertEqual(fixture.model.access, .unlocked)
         XCTAssertEqual(fixture.model.tokens.map(\.id), ["current"])
@@ -1582,9 +1677,11 @@ final class RouterAdministrationModelTests: XCTestCase {
         await fixture.http.waitForGateRegistration()
         await fixture.model.lock()
         await fixture.model.unlock(token: "new-admin")
-        await fixture.model.reloadTokens()
+        let currentReload = Task { await fixture.model.reloadTokens() }
+        for _ in 0..<100 { await Task.yield() }
         fixture.http.releaseGates()
         await revoke.value
+        await currentReload.value
 
         let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
         XCTAssertNil(client)
@@ -2356,6 +2453,44 @@ private actor NextClientReadGatedAdministrationBackend: RouterCredentialBackend 
 
     func gateNextClientRead() {
         shouldGateClientRead = true
+        clientReadStarted = false
+    }
+
+    func waitForClientReadToStart() async {
+        if clientReadStarted { return }
+        await withCheckedContinuation { clientReadStartedWaiters.append($0) }
+    }
+
+    func releaseClientRead() {
+        clientReadGate?.resume()
+        clientReadGate = nil
+    }
+}
+
+private actor SpecificClientReadGatedAdministrationBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private var gatedAccount: String?
+    private var clientReadStarted = false
+    private var clientReadStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var clientReadGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? {
+        if account == gatedAccount {
+            gatedAccount = nil
+            clientReadStarted = true
+            let waiters = clientReadStartedWaiters
+            clientReadStartedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { clientReadGate = $0 }
+        }
+        return values[account]
+    }
+
+    func save(_ data: Data, account: String) async throws { values[account] = data }
+    func delete(account: String) async throws { values[account] = nil }
+
+    func gateNextClientRead(account: String) {
+        gatedAccount = account
         clientReadStarted = false
     }
 

@@ -76,6 +76,7 @@ final class RouterConnectionModel {
     private(set) var loadError: String?
     private var routerIdentities: [UUID: DeviceIdentitySnapshot] = [:]
     private var clientCredentialAvailability: [UUID: RouterClientCredentialAvailability] = [:]
+    private var clientCredentialAvailabilityVersions: [UUID: UInt64] = [:]
     private var discoveryGeneration: UInt64 = 0
     private var discoveryTask: Task<Void, Never>?
 
@@ -261,15 +262,22 @@ final class RouterConnectionModel {
         _ host: RouterHostMetadata,
         ifCurrent lease: RouterCredentialLease
     ) async throws {
+        let refreshVersion = beginClientCredentialAvailabilityRefresh(for: host.endpoint)
         do {
             _ = try await credentialStore.deleteToken(
                 for: host.endpoint,
                 role: .client,
                 ifCurrent: lease
             )
-            await refreshClientCredentialAvailability(for: host)
+            await refreshClientCredentialAvailability(
+                for: host,
+                version: refreshVersion
+            )
         } catch {
-            await refreshClientCredentialAvailability(for: host)
+            await refreshClientCredentialAvailability(
+                for: host,
+                version: refreshVersion
+            )
             throw error
         }
     }
@@ -474,18 +482,63 @@ final class RouterConnectionModel {
     private func refreshClientCredentialAvailability(
         for hosts: [RouterHostMetadata]
     ) async {
-        var refreshed: [UUID: RouterClientCredentialAvailability] = [:]
-        for host in hosts {
-            refreshed[host.endpoint.peripheralID] = await readClientCredentialAvailability(
-                for: host.endpoint
+        let refreshes = hosts.map { host in
+            (
+                host: host,
+                version: beginClientCredentialAvailabilityRefresh(for: host.endpoint)
             )
         }
-        clientCredentialAvailability = refreshed
+        var results: [(
+            host: RouterHostMetadata,
+            version: UInt64,
+            availability: RouterClientCredentialAvailability
+        )] = []
+        for refresh in refreshes {
+            results.append((
+                host: refresh.host,
+                version: refresh.version,
+                availability: await readClientCredentialAvailability(
+                    for: refresh.host.endpoint
+                )
+            ))
+        }
+        for result in results {
+            publishClientCredentialAvailability(
+                result.availability,
+                for: result.host.endpoint,
+                version: result.version
+            )
+        }
     }
 
-    private func refreshClientCredentialAvailability(for host: RouterHostMetadata) async {
-        clientCredentialAvailability[host.endpoint.peripheralID] =
-            await readClientCredentialAvailability(for: host.endpoint)
+    private func refreshClientCredentialAvailability(
+        for host: RouterHostMetadata,
+        version: UInt64
+    ) async {
+        let availability = await readClientCredentialAvailability(for: host.endpoint)
+        publishClientCredentialAvailability(
+            availability,
+            for: host.endpoint,
+            version: version
+        )
+    }
+
+    private func beginClientCredentialAvailabilityRefresh(
+        for endpoint: RouterEndpoint
+    ) -> UInt64 {
+        let id = endpoint.peripheralID
+        clientCredentialAvailabilityVersions[id, default: 0] &+= 1
+        return clientCredentialAvailabilityVersions[id, default: 0]
+    }
+
+    private func publishClientCredentialAvailability(
+        _ availability: RouterClientCredentialAvailability,
+        for endpoint: RouterEndpoint,
+        version: UInt64
+    ) {
+        let id = endpoint.peripheralID
+        guard clientCredentialAvailabilityVersions[id] == version else { return }
+        clientCredentialAvailability[id] = availability
     }
 
     private func readClientCredentialAvailability(
