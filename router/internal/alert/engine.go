@@ -3,6 +3,7 @@ package alert
 
 import (
 	"encoding/json"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -61,13 +62,20 @@ type EventSink interface {
 	AddEvent(history.Event)
 }
 
+type StateStore interface {
+	LoadAlertState() ([]byte, error)
+	SaveAlertState([]byte) error
+}
+
 type Options struct {
-	Now      func() time.Time
-	Rules    map[string]Rule
-	History  history.SpanReader
-	Delivery Delivery
-	Events   EventSink
-	Live     event.Publisher
+	Now        func() time.Time
+	Rules      map[string]Rule
+	History    history.SpanReader
+	Delivery   Delivery
+	Events     EventSink
+	Live       event.Publisher
+	StateStore StateStore
+	Logf       func(string, ...any)
 }
 
 type alertState struct {
@@ -91,6 +99,22 @@ type Engine struct {
 	obstruction   obstructionCache
 	failoverSet   string
 	failoverReady bool
+	stateStore    StateStore
+	logf          func(string, ...any)
+}
+
+type persistedEngineState struct {
+	States        map[string]persistedAlertState `json:"states,omitempty"`
+	FailoverSet   string                         `json:"failover_set,omitempty"`
+	FailoverReady bool                           `json:"failover_ready,omitempty"`
+}
+
+type persistedAlertState struct {
+	Active       bool           `json:"active"`
+	FiredAt      time.Time      `json:"fired_at"`
+	SubjectStart time.Time      `json:"subject_start"`
+	ClearSince   time.Time      `json:"clear_since,omitempty"`
+	Detail       map[string]any `json:"detail,omitempty"`
 }
 
 type obstructionCache struct {
@@ -140,9 +164,65 @@ func NewEngine(options Options) *Engine {
 	if options.Rules == nil {
 		options.Rules = DefaultRules()
 	}
-	return &Engine{
+	if options.Logf == nil {
+		options.Logf = log.Printf
+	}
+	engine := &Engine{
 		now: options.Now, rules: options.Rules, history: options.History, delivery: options.Delivery,
-		events: options.Events, live: options.Live, states: make(map[string]*alertState),
+		events: options.Events, live: options.Live, states: make(map[string]*alertState), stateStore: options.StateStore, logf: options.Logf,
+	}
+	engine.restoreState()
+	return engine
+}
+
+func (e *Engine) restoreState() {
+	if e.stateStore == nil {
+		return
+	}
+	encoded, err := e.stateStore.LoadAlertState()
+	if err != nil {
+		e.logf("starwatchd: load alert state: %v", err)
+		return
+	}
+	if len(encoded) == 0 {
+		return
+	}
+	var saved persistedEngineState
+	if err := json.Unmarshal(encoded, &saved); err != nil {
+		e.logf("starwatchd: decode alert state: %v", err)
+		return
+	}
+	for name, state := range saved.States {
+		e.states[name] = &alertState{
+			active: state.Active, firedAt: state.FiredAt, subjectStart: state.SubjectStart,
+			clearSince: state.ClearSince, detail: state.Detail,
+		}
+	}
+	e.failoverSet, e.failoverReady = saved.FailoverSet, saved.FailoverReady
+}
+
+func (e *Engine) persistState() {
+	if e.stateStore == nil {
+		return
+	}
+	saved := persistedEngineState{
+		States: make(map[string]persistedAlertState), FailoverSet: e.failoverSet, FailoverReady: e.failoverReady,
+	}
+	for name, state := range e.states {
+		if state == nil || !state.active {
+			continue
+		}
+		saved.States[name] = persistedAlertState{
+			Active: state.active, FiredAt: state.firedAt, SubjectStart: state.subjectStart,
+			ClearSince: state.clearSince, Detail: state.detail,
+		}
+	}
+	encoded, err := json.Marshal(saved)
+	if err == nil {
+		err = e.stateStore.SaveAlertState(encoded)
+	}
+	if err != nil {
+		e.logf("starwatchd: save alert state: %v", err)
 	}
 }
 
@@ -182,7 +262,10 @@ func (e *Engine) Tick(inputs Inputs) {
 		}
 		rule, exists := rules[name]
 		if !exists {
-			delete(e.states, name)
+			if _, present := e.states[name]; present {
+				delete(e.states, name)
+				e.persistState()
+			}
 			continue
 		}
 		if !rule.Enabled {
@@ -190,6 +273,7 @@ func (e *Engine) Tick(inputs Inputs) {
 				e.emit(name, rule.Severity, StateResolved, state, inputs, now)
 			}
 			delete(e.states, name)
+			e.persistState()
 			continue
 		}
 		condition := e.evaluate(name, rule, inputs, now)
@@ -202,7 +286,10 @@ func (e *Engine) Tick(inputs Inputs) {
 			e.states[name] = state
 		}
 		if condition.active {
-			state.clearSince = time.Time{}
+			if !state.clearSince.IsZero() {
+				state.clearSince = time.Time{}
+				e.persistState()
+			}
 			if state.active {
 				continue
 			}
@@ -211,6 +298,7 @@ func (e *Engine) Tick(inputs Inputs) {
 			state.subjectStart = condition.started
 			state.detail = condition.detail
 			e.emit(name, rule.Severity, StateFiring, state, inputs, now)
+			e.persistState()
 			continue
 		}
 		if !state.active {
@@ -219,6 +307,7 @@ func (e *Engine) Tick(inputs Inputs) {
 		if rule.ClearHold > 0 {
 			if state.clearSince.IsZero() {
 				state.clearSince = now
+				e.persistState()
 				continue
 			}
 			if now.Sub(state.clearSince) < rule.ClearHold {
@@ -227,6 +316,7 @@ func (e *Engine) Tick(inputs Inputs) {
 		}
 		e.emit(name, rule.Severity, StateResolved, state, inputs, now)
 		*state = alertState{}
+		e.persistState()
 	}
 }
 
@@ -246,6 +336,7 @@ func (e *Engine) evaluateFailover(inputs Inputs, now time.Time, rule Rule) {
 	current := "active=" + strings.Join(active, ",") + ";online=" + strings.Join(online, ",")
 	if !e.failoverReady {
 		e.failoverSet, e.failoverReady = current, true
+		e.persistState()
 		return
 	}
 	if current == e.failoverSet {
@@ -254,6 +345,7 @@ func (e *Engine) evaluateFailover(inputs Inputs, now time.Time, rule Rule) {
 	state := &alertState{active: true, firedAt: now, subjectStart: now, detail: map[string]any{"previous": e.failoverSet, "active": active, "online": online}}
 	e.failoverSet = current
 	e.emit("failover_event", rule.Severity, StateFiring, state, inputs, now)
+	e.persistState()
 }
 
 type condition struct {

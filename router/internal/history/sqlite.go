@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS speedtests (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
   down_bps REAL NOT NULL DEFAULT 0, up_bps REAL NOT NULL DEFAULT 0, latency_ms REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS alert_state (
+  id INTEGER PRIMARY KEY CHECK(id=1), state BLOB NOT NULL
+);
 CREATE INDEX IF NOT EXISTS minute_series_ts ON minute(series, ts);
 CREATE INDEX IF NOT EXISTS quarter_series_ts ON quarter(series, ts);
 `
@@ -158,6 +161,28 @@ func (s *SQLiteStore) AddEvent(event Event) {
 	s.mu.Lock()
 	s.pending = append(s.pending, event)
 	s.mu.Unlock()
+}
+
+func (s *SQLiteStore) LoadAlertState() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var state []byte
+	err := s.db.QueryRow("SELECT state FROM alert_state WHERE id=1").Scan(&state)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), state...), nil
+}
+
+func (s *SQLiteStore) SaveAlertState(state []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`INSERT INTO alert_state(id, state) VALUES(1, ?)
+		ON CONFLICT(id) DO UPDATE SET state=excluded.state`, state)
+	return err
 }
 
 func (s *SQLiteStore) AddSpeedtest(result Speedtest) {

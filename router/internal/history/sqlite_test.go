@@ -81,11 +81,39 @@ func TestSQLiteUsesCrashSafeWALAndCreatesAllTables(t *testing.T) {
 	if err := store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil || busyTimeout != 5000 {
 		t.Fatalf("busy_timeout=%d err=%v", busyTimeout, err)
 	}
-	for _, table := range []string{"minute", "quarter", "events", "outages", "speedtests"} {
+	for _, table := range []string{"minute", "quarter", "events", "outages", "speedtests", "alert_state"} {
 		var count int
 		if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("table %s count=%d err=%v", table, count, err)
 		}
+	}
+}
+
+func TestSQLitePersistsAlertStateAcrossReopen(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "history.db")
+	store, _, err := OpenSQLite(path, SQLiteOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte(`{"states":{"thermal_throttle":{"active":true}}}`)
+	if err := store.SaveAlertState(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _, err := OpenSQLite(path, SQLiteOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.LoadAlertState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("state=%q want=%q", got, want)
 	}
 }
 

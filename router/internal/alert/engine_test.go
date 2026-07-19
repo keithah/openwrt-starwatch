@@ -20,6 +20,21 @@ type eventSink struct{ events []history.Event }
 
 func (s *eventSink) AddEvent(item history.Event) { s.events = append(s.events, item) }
 
+type memoryStateStore struct {
+	data  []byte
+	saves int
+}
+
+func (s *memoryStateStore) LoadAlertState() ([]byte, error) {
+	return append([]byte(nil), s.data...), nil
+}
+
+func (s *memoryStateStore) SaveAlertState(data []byte) error {
+	s.data = append(s.data[:0], data...)
+	s.saves++
+	return nil
+}
+
 type countingSpanReader struct {
 	calls int
 	now   time.Time
@@ -133,6 +148,53 @@ func TestDisablingActiveRuleEmitsResolve(t *testing.T) {
 	engine.Tick(inputs)
 	if len(notifications.notifications) != 2 || notifications.notifications[0].State != StateFiring || notifications.notifications[1].State != StateResolved {
 		t.Fatalf("notifications=%#v", notifications.notifications)
+	}
+}
+
+func TestEngineRestoresActiveAlertWithoutRefiringAndLaterResolves(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	state := &memoryStateStore{}
+	rules := map[string]Rule{"thermal_throttle": DefaultRules()["thermal_throttle"]}
+	inputs := Inputs{Dish: dish.Snapshot{Dish: &dish.Status{Alerts: map[string]bool{"thermal_throttle": true}}}}
+	firstNotifications := &notificationSink{}
+	first := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, Delivery: firstNotifications, StateStore: state})
+	first.Tick(inputs)
+	if len(firstNotifications.notifications) != 1 || state.saves == 0 {
+		t.Fatalf("first notifications=%#v saves=%d", firstNotifications.notifications, state.saves)
+	}
+
+	secondNotifications := &notificationSink{}
+	second := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, Delivery: secondNotifications, StateStore: state})
+	second.Tick(inputs)
+	if len(secondNotifications.notifications) != 0 {
+		t.Fatalf("restored active alert refired: %#v", secondNotifications.notifications)
+	}
+	inputs.Dish.Dish.Alerts["thermal_throttle"] = false
+	now = now.Add(time.Minute)
+	second.Tick(inputs)
+	if len(secondNotifications.notifications) != 1 || secondNotifications.notifications[0].State != StateResolved {
+		t.Fatalf("resolved notifications=%#v", secondNotifications.notifications)
+	}
+}
+
+func TestEngineRestoresFailoverBaselineWithoutDuplicate(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	state := &memoryStateStore{}
+	rules := map[string]Rule{"failover_event": DefaultRules()["failover_event"]}
+	inputs := Inputs{WAN: dish.WANStatus{MWAN3: &dish.MWANStatus{ActiveInterfaces: []string{"wan"}}}}
+	first := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, StateStore: state})
+	first.Tick(inputs)
+
+	notifications := &notificationSink{}
+	second := NewEngine(Options{Now: func() time.Time { return now }, Rules: rules, Delivery: notifications, StateStore: state})
+	second.Tick(inputs)
+	if len(notifications.notifications) != 0 {
+		t.Fatalf("restored failover baseline emitted duplicate: %#v", notifications.notifications)
+	}
+	inputs.WAN.MWAN3.ActiveInterfaces = []string{"wwan"}
+	second.Tick(inputs)
+	if len(notifications.notifications) != 1 || notifications.notifications[0].Alert != "failover_event" {
+		t.Fatalf("failover notifications=%#v", notifications.notifications)
 	}
 }
 

@@ -158,6 +158,7 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	}
 	if persistent != nil {
 		engineOptions.Events = persistent
+		engineOptions.StateStore = persistent
 	}
 	alertEngine := alert.NewEngine(engineOptions)
 	var settings *config.Manager
