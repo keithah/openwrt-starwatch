@@ -1321,6 +1321,243 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(admin, "new-admin")
     }
 
+    func testDurableSelfRevokeCompletesCapturedHostCleanupAfterSessionEnd() async throws {
+        let list = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(list),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+            ],
+            hostTokenID: "self-id"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        fixture.http.gateNextRequest()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.end()
+        fixture.http.releaseGates()
+        await revoke.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        XCTAssertNil(client)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(admin, "boot-admin")
+        XCTAssertEqual(fixture.connections.savedHosts, [fixture.host])
+        XCTAssertNil(fixture.model.host)
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings", "/api/v1/tokens", "/api/v1/tokens/self-id",
+        ])
+    }
+
+    func testDurableSelfRevokeAfterReunlockDoesNotRelistThroughNewAdminSession() async throws {
+        let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let current = #"[{"id":"newer","label":"Newer","created_at":"2026-07-17T20:01:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(initial),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(current),
+                AdminScriptedHTTP.ok(#"[{"id":"stale","label":"Stale","created_at":"2026-07-17T19:00:00Z","last_seen_at":null,"bootstrap":false}]"#),
+            ],
+            hostTokenID: "self-id"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        fixture.http.gateNextRequest()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.lock()
+        await fixture.model.unlock(token: "new-admin")
+        await fixture.model.reloadTokens()
+        fixture.http.releaseGates()
+        await revoke.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        XCTAssertNil(client)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(admin, "new-admin")
+        XCTAssertEqual(fixture.connections.savedHosts, [fixture.host])
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+        XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/tokens/self-id",
+            "/api/v1/settings",
+            "/api/v1/tokens",
+        ])
+    }
+
+    func testDurableSelfRevokeCleansOldHostWithoutPublishingIntoReplacementEndpoint() async throws {
+        let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(initial),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(#"[{"id":"replacement","label":"Replacement","created_at":"2026-07-17T20:02:00Z","last_seen_at":null,"bootstrap":false}]"#),
+            ],
+            hostTokenID: "self-id"
+        )
+        let replacement = try RouterHostValidator.validate(
+            "https://replacement.local:8378",
+            displayName: "Replacement router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: String(repeating: "1", count: 64),
+            tokenID: "replacement-id"
+        )
+        try await fixture.credentialStore.saveToken(
+            "replacement-admin", for: replacement.endpoint, role: .administrator
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        fixture.http.gateNextRequest()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.begin(host: replacement)
+        fixture.http.releaseGates()
+        await revoke.value
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        XCTAssertNil(client)
+        let oldAdmin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        let replacementAdmin = try await fixture.credentialStore.readToken(
+            for: replacement.endpoint, role: .administrator
+        )
+        XCTAssertEqual(oldAdmin, "old-admin")
+        XCTAssertEqual(replacementAdmin, "replacement-admin")
+        XCTAssertEqual(fixture.connections.savedHosts, [fixture.host])
+        XCTAssertEqual(fixture.model.host, replacement)
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/tokens/self-id",
+            "/api/v1/settings",
+        ])
+    }
+
+    func testSelfRevokeCleanupFailureIsVisibleWhileHostAndAdminSurviveAndRelistRuns() async throws {
+        let initial = #"[{"id":"self-id","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let backend = ClientDeleteFailingAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(initial),
+                AdminScriptedHTTP.ok(#"{"revoked":"self-id"}"#),
+                AdminScriptedHTTP.ok("[]"),
+            ],
+            hostTokenID: "self-id",
+            credentialBackend: backend
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+
+        await fixture.model.revoke(try XCTUnwrap(fixture.model.tokens.first))
+
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertEqual(
+            fixture.model.tokensError,
+            "Token was revoked, but this device's local client credential could not be removed."
+        )
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertEqual(fixture.model.host, fixture.host)
+        XCTAssertEqual(fixture.connections.savedHosts, [fixture.host])
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        XCTAssertEqual(client, "wlt_client")
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(admin, "boot-admin")
+        XCTAssertEqual(fixture.http.calls.map(\.path), [
+            "/api/v1/settings",
+            "/api/v1/tokens",
+            "/api/v1/tokens/self-id",
+            "/api/v1/tokens",
+        ])
+    }
+
+    func testBootstrapTokenRowHasBadgeButNoRevokeActionOrConfirmation() throws {
+        let token = try tokenMetadata(
+            id: "bootstrap", label: "Bootstrap administrator", bootstrap: true
+        )
+
+        let presentation = RouterTokenRowPresentation(
+            token: token, isCurrentClient: true
+        )
+
+        XCTAssertTrue(presentation.showsBootstrapBadge)
+        XCTAssertFalse(presentation.showsCurrentDeviceBadge)
+        XCTAssertFalse(presentation.showsRevokeAction)
+        XCTAssertNil(presentation.confirmation)
+    }
+
+    func testCurrentClientRowUsesExplicitSelfRevocationConfirmation() throws {
+        let token = try tokenMetadata(id: "self-id", label: "This iPhone")
+
+        let presentation = RouterTokenRowPresentation(
+            token: token, isCurrentClient: true
+        )
+
+        XCTAssertFalse(presentation.showsBootstrapBadge)
+        XCTAssertTrue(presentation.showsCurrentDeviceBadge)
+        XCTAssertTrue(presentation.showsRevokeAction)
+        XCTAssertEqual(
+            presentation.confirmation,
+            RouterTokenRevocationConfirmation(
+                title: "Revoke this device's token?",
+                actionTitle: "Revoke This iPhone",
+                message: "This is this device's own token. Live updates stop immediately and this router returns to setup."
+            )
+        )
+    }
+
+    func testOtherClientRowUsesOtherClientRevocationConfirmation() throws {
+        let token = try tokenMetadata(id: "other-id", label: "Other phone")
+
+        let presentation = RouterTokenRowPresentation(
+            token: token, isCurrentClient: false
+        )
+
+        XCTAssertTrue(presentation.showsRevokeAction)
+        XCTAssertEqual(
+            presentation.confirmation,
+            RouterTokenRevocationConfirmation(
+                title: "Revoke Other phone?",
+                actionTitle: "Revoke Other phone",
+                message: "Revocation is immediate and closes that client's live updates."
+            )
+        )
+    }
+
     func testTokenSectionsAreStructurallyAbsentWhileLocked() async throws {
         let fixture = try await makeFixture(results: [AdminScriptedHTTP.ok("{}")])
         await fixture.model.begin(host: fixture.host)
@@ -1369,6 +1606,23 @@ final class RouterAdministrationModelTests: XCTestCase {
         let storedSecret = try await credentials.readToken(for: host.endpoint)
         XCTAssertEqual(storedSecret, secret)
     }
+}
+
+private func tokenMetadata(
+    id: String,
+    label: String,
+    bootstrap: Bool = false
+) throws -> RouterTokenMetadata {
+    let data = try JSONSerialization.data(withJSONObject: [
+        "id": id,
+        "label": label,
+        "created_at": "2026-07-17T20:00:00Z",
+        "last_seen_at": NSNull(),
+        "bootstrap": bootstrap,
+    ])
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return try decoder.decode(RouterTokenMetadata.self, from: data)
 }
 
 private final class PairingExpirySleepFixture: @unchecked Sendable {
@@ -1689,6 +1943,19 @@ private actor AdministrationMemoryBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
     func save(_ data: Data, account: String) async throws { values[account] = data }
     func delete(account: String) async throws { values[account] = nil }
+}
+
+private actor ClientDeleteFailingAdministrationBackend: RouterCredentialBackend {
+    private enum DeleteFailure: Error { case denied }
+    private var values: [String: Data] = [:]
+
+    func read(account: String) async throws -> Data? { values[account] }
+    func save(_ data: Data, account: String) async throws { values[account] = data }
+
+    func delete(account: String) async throws {
+        guard account.hasSuffix(".administrator") else { throw DeleteFailure.denied }
+        values[account] = nil
+    }
 }
 
 private actor FirstDeleteGatedAdministrationBackend: RouterCredentialBackend {

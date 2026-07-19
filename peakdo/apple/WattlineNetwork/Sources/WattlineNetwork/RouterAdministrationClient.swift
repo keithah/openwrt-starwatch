@@ -158,6 +158,48 @@ public actor RouterAdministrationClient {
         }
     }
 
+    /// Request path for mutations whose 2xx response is durable on the router.
+    /// Stale work is quarantined before sending and before translating failures,
+    /// but a successful response remains observable after a generation change so
+    /// callers can complete required local cleanup.
+    func sendDurableMutation(
+        _ method: String,
+        _ path: String,
+        body: Data? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        guard let endpoint, let http else { throw RouterAdministrationError.notAttached }
+        let requestGeneration = generation
+        let storedToken: String?
+        do {
+            storedToken = try await credentials.readToken(
+                for: endpoint, role: .administrator
+            )
+        } catch {
+            guard generation == requestGeneration else { throw CancellationError() }
+            if error is CancellationError { throw CancellationError() }
+            if case NetworkError.unauthorized = error {
+                throw RouterAdministrationError.invalidAdministratorToken
+            }
+            throw error
+        }
+        guard generation == requestGeneration else { throw CancellationError() }
+        guard let token = storedToken else {
+            throw RouterAdministrationError.invalidAdministratorToken
+        }
+        do {
+            return try await http.request(method, path, body: body, token: token)
+        } catch {
+            guard generation == requestGeneration else { throw CancellationError() }
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                throw CancellationError()
+            }
+            if case NetworkError.unauthorized = error {
+                throw RouterAdministrationError.invalidAdministratorToken
+            }
+            throw error
+        }
+    }
+
     private func acquireCredentialPersistence() async {
         guard credentialPersistenceActive else {
             credentialPersistenceActive = true

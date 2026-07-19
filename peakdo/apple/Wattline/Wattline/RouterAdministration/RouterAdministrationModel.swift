@@ -263,21 +263,76 @@ final class RouterAdministrationModel {
         guard !token.bootstrap, host != nil, access == .unlocked else { return }
         let wasCurrentClient = isCurrentClient(token)
         let revokedHost = host
-        let connections = self.connections
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
         tokenRequestGeneration &+= 1
         let requestGeneration = tokenRequestGeneration
         tokensError = nil
-        let result = await performAdmin({ client in
-            try await client.revokeToken(id: token.id)
-            if wasCurrentClient, let revokedHost {
-                try? await connections.returnToEnrollment(revokedHost)
+        do {
+            try await adminClient.revokeToken(id: token.id)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentTokenOperation(
+                session: session,
+                adminOperation: adminOperation,
+                request: requestGeneration
+            ) else { return }
+            if handleAdminFailure(error) {
+                try? await adminClient.clearAdministratorCredential()
+            } else {
+                tokensError = "The request failed. Try again."
             }
-            return try await client.tokens()
-        }, isCurrent: { [weak self] in
-            self?.tokenRequestGeneration == requestGeneration
-        })
-        guard tokenRequestGeneration == requestGeneration else { return }
-        publishTokenResult(result)
+            return
+        }
+
+        var clientCleanupFailed = false
+        if wasCurrentClient, let revokedHost {
+            do {
+                try await connections.returnToEnrollment(revokedHost)
+            } catch {
+                clientCleanupFailed = true
+            }
+        }
+
+        guard isCurrentTokenOperation(
+            session: session,
+            adminOperation: adminOperation,
+            request: requestGeneration
+        ) else { return }
+
+        do {
+            let list = try await adminClient.tokens()
+            guard isCurrentTokenOperation(
+                session: session,
+                adminOperation: adminOperation,
+                request: requestGeneration
+            ) else { return }
+            tokens = list
+            tokensError = clientCleanupFailed ? Self.clientCleanupFailureMessage : nil
+        } catch is CancellationError {
+            guard clientCleanupFailed,
+                  isCurrentTokenOperation(
+                    session: session,
+                    adminOperation: adminOperation,
+                    request: requestGeneration
+                  )
+            else { return }
+            tokensError = Self.clientCleanupFailureMessage
+        } catch {
+            guard isCurrentTokenOperation(
+                session: session,
+                adminOperation: adminOperation,
+                request: requestGeneration
+            ) else { return }
+            if handleAdminFailure(error) {
+                try? await adminClient.clearAdministratorCredential()
+            } else if clientCleanupFailed {
+                tokensError = Self.clientCleanupFailureMessage
+            } else {
+                tokensError = "The token was revoked, but the updated client list could not be loaded."
+            }
+        }
     }
 
     func reloadPairingMode() async {
@@ -429,6 +484,20 @@ final class RouterAdministrationModel {
             break
         }
     }
+
+    private func isCurrentTokenOperation(
+        session: UInt64,
+        adminOperation: UInt64,
+        request: UInt64
+    ) -> Bool {
+        sessionGeneration == session
+            && adminOperationGeneration == adminOperation
+            && tokenRequestGeneration == request
+            && access == .unlocked
+    }
+
+    private static let clientCleanupFailureMessage =
+        "Token was revoked, but this device's local client credential could not be removed."
 
     private func performAdmin<Value>(
         _ operation: (RouterAdministrationClient) async throws -> Value,

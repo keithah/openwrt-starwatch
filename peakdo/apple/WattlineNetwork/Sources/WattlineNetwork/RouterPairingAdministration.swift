@@ -68,7 +68,9 @@ extension RouterAdministrationClient {
             throw RouterAdministrationError.protectedToken
         }
         struct Revoked: Decodable { let revoked: String }
-        let (data, _) = try await send("DELETE", "/api/v1/tokens/\(encoded)")
+        let (data, _) = try await sendDurableMutation(
+            "DELETE", "/api/v1/tokens/\(encoded)"
+        )
         guard let response = try? JSONDecoder().decode(Revoked.self, from: data),
               response.revoked == id
         else {

@@ -1,6 +1,38 @@
 import SwiftUI
 import WattlineNetwork
 
+struct RouterTokenRevocationConfirmation: Equatable {
+    let title: String
+    let actionTitle: String
+    let message: String
+}
+
+struct RouterTokenRowPresentation: Equatable {
+    let showsBootstrapBadge: Bool
+    let showsCurrentDeviceBadge: Bool
+    let showsRevokeAction: Bool
+    let confirmation: RouterTokenRevocationConfirmation?
+
+    init(token: RouterTokenMetadata, isCurrentClient: Bool) {
+        showsBootstrapBadge = token.bootstrap
+        showsCurrentDeviceBadge = !token.bootstrap && isCurrentClient
+        showsRevokeAction = !token.bootstrap
+        guard !token.bootstrap else {
+            confirmation = nil
+            return
+        }
+        confirmation = RouterTokenRevocationConfirmation(
+            title: isCurrentClient
+                ? "Revoke this device's token?"
+                : "Revoke \(token.label)?",
+            actionTitle: "Revoke \(token.label)",
+            message: isCurrentClient
+                ? "This is this device's own token. Live updates stop immediately and this router returns to setup."
+                : "Revocation is immediate and closes that client's live updates."
+        )
+    }
+}
+
 struct RouterTokensView: View {
     let model: RouterAdministrationModel
     @State private var tokenPendingRevocation: RouterTokenMetadata?
@@ -8,17 +40,18 @@ struct RouterTokensView: View {
     var body: some View {
         Group {
             ForEach(model.tokens) { token in
+                let presentation = presentation(for: token)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text(token.label)
-                        if token.bootstrap {
+                        if presentation.showsBootstrapBadge {
                             Text("Bootstrap")
                                 .font(.caption2)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(.quaternary, in: Capsule())
                         }
-                        if model.isCurrentClient(token) {
+                        if presentation.showsCurrentDeviceBadge {
                             Text("This device")
                                 .font(.caption2)
                                 .padding(.horizontal, 6)
@@ -34,7 +67,7 @@ struct RouterTokensView: View {
                         .foregroundStyle(.secondary)
                 }
                 .swipeActions {
-                    if !token.bootstrap {
+                    if presentation.showsRevokeAction {
                         Button("Revoke", role: .destructive) {
                             tokenPendingRevocation = token
                         }
@@ -47,22 +80,31 @@ struct RouterTokensView: View {
         }
         .task { await model.reloadTokens() }
         .confirmationDialog(
-            "Revoke this client?",
+            pendingPresentation?.confirmation?.title ?? "Revoke this client?",
             isPresented: Binding(
                 get: { tokenPendingRevocation != nil },
                 set: { if !$0 { tokenPendingRevocation = nil } }
             ),
             presenting: tokenPendingRevocation
         ) { token in
-            Button("Revoke \(token.label)", role: .destructive) {
-                Task { await model.revoke(token) }
+            if let confirmation = presentation(for: token).confirmation {
+                Button(confirmation.actionTitle, role: .destructive) {
+                    Task { await model.revoke(token) }
+                }
             }
         } message: { token in
-            if model.isCurrentClient(token) {
-                Text("This is this device's own token. Live updates stop immediately and this router returns to setup.")
-            } else {
-                Text("Revocation is immediate and closes that client's live updates.")
-            }
+            Text(presentation(for: token).confirmation?.message ?? "")
         }
+    }
+
+    private var pendingPresentation: RouterTokenRowPresentation? {
+        tokenPendingRevocation.map(presentation(for:))
+    }
+
+    private func presentation(for token: RouterTokenMetadata) -> RouterTokenRowPresentation {
+        RouterTokenRowPresentation(
+            token: token,
+            isCurrentClient: model.isCurrentClient(token)
+        )
     }
 }

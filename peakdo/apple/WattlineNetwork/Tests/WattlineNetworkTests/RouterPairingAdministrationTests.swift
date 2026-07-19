@@ -195,6 +195,42 @@ final class RouterPairingAdministrationTests: XCTestCase {
             XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
         }
     }
+
+    func testSuccessfulRevokeRemainsDurableWhenDetachedBeforeResponseDelivery() async throws {
+        let http = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(#"{"revoked":"durable-id"}"#)],
+            gateRequests: true
+        )
+        let client = try await makeAttachedClient(http: http)
+
+        let revoke = Task { try await client.revokeToken(id: "durable-id") }
+        await http.waitForGateRegistration()
+        await client.detach()
+        http.releaseGates()
+
+        let revokedID = try await revoke.value
+        XCTAssertEqual(revokedID, "durable-id")
+    }
+
+    func testStaleRevokeFailureIsCancellationBeforeAuthTranslation() async throws {
+        let http = ScriptedRouterHTTPClient(
+            results: [.failure(NetworkError.unauthorized)],
+            gateRequests: true
+        )
+        let client = try await makeAttachedClient(http: http)
+
+        let revoke = Task { try await client.revokeToken(id: "failed-id") }
+        await http.waitForGateRegistration()
+        await client.detach()
+        http.releaseGates()
+
+        do {
+            _ = try await revoke.value
+            XCTFail("expected stale revoke failure cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
 }
 
 private actor PairingCredentialBackend: RouterCredentialBackend {
