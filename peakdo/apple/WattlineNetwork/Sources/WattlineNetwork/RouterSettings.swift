@@ -36,7 +36,9 @@ public struct RouterMDNSSettings: Codable, Equatable, Sendable {
     }
 }
 
-public struct RouterSettings: Codable, Equatable, Sendable {
+public struct RouterSettings: Codable, Equatable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible
+{
     public let http: RouterListenerSettings
     public let https: RouterListenerSettings
     public let tls: RouterTLSSettings
@@ -56,6 +58,9 @@ public struct RouterSettings: Codable, Equatable, Sendable {
         case wanAccess = "wan_access"
         case blePIN = "ble_pin"
     }
+
+    public var description: String { "RouterSettings(blePIN: [REDACTED])" }
+    public var debugDescription: String { description }
 }
 
 public struct RouterListenerSettingsPatch: Encodable, Equatable, Sendable {
@@ -97,7 +102,9 @@ public struct RouterMDNSSettingsPatch: Encodable, Equatable, Sendable {
     }
 }
 
-public struct RouterSettingsPatch: Encodable, Equatable, Sendable {
+public struct RouterSettingsPatch: Encodable, Equatable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible
+{
     public let http: RouterListenerSettingsPatch?
     public let https: RouterListenerSettingsPatch?
     public let tls: RouterTLSSettingsPatch?
@@ -141,9 +148,14 @@ public struct RouterSettingsPatch: Encodable, Equatable, Sendable {
         case wanAccess = "wan_access"
         case blePIN = "ble_pin"
     }
+
+    public var description: String { "RouterSettingsPatch(blePIN: [REDACTED])" }
+    public var debugDescription: String { description }
 }
 
-public struct RouterSettingsUpdateResult: Equatable, Sendable, Decodable {
+public struct RouterSettingsUpdateResult: Equatable, Sendable, Decodable,
+    CustomStringConvertible, CustomDebugStringConvertible
+{
     public let settings: RouterSettings
     public let restartRequired: Bool
 
@@ -156,6 +168,12 @@ public struct RouterSettingsUpdateResult: Equatable, Sendable, Decodable {
     enum CodingKeys: String, CodingKey {
         case restartRequired = "restart_required"
     }
+
+    public var description: String {
+        "RouterSettingsUpdateResult(settings: [REDACTED], restartRequired: \(restartRequired))"
+    }
+
+    public var debugDescription: String { description }
 }
 
 extension RouterAdministrationClient {

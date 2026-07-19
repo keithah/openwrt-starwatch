@@ -58,6 +58,22 @@ final class RouterSettingsTests: XCTestCase {
         XCTAssertNil(tls["sha256"])
     }
 
+    func testPublicDescriptionsNeverExposeBLEPIN() throws {
+        let settings = try JSONDecoder().decode(
+            RouterSettings.self,
+            from: Data(completeSettingsJSON.utf8)
+        )
+        let patch = RouterSettingsPatch(blePIN: "020555")
+        let result = try JSONDecoder().decode(
+            RouterSettingsUpdateResult.self,
+            from: Data((completeSettingsJSON.dropLast() + ",\"restart_required\":false}").utf8)
+        )
+
+        assertDoesNotExposeBLEPIN(settings, named: "RouterSettings")
+        assertDoesNotExposeBLEPIN(patch, named: "RouterSettingsPatch")
+        assertDoesNotExposeBLEPIN(result, named: "RouterSettingsUpdateResult")
+    }
+
     func testPUTSendsExactSparseBodyAndDecodesCompleteMergedReadback() async throws {
         let response = completeSettingsJSON.dropLast() + ",\"restart_required\":true}"
         let (client, http) = try await attachedClient(results: [ScriptedRouterHTTPClient.ok(String(response))])
@@ -130,6 +146,11 @@ final class RouterSettingsTests: XCTestCase {
 
     private func object<T: Encodable>(_ value: T) throws -> [String: Any] {
         try XCTUnwrap(try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
+    }
+
+    private func assertDoesNotExposeBLEPIN<T>(_ value: T, named name: String) {
+        XCTAssertFalse(String(describing: value).contains("020555"), "\(name) description leaked BLE PIN")
+        XCTAssertFalse(String(reflecting: value).contains("020555"), "\(name) debug description leaked BLE PIN")
     }
 }
 
