@@ -86,6 +86,13 @@ final class RouterTLSPinningTests: XCTestCase {
         XCTAssertTrue(pinned.delegate is RouterTLSPinningDelegate)
         XCTAssertNoThrow(try HTTPClient(endpoint: pinnedHTTPS))
         XCTAssertNoThrow(try SSEClient(endpoint: pinnedHTTPS))
+
+        XCTAssertNoThrow(try RouterURLSessionFactory.makeMigration(endpoint: plainEndpoint))
+        XCTAssertThrowsError(try RouterURLSessionFactory.makeMigration(endpoint: unpinnedHTTPS)) {
+            XCTAssertEqual($0 as? RouterHostValidationError, .missingCertificateFingerprint)
+        }
+        let pinnedMigration = try RouterURLSessionFactory.makeMigration(endpoint: pinnedHTTPS)
+        XCTAssertTrue(pinnedMigration.delegate is RouterTLSPinningDelegate)
     }
 
     private func endpoint(scheme: String, fingerprint: String?) -> RouterEndpoint {

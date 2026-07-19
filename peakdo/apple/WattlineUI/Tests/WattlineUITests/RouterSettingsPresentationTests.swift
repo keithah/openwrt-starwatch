@@ -94,6 +94,34 @@ final class RouterSettingsPresentationTests: XCTestCase {
         XCTAssertTrue(valid.canSave)
     }
 
+    func testVerifiedReplacementMustSurviveAtItsExactPostEditPort() {
+        let original = fixture()
+        var draft = RouterSettingsDraft(original)
+        draft.https.enabled = false
+        draft.http.port = "9000"
+        let candidate = RouterReplacementCandidate(
+            scheme: "http",
+            host: "router.local",
+            port: 8377,
+            validation: .verified(deviceID: "DC:04:5A:EB:72:2B")
+        )
+
+        let decision = RouterSettingsSavePolicy.evaluate(
+            original: original,
+            draft: draft,
+            context: .init(
+                currentScheme: "https",
+                currentPort: 8378,
+                expectedDeviceID: "DC:04:5A:EB:72:2B",
+                replacement: candidate,
+                confirmations: [.listenerMigration]
+            )
+        )
+
+        XCTAssertEqual(decision.blocker, .validatedReplacementRequired)
+        XCTAssertFalse(decision.canSave)
+    }
+
     func testRiskyChangesRequirePurposeSpecificConfirmations() {
         var insecure = RouterSettingsDraft(fixture())
         insecure.wanAccess = true
@@ -130,6 +158,25 @@ final class RouterSettingsPresentationTests: XCTestCase {
             "closes existing managed live-update streams"
         ))
         XCTAssertFalse(RouterSettingsCopy.restartRequired.contains("Link-Power"))
+    }
+
+    func testEveryBLEPINContainingPresentationTypeRedactsDescriptionsAndReflection() throws {
+        let value = fixture()
+        let draft = RouterSettingsDraft(value)
+        var changedDraft = draft
+        changedDraft.blePIN = "123456"
+        let patch = try changedDraft.patch(from: value)
+
+        assertDoesNotExposeBLEPIN(value, secrets: ["020555"])
+        assertDoesNotExposeBLEPIN(draft, secrets: ["020555"])
+        assertDoesNotExposeBLEPIN(patch, secrets: ["123456"])
+    }
+
+    private func assertDoesNotExposeBLEPIN<T>(_ value: T, secrets: [String]) {
+        for secret in secrets {
+            XCTAssertFalse(String(describing: value).contains(secret))
+            XCTAssertFalse(String(reflecting: value).contains(secret))
+        }
     }
 }
 

@@ -22,6 +22,21 @@ public struct RouterEndpointMigrationValidator: Sendable {
         self.httpFactory = httpFactory
     }
 
+    public static func production(
+        credentials: RouterCredentialStore,
+        configuration: URLSessionConfiguration = .ephemeral
+    ) -> RouterEndpointMigrationValidator {
+        RouterEndpointMigrationValidator(credentials: credentials) { endpoint in
+            HTTPClient(
+                baseURL: try RouterURLSessionFactory.baseURL(for: endpoint),
+                session: try RouterURLSessionFactory.makeMigration(
+                    endpoint: endpoint,
+                    configuration: configuration
+                )
+            )
+        }
+    }
+
     public func validate(
         sourceEndpoint: RouterEndpoint,
         candidate: RouterEndpoint,

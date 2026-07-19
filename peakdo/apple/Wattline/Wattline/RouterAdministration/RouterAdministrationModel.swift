@@ -126,10 +126,7 @@ final class RouterAdministrationModel {
                     endpoint: endpoint
                 )
             },
-            endpointMigrationValidator: RouterEndpointMigrationValidator(
-                credentials: credentials,
-                httpFactory: httpFactory
-            )
+            endpointMigrationValidator: .production(credentials: credentials)
         )
     }
 

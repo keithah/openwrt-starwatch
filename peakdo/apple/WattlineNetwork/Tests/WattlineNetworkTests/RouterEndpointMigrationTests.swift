@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import XCTest
 @testable import WattlineNetwork
 
@@ -72,6 +73,147 @@ final class RouterEndpointMigrationTests: XCTestCase {
             )
         }
         XCTAssertEqual(harness.factory.endpoints, [harness.candidate])
+    }
+
+    func testProductionProbeRejectsRedirectBeforeCredentialCanReachAnotherEndpoint() async throws {
+        let target = try await LoopbackHTTPServer.start(response: .ok(
+            deviceJSON(id: "DC:04:5A:EB:72:2B")
+        ))
+        defer { target.stop() }
+        let redirect = try await LoopbackHTTPServer.start(response: .redirect(
+            "http://127.0.0.1:\(target.port)/api/v1/device"
+        ))
+        defer { redirect.stop() }
+        let endpoint = RouterEndpoint(
+            scheme: "http",
+            host: "127.0.0.1",
+            port: redirect.port,
+            certificateFingerprint: nil,
+            allowsInsecureWAN: false
+        )
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken("admin-token", for: endpoint, role: .administrator)
+        let configuration = URLSessionConfiguration.ephemeral
+        let validator = RouterEndpointMigrationValidator.production(
+            credentials: credentials,
+            configuration: configuration
+        )
+
+        await XCTAssertThrowsMigrationError(try await validator.validate(
+            sourceEndpoint: endpoint,
+            candidate: endpoint,
+            expectedDeviceID: "DC:04:5A:EB:72:2B"
+        )) { _ in }
+
+        XCTAssertEqual(redirect.requests.count, 1)
+        XCTAssertTrue(redirect.requests[0].contains("Authorization: Bearer admin-token"))
+        XCTAssertTrue(target.requests.isEmpty)
+        XCTAssertFalse(target.requests.contains { $0.contains("Bearer admin-token") })
+    }
+}
+
+private final class LoopbackHTTPServer: @unchecked Sendable {
+    enum Response {
+        case ok(String)
+        case redirect(String)
+
+        var wire: Data {
+            switch self {
+            case let .ok(body):
+                let data = Data(body.utf8)
+                return Data(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n".utf8
+                ) + data
+            case let .redirect(location):
+                return Data(
+                    "HTTP/1.1 302 Found\r\nLocation: \(location)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8
+                )
+            }
+        }
+    }
+
+    private let listener: NWListener
+    private let queue: DispatchQueue
+    private let response: Response
+    private let lock = NSLock()
+    private var recordedRequests: [String] = []
+
+    private init(listener: NWListener, response: Response) {
+        self.listener = listener
+        self.response = response
+        queue = DispatchQueue(label: "WattlineNetworkTests.LoopbackHTTPServer")
+    }
+
+    static func start(response: Response) async throws -> LoopbackHTTPServer {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let server = LoopbackHTTPServer(listener: listener, response: response)
+        try await server.start()
+        return server
+    }
+
+    var port: Int { Int(listener.port!.rawValue) }
+    var requests: [String] { lock.withLock { recordedRequests } }
+
+    func stop() { listener.cancel() }
+
+    private func start() async throws {
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection)
+        }
+        try await withCheckedThrowingContinuation { continuation in
+            let resumeFlag = ResumeFlag()
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready where resumeFlag.claim():
+                    continuation.resume()
+                case let .failed(error) where resumeFlag.claim():
+                    continuation.resume(throwing: error)
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    private func accept(_ connection: NWConnection) {
+        connection.start(queue: queue)
+        receive(from: connection, accumulated: Data())
+    }
+
+    private func receive(from connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) {
+            [weak self] data, _, isComplete, error in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            var request = accumulated
+            if let data { request.append(data) }
+            if request.range(of: Data("\r\n\r\n".utf8)) != nil || isComplete || error != nil {
+                lock.withLock {
+                    recordedRequests.append(String(decoding: request, as: UTF8.self))
+                }
+                connection.send(content: response.wire, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+            } else {
+                receive(from: connection, accumulated: request)
+            }
+        }
+    }
+}
+
+private final class ResumeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            guard !claimed else { return false }
+            claimed = true
+            return true
+        }
     }
 }
 

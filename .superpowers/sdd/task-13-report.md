@@ -102,3 +102,29 @@
 - Process-only TDD concern: the no-fallback, no-optimistic-publication, and stale-save tests passed on their first focused run rather than producing independent RED failures. They are non-vacuous and remain in the permanent suites, but they did not each require a new production delta.
 - Xcode emits the environment's existing `DVTDeviceOperation` / empty supported-platform diagnostic while resolving the simulator destination; both focused tests and the generic simulator build exit successfully.
 - No known product defect remains from self-review.
+
+## Post-review corrective pass
+
+Commit: `fix: harden router settings migration` (this corrective commit)
+
+Three Important review findings were fixed test-first:
+
+1. **Replacement listener survival**
+   - RED `/tmp/wattline-task13-review-survival-red.log`: a verified HTTP candidate at port 8377 was accepted even though the post-edit HTTP listener moved to port 9000 (`blocker` was `nil`, `canSave` was true).
+   - GREEN `/tmp/wattline-task13-review-survival-green.log`: 8/8 focused presentation tests passed after correlation began requiring the candidate scheme to remain enabled at the candidate's exact port.
+2. **Redirect credential containment**
+   - RED `/tmp/wattline-task13-review-redirect-red.log`: the real URLSession/HTTPClient seam followed a 302 from one loopback listener to another; validation succeeded and the target received a second request.
+   - GREEN `/tmp/wattline-task13-review-redirect-green.log`: the migration production factory rejected the redirect before follow; 1/1 transport regression passed.
+   - The final assertion also proves the selected source received `Authorization: Bearer admin-token`, while the redirect target received no request and therefore no credential (`/tmp/wattline-task13-review-redirect-credential-green.log`).
+   - `RouterURLSessionFactory.makeMigration` uses redirect rejection for HTTP and composes it into the existing HTTPS pinning delegate. The ordinary session factory retains its prior behavior; focused migration and TLS suites passed 4/4 each (`/tmp/wattline-task13-review-network-focused.log`, `/tmp/wattline-task13-review-tls-focused.log`).
+3. **UI-local BLE PIN redaction**
+   - RED `/tmp/wattline-task13-review-redaction-red.log`: six failures showed `String(describing:)` and `String(reflecting:)` exposed the PIN from settings value, draft, and patch types.
+   - GREEN `/tmp/wattline-task13-review-redaction-green.log`: 9/9 focused presentation tests passed after explicit redacted descriptions, debug descriptions, and custom mirrors were added without changing synthesized equality or patch behavior.
+
+Corrective verification:
+
+- Full WattlineUI: 42 tests, 0 failures (`/tmp/wattline-task13-review-ui-final.log`).
+- Full WattlineNetwork: 159 tests, 0 failures (`/tmp/wattline-task13-review-network-final.log`).
+- Focused iOS `RouterAdministrationModelTests`: 75 tests passed (`/tmp/wattline-task13-review-app-final.log`).
+- Generic iOS simulator build: exit 0 (`/tmp/wattline-task13-review-build-final.log`).
+- `git diff --check`: exit 0.

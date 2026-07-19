@@ -36,6 +36,29 @@ public enum RouterURLSessionFactory {
         endpoint: RouterEndpoint,
         configuration: URLSessionConfiguration = .ephemeral
     ) throws -> URLSession {
+        try make(
+            endpoint: endpoint,
+            configuration: configuration,
+            rejectsRedirects: false
+        )
+    }
+
+    public static func makeMigration(
+        endpoint: RouterEndpoint,
+        configuration: URLSessionConfiguration = .ephemeral
+    ) throws -> URLSession {
+        try make(
+            endpoint: endpoint,
+            configuration: configuration,
+            rejectsRedirects: true
+        )
+    }
+
+    private static func make(
+        endpoint: RouterEndpoint,
+        configuration: URLSessionConfiguration,
+        rejectsRedirects: Bool
+    ) throws -> URLSession {
         if endpoint.scheme.caseInsensitiveCompare("https") == .orderedSame {
             guard let expectedFingerprint = endpoint.certificateFingerprint else {
                 throw RouterHostValidationError.missingCertificateFingerprint
@@ -43,23 +66,51 @@ public enum RouterURLSessionFactory {
 #if canImport(Security) && !canImport(FoundationNetworking)
             return URLSession(
                 configuration: configuration,
-                delegate: RouterTLSPinningDelegate(expectedFingerprint: expectedFingerprint),
+                delegate: RouterTLSPinningDelegate(
+                    expectedFingerprint: expectedFingerprint,
+                    rejectsRedirects: rejectsRedirects
+                ),
                 delegateQueue: nil
             )
 #else
             throw NetworkError.unsupported("HTTPS certificate pinning is unavailable on this platform")
 #endif
         }
+        if rejectsRedirects {
+            return URLSession(
+                configuration: configuration,
+                delegate: RouterRedirectRejectingDelegate(),
+                delegateQueue: nil
+            )
+        }
         return URLSession(configuration: configuration)
     }
 }
 
-#if canImport(Security) && !canImport(FoundationNetworking)
-final class RouterTLSPinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    private let expectedFingerprint: String
+private final class RouterRedirectRejectingDelegate: NSObject, URLSessionTaskDelegate,
+    @unchecked Sendable
+{
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
 
-    init(expectedFingerprint: String) {
+#if canImport(Security) && !canImport(FoundationNetworking)
+final class RouterTLSPinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate,
+    @unchecked Sendable
+{
+    private let expectedFingerprint: String
+    private let rejectsRedirects: Bool
+
+    init(expectedFingerprint: String, rejectsRedirects: Bool = false) {
         self.expectedFingerprint = expectedFingerprint
+        self.rejectsRedirects = rejectsRedirects
     }
 
     func urlSession(
@@ -87,6 +138,16 @@ final class RouterTLSPinningDelegate: NSObject, URLSessionDelegate, @unchecked S
             return
         }
         completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(rejectsRedirects ? nil : request)
     }
 }
 #endif

@@ -36,7 +36,9 @@ public struct RouterMDNSSettingsValue: Equatable, Sendable {
     }
 }
 
-public struct RouterSettingsValue: Equatable, Sendable {
+public struct RouterSettingsValue: Equatable, Sendable, CustomStringConvertible,
+    CustomDebugStringConvertible, CustomReflectable
+{
     public var http: RouterListenerSettingsValue
     public var https: RouterListenerSettingsValue
     public var tls: RouterTLSSettingsValue
@@ -71,6 +73,12 @@ public struct RouterSettingsValue: Equatable, Sendable {
         self.wanAccess = wanAccess
         self.blePIN = blePIN
     }
+
+    public var description: String { "RouterSettingsValue(blePIN: [REDACTED])" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["blePIN": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public struct RouterListenerDraft: Equatable, Sendable {
@@ -90,7 +98,9 @@ public struct RouterMDNSDraft: Equatable, Sendable {
     public var interfaces: [String]
 }
 
-public struct RouterSettingsDraft: Equatable, Sendable {
+public struct RouterSettingsDraft: Equatable, Sendable, CustomStringConvertible,
+    CustomDebugStringConvertible, CustomReflectable
+{
     public var http: RouterListenerDraft
     public var https: RouterListenerDraft
     public var tls: RouterTLSDraft
@@ -123,6 +133,12 @@ public struct RouterSettingsDraft: Equatable, Sendable {
         mdns = RouterMDNSDraft(enabled: value.mdns.enabled, interfaces: value.mdns.interfaces)
         wanAccess = value.wanAccess
         blePIN = value.blePIN
+    }
+
+    public var description: String { "RouterSettingsDraft(blePIN: [REDACTED])" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["blePIN": "[REDACTED]"], displayStyle: .struct)
     }
 
     public func patch(from original: RouterSettingsValue) throws -> RouterSettingsDraftPatch {
@@ -260,7 +276,7 @@ public enum RouterSettingsSavePolicy {
         let currentRemains = context.currentScheme.lowercased() == "https"
             ? draft.https.enabled && Int(draft.https.port) == context.currentPort
             : draft.http.enabled && Int(draft.http.port) == context.currentPort
-        if !currentRemains && !replacementIsCorrelated(context) {
+        if !currentRemains && !replacementIsCorrelated(context, draft: draft) {
             return RouterSettingsSaveDecision(
                 patch: patch,
                 blocker: .validatedReplacementRequired,
@@ -287,14 +303,20 @@ public enum RouterSettingsSavePolicy {
         )
     }
 
-    private static func replacementIsCorrelated(_ context: RouterSettingsSaveContext) -> Bool {
+    private static func replacementIsCorrelated(
+        _ context: RouterSettingsSaveContext,
+        draft: RouterSettingsDraft
+    ) -> Bool {
         guard let expected = normalizedMAC(context.expectedDeviceID),
               let candidate = context.replacement,
               (1...65_535).contains(candidate.port),
               candidate.scheme == "http" || candidate.scheme == "https",
               case let .verified(deviceID) = candidate.validation
         else { return false }
-        return normalizedMAC(deviceID) == expected
+        let listenerSurvives = candidate.scheme == "https"
+            ? draft.https.enabled && Int(draft.https.port) == candidate.port
+            : draft.http.enabled && Int(draft.http.port) == candidate.port
+        return listenerSurvives && normalizedMAC(deviceID) == expected
     }
 
     private static func normalizedMAC(_ value: String?) -> String? {
@@ -314,7 +336,9 @@ public enum RouterSettingsCopy {
         "Changing token storage closes existing managed live-update streams; Wattline does not migrate tokens between stores."
 }
 
-public struct RouterSettingsDraftPatch: Equatable, Sendable {
+public struct RouterSettingsDraftPatch: Equatable, Sendable, CustomStringConvertible,
+    CustomDebugStringConvertible, CustomReflectable
+{
     public var http: RouterListenerDraftPatch?
     public var https: RouterListenerDraftPatch?
     public var tls: RouterTLSDraftPatch?
@@ -354,6 +378,12 @@ public struct RouterSettingsDraftPatch: Equatable, Sendable {
         http == nil && https == nil && tls == nil && tokenStore == nil && pairingTTL == nil
             && pairingAlwaysOn == nil && advanced == nil && mdns == nil
             && wanAccess == nil && blePIN == nil
+    }
+
+    public var description: String { "RouterSettingsDraftPatch(blePIN: [REDACTED])" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["blePIN": "[REDACTED]"], displayStyle: .struct)
     }
 }
 
