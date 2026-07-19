@@ -186,7 +186,8 @@ final class RouterConnectionModel {
             reachability: reachability,
             allowsInsecureWAN: allowsInsecureWAN,
             deviceID: result.deviceID,
-            certificateFingerprint: result.endpoint.certificateFingerprint
+            certificateFingerprint: result.endpoint.certificateFingerprint,
+            tokenID: result.tokenID
         )
         return try await persist(host: host, token: result.token)
     }
@@ -217,6 +218,12 @@ final class RouterConnectionModel {
         try await credentialStore.deleteToken(for: host.endpoint)
         try await hostStore.remove(id: host.id)
         await reloadSavedHosts()
+    }
+
+    /// After this endpoint's managed token is revoked, remove only the client
+    /// credential. The saved host and administrator credential remain intact.
+    func returnToEnrollment(_ host: RouterHostMetadata) async throws {
+        try await credentialStore.deleteToken(for: host.endpoint, role: .client)
     }
 
     func makeTransport(for host: RouterHostMetadata) throws -> any DeviceTransport {
@@ -254,7 +261,8 @@ final class RouterConnectionModel {
             reachability: reachability,
             allowsInsecureWAN: allowsInsecureWAN,
             deviceID: result.deviceID,
-            certificateFingerprint: result.endpoint.certificateFingerprint
+            certificateFingerprint: result.endpoint.certificateFingerprint,
+            tokenID: result.tokenID
         )
     }
 

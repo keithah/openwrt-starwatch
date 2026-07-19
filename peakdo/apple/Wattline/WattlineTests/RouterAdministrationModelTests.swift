@@ -1139,6 +1139,236 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(sleeper.cancellationCount, 2)
         XCTAssertNil(fixture.model.pairingStatus)
     }
+
+    func testRevokingCurrentClientDeletesOnlyClientCredentialPreservesHostAndRelists() async throws {
+        let listBefore = #"[{"id":"7dd64d22b0c14e7b","label":"This iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(listBefore),
+                AdminScriptedHTTP.ok(#"{"revoked":"7dd64d22b0c14e7b"}"#),
+                AdminScriptedHTTP.ok("[]"),
+            ],
+            hostTokenID: "7dd64d22b0c14e7b"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        XCTAssertEqual(fixture.model.tokens.count, 1)
+        XCTAssertTrue(fixture.model.isCurrentClient(fixture.model.tokens[0]))
+
+        await fixture.model.revoke(fixture.model.tokens[0])
+
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(
+            fixture.http.calls.map { "\($0.method) \($0.path)" },
+            [
+                "GET /api/v1/settings",
+                "GET /api/v1/tokens",
+                "DELETE /api/v1/tokens/7dd64d22b0c14e7b",
+                "GET /api/v1/tokens",
+            ]
+        )
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        XCTAssertNil(client)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(admin, "boot-admin")
+        XCTAssertEqual(fixture.connections.savedHosts, [fixture.host])
+        XCTAssertEqual(fixture.model.host, fixture.host)
+    }
+
+    func testRevokingAnotherClientPreservesThisEndpointsCredential() async throws {
+        let list = #"[{"id":"other-token-id","label":"Other phone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(list),
+                AdminScriptedHTTP.ok(#"{"revoked":"other-token-id"}"#),
+                AdminScriptedHTTP.ok("[]"),
+            ],
+            hostTokenID: "7dd64d22b0c14e7b"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        XCTAssertFalse(fixture.model.isCurrentClient(fixture.model.tokens[0]))
+
+        await fixture.model.revoke(fixture.model.tokens[0])
+
+        let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
+        XCTAssertEqual(client, "wlt_client")
+    }
+
+    func testBootstrapRowIsNeverRevocableFromTheModel() async throws {
+        let list = #"[{"id":"bootstrap","label":"Bootstrap administrator","created_at":"2026-07-17T19:00:00Z","last_seen_at":null,"bootstrap":true}]"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(list),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+
+        await fixture.model.revoke(fixture.model.tokens[0])
+
+        XCTAssertEqual(fixture.http.calls.map(\.method), ["GET", "GET"])
+        XCTAssertEqual(fixture.model.tokens.count, 1)
+    }
+
+    func testNewerTokenListWinsOverOlderSameSessionList() async throws {
+        let older = #"[{"id":"older","label":"Older","created_at":"2026-07-17T19:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let newer = #"[{"id":"newer","label":"Newer","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(older),
+            AdminScriptedHTTP.ok(newer),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let olderReload = Task { await fixture.model.reloadTokens() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.reloadTokens()
+        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+
+        fixture.http.releaseGates()
+        await olderReload.value
+
+        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+        XCTAssertNil(fixture.model.tokensError)
+    }
+
+    func testNewerTokenListWinsOverOlderSameSessionError() async throws {
+        let newer = #"[{"id":"newer","label":"Newer","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            .failure(NetworkError.timeout),
+            AdminScriptedHTTP.ok(newer),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let olderReload = Task { await fixture.model.reloadTokens() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.reloadTokens()
+        fixture.http.releaseGates()
+        await olderReload.value
+
+        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+        XCTAssertNil(fixture.model.tokensError)
+    }
+
+    func testOlderRevokeRelistCannotOverwriteNewerTokenReload() async throws {
+        let initial = #"[{"id":"other-token-id","label":"Other","created_at":"2026-07-17T19:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let newer = #"[{"id":"newer","label":"Newer","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let staleRelist = #"[{"id":"stale","label":"Stale","created_at":"2026-07-17T18:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(initial),
+            AdminScriptedHTTP.ok(#"{"revoked":"other-token-id"}"#),
+            AdminScriptedHTTP.ok(newer),
+            AdminScriptedHTTP.ok(staleRelist),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        let token = try XCTUnwrap(fixture.model.tokens.first)
+        fixture.http.gateNextRequest()
+
+        let revoke = Task { await fixture.model.revoke(token) }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.reloadTokens()
+        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+
+        fixture.http.releaseGates()
+        await revoke.value
+
+        XCTAssertEqual(fixture.model.tokens.map(\.id), ["newer"])
+        XCTAssertNil(fixture.model.tokensError)
+    }
+
+    func testStaleTokenAuthFailureAfterReunlockCannotRelockOrDeleteNewAdmin() async throws {
+        let current = #"[{"id":"current","label":"Current","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            .failure(NetworkError.unauthorized),
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(current),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        fixture.http.gateNextRequest()
+
+        let staleReload = Task { await fixture.model.reloadTokens() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.lock()
+        await fixture.model.unlock(token: "new-admin")
+        await fixture.model.reloadTokens()
+        fixture.http.releaseGates()
+        await staleReload.value
+
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertEqual(fixture.model.tokens.map(\.id), ["current"])
+        XCTAssertNil(fixture.model.adminError)
+        let admin = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint, role: .administrator
+        )
+        XCTAssertEqual(admin, "new-admin")
+    }
+
+    func testTokenSectionsAreStructurallyAbsentWhileLocked() async throws {
+        let fixture = try await makeFixture(results: [AdminScriptedHTTP.ok("{}")])
+        await fixture.model.begin(host: fixture.host)
+
+        XCTAssertFalse(
+            RouterAdministrationPresentation(access: fixture.model.access)
+                .visibleSections.contains(.apiClients)
+        )
+
+        await fixture.model.unlock(token: "boot-admin")
+
+        XCTAssertTrue(
+            RouterAdministrationPresentation(access: fixture.model.access)
+                .visibleSections.contains(.apiClients)
+        )
+    }
+
+    func testEnrollmentPersistsTokenMetadataIDWithoutPersistingSecretInHostMetadata() async throws {
+        let secret = "wlt_persistence-audit-secret"
+        let body = #"{"token":"\#(secret)","token_metadata":{"id":"7dd64d22b0c14e7b"},"device_id":"DC:04:5A:EB:72:2B","base_urls":{"http":"http://wattline.lan:8377/api/v1"},"tls_sha256":"","magic_dns_name":""}"#
+        let enrollmentHTTP = AdministrationEnrollmentHTTP(responseBody: body)
+        let hostBackend = AdministrationHostBackend()
+        let hostStore = RouterHostStore(backend: hostBackend)
+        let credentials = RouterCredentialStore(backend: AdministrationMemoryBackend())
+        let connections = RouterConnectionModel(
+            hostStore: hostStore,
+            credentialStore: credentials,
+            enrollmentClientFactory: { _ in RouterEnrollmentClient(httpClient: enrollmentHTTP) },
+            transportFactory: { _, _ in throw NetworkError.unsupported("unused") }
+        )
+        let payload = try RouterPairingPayload.parse(URL(string:
+            "wattline://pair?v=1&id=DC045AEB722B&host=wattline.lan&http=8377&pin=123456"
+        )!)
+
+        let host = try await connections.enroll(
+            payload: payload,
+            displayName: "Garage router",
+            reachability: .lan,
+            label: "This iPhone"
+        )
+
+        XCTAssertEqual(host.tokenID, "7dd64d22b0c14e7b")
+        XCTAssertEqual(connections.savedHosts.first?.tokenID, "7dd64d22b0c14e7b")
+        let persisted = try XCTUnwrap(hostBackend.data(forKey: RouterHostStore.defaultKey))
+        XCTAssertFalse(String(decoding: persisted, as: UTF8.self).contains(secret))
+        let storedSecret = try await credentials.readToken(for: host.endpoint)
+        XCTAssertEqual(storedSecret, secret)
+    }
 }
 
 private final class PairingExpirySleepFixture: @unchecked Sendable {
@@ -1232,6 +1462,7 @@ private func makeFixture(
     gateRequests: Bool = false,
     historyGateRequests: Bool = false,
     historyGatedCallNumbers: Set<Int> = [],
+    hostTokenID: String? = nil,
     credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend()
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
@@ -1240,11 +1471,14 @@ private func makeFixture(
         reachability: .lan,
         allowsInsecureWAN: false,
         deviceID: "DC:04:5A:EB:72:2B",
-        certificateFingerprint: String(repeating: "0", count: 64)
+        certificateFingerprint: String(repeating: "0", count: 64),
+        tokenID: hostTokenID
     )
     let credentialStore = RouterCredentialStore(backend: credentialBackend)
+    let hostStore = RouterHostStore(backend: AdministrationHostBackend())
+    try await hostStore.save(host)
     let connections = RouterConnectionModel(
-        hostStore: RouterHostStore(backend: AdministrationHostBackend()),
+        hostStore: hostStore,
         credentialStore: credentialStore,
         enrollmentClientFactory: { _ in
             RouterEnrollmentClient(httpClient: AdministrationNoopEnrollmentHTTP())
@@ -1283,6 +1517,7 @@ private func makeFixture(
         )
     }
     try await credentialStore.saveToken("wlt_client", for: host.endpoint)
+    await connections.reloadSavedHosts()
     return AdministrationFixture(
         model: model,
         connections: connections,
@@ -1555,5 +1790,29 @@ private struct AdministrationNoopEnrollmentHTTP: RouterEnrollmentHTTPClient {
         body: Data?
     ) async throws -> (Data, HTTPURLResponse) {
         throw NetworkError.unsupported("unused")
+    }
+}
+
+private actor AdministrationEnrollmentHTTP: RouterEnrollmentHTTPClient {
+    let responseBody: String
+
+    init(responseBody: String) {
+        self.responseBody = responseBody
+    }
+
+    func publicRequest(
+        _ method: String,
+        _ path: String,
+        body: Data?
+    ) async throws -> (Data, HTTPURLResponse) {
+        (
+            Data(responseBody.utf8),
+            HTTPURLResponse(
+                url: URL(string: "http://router.local\(path)")!,
+                statusCode: 201,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+        )
     }
 }

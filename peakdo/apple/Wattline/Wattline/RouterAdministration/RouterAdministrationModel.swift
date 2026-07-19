@@ -45,6 +45,8 @@ final class RouterAdministrationModel {
     private(set) var pairingError: String?
     private(set) var pairingDisplayState: PairingDisplayState = .unknown
     private(set) var isPairingQRLoading = false
+    private(set) var tokens: [RouterTokenMetadata] = []
+    private(set) var tokensError: String?
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
@@ -57,6 +59,7 @@ final class RouterAdministrationModel {
     private var pairingSecretGeneration: UInt64 = 0
     private var pairingStatusRequestGeneration: UInt64 = 0
     private var pairingQRRequestGeneration: UInt64 = 0
+    private var tokenRequestGeneration: UInt64 = 0
     private var pairingExpiryTask: Task<Void, Never>?
 
     init(
@@ -123,6 +126,9 @@ final class RouterAdministrationModel {
         historyFetchedAt = nil
         historyError = nil
         historyLoadState = .neverLoaded
+        tokenRequestGeneration &+= 1
+        tokens = []
+        tokensError = nil
         do {
             try await adminClient.attach(endpoint: host.endpoint)
         } catch {
@@ -161,6 +167,9 @@ final class RouterAdministrationModel {
         historyFetchedAt = nil
         historyError = nil
         historyLoadState = .neverLoaded
+        tokenRequestGeneration &+= 1
+        tokens = []
+        tokensError = nil
         clearPairingSecrets()
         pairingError = nil
         await adminClient.detach()
@@ -229,6 +238,46 @@ final class RouterAdministrationModel {
         adminError = nil
         clearPairingSecrets()
         try? await adminClient.clearAdministratorCredential()
+    }
+
+    func reloadTokens() async {
+        guard host != nil, access == .unlocked else { return }
+        tokenRequestGeneration &+= 1
+        let requestGeneration = tokenRequestGeneration
+        tokensError = nil
+        let result = await performAdmin({ client in
+            try await client.tokens()
+        }, isCurrent: { [weak self] in
+            self?.tokenRequestGeneration == requestGeneration
+        })
+        guard tokenRequestGeneration == requestGeneration else { return }
+        publishTokenResult(result)
+    }
+
+    func isCurrentClient(_ token: RouterTokenMetadata) -> Bool {
+        guard let currentID = host?.tokenID else { return false }
+        return currentID == token.id
+    }
+
+    func revoke(_ token: RouterTokenMetadata) async {
+        guard !token.bootstrap, host != nil, access == .unlocked else { return }
+        let wasCurrentClient = isCurrentClient(token)
+        let revokedHost = host
+        let connections = self.connections
+        tokenRequestGeneration &+= 1
+        let requestGeneration = tokenRequestGeneration
+        tokensError = nil
+        let result = await performAdmin({ client in
+            try await client.revokeToken(id: token.id)
+            if wasCurrentClient, let revokedHost {
+                try? await connections.returnToEnrollment(revokedHost)
+            }
+            return try await client.tokens()
+        }, isCurrent: { [weak self] in
+            self?.tokenRequestGeneration == requestGeneration
+        })
+        guard tokenRequestGeneration == requestGeneration else { return }
+        publishTokenResult(result)
     }
 
     func reloadPairingMode() async {
@@ -369,6 +418,18 @@ final class RouterAdministrationModel {
         case stale
     }
 
+    private func publishTokenResult(_ result: AdminResult<[RouterTokenMetadata]>) {
+        switch result {
+        case let .success(list):
+            tokens = list
+            tokensError = nil
+        case let .failure(message):
+            tokensError = message
+        case .stale:
+            break
+        }
+    }
+
     private func performAdmin<Value>(
         _ operation: (RouterAdministrationClient) async throws -> Value,
         isCurrent: () -> Bool = { true }
@@ -465,6 +526,7 @@ final class RouterAdministrationModel {
 struct RouterAdministrationPresentation: Equatable {
     enum Section: Equatable {
         case clientEnrollment
+        case apiClients
     }
 
     let showsHistory: Bool
@@ -478,6 +540,6 @@ struct RouterAdministrationPresentation: Equatable {
         showsClientSections = true
         showsAdministratorSections = access == .unlocked
         showsUnlockField = access != .unlocked
-        visibleSections = access == .unlocked ? [.clientEnrollment] : []
+        visibleSections = access == .unlocked ? [.clientEnrollment, .apiClients] : []
     }
 }

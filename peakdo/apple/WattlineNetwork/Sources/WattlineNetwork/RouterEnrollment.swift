@@ -25,6 +25,7 @@ public struct RouterEnrollmentResult: Sendable,
     public let deviceID: String
     public let endpoint: RouterEndpoint
     public let magicDNSName: String?
+    public let tokenID: String?
 
     public var description: String {
         "RouterEnrollmentResult(deviceID: \(deviceID), endpoint: \(endpoint), token: [REDACTED])"
@@ -44,7 +45,11 @@ public struct RouterEnrollmentClient: Sendable {
             let https: String?
             let http: String?
         }
+        struct TokenMetadata: Decodable {
+            let id: String
+        }
         let token: String
+        let tokenMetadata: TokenMetadata?
         let deviceID: String
         let baseURLs: BaseURLs
         let tlsSHA256: String
@@ -52,6 +57,7 @@ public struct RouterEnrollmentClient: Sendable {
 
         private enum CodingKeys: String, CodingKey {
             case token
+            case tokenMetadata = "token_metadata"
             case deviceID = "device_id"
             case baseURLs = "base_urls"
             case tlsSHA256 = "tls_sha256"
@@ -132,7 +138,8 @@ public struct RouterEnrollmentClient: Sendable {
             token: decoded.token,
             deviceID: actualID,
             endpoint: endpoint,
-            magicDNSName: decoded.magicDNSName.isEmpty ? nil : decoded.magicDNSName
+            magicDNSName: decoded.magicDNSName.isEmpty ? nil : decoded.magicDNSName,
+            tokenID: decoded.tokenMetadata?.id
         )
     }
 

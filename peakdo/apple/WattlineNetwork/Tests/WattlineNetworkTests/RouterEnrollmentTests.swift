@@ -73,8 +73,42 @@ final class RouterEnrollmentClientTests: XCTestCase {
         XCTAssertEqual(result.endpoint.scheme, "https")
         XCTAssertEqual(result.endpoint.certificateFingerprint, fingerprint)
         XCTAssertEqual(result.token, "wlt_secret-token")
+        XCTAssertEqual(result.tokenID, "7dd64d22b0c14e7b")
         XCTAssertFalse(String(describing: result).contains("wlt_secret-token"))
+        XCTAssertFalse(String(describing: result).contains("7dd64d22b0c14e7b"))
         XCTAssertFalse(String(describing: result).contains("123456"))
+    }
+
+    func testEnrollmentCapturesTokenMetadataIDAdditively() async throws {
+        let body = #"""
+        {"token":"wlt_7dd64d22b0c14e7bb86af967b63835f9f971b4234e83277b646d58e184a44af5","token_metadata":{"id":"7dd64d22b0c14e7b","label":"Keith's iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false},"device_id":"DC:04:5A:EB:72:2B","base_urls":{"http":"http://wattline.lan:8377/api/v1"},"tls_sha256":"","magic_dns_name":""}
+        """#
+        let server = EnrollmentHTTPRecorder(response: .init(status: 201, body: body))
+
+        let result = try await RouterEnrollmentClient(httpClient: server).enroll(
+            pin: "123456",
+            label: "Keith's iPhone",
+            expectedDeviceID: deviceID,
+            expectedFingerprint: nil
+        )
+
+        XCTAssertEqual(result.tokenID, "7dd64d22b0c14e7b")
+        XCTAssertFalse(String(describing: result).contains("wlt_7dd64d22"))
+        XCTAssertFalse(String(describing: result).contains("7dd64d22b0c14e7b"))
+    }
+
+    func testLegacyHostMetadataWithoutTokenIDStillDecodes() throws {
+        let legacy = #"""
+        [{"id":"11111111-2222-3333-4444-555555555555","displayName":"Old router","scheme":"http","host":"router.lan","port":8377,"reachability":"lan","allowsInsecureWAN":false,"deviceID":"DC045AEB722B","certificateFingerprint":null}]
+        """#
+
+        let hosts = try JSONDecoder().decode(
+            [RouterHostMetadata].self,
+            from: Data(legacy.utf8)
+        )
+
+        XCTAssertEqual(hosts.count, 1)
+        XCTAssertNil(hosts[0].tokenID)
     }
 
     func testEnrollmentRejectsMismatchAndInvalidPINWithoutReturningSecret() async throws {

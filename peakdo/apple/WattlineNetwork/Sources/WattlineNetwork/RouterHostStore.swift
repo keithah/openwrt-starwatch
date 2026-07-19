@@ -27,6 +27,7 @@ public struct RouterHostMetadata: Codable, Equatable, Sendable, Identifiable {
     public let allowsInsecureWAN: Bool
     public let deviceID: String?
     public let certificateFingerprint: String?
+    public let tokenID: String?
 
     public var endpoint: RouterEndpoint {
         RouterEndpoint(
@@ -46,7 +47,8 @@ public enum RouterHostValidator {
         reachability: RouterHostReachability,
         allowsInsecureWAN: Bool,
         deviceID: String?,
-        certificateFingerprint: String?
+        certificateFingerprint: String?,
+        tokenID: String? = nil
     ) throws -> RouterHostMetadata {
         let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw RouterHostValidationError.invalidAddress }
@@ -104,7 +106,8 @@ public enum RouterHostValidator {
             reachability: reachability,
             allowsInsecureWAN: reachability == .wan && scheme == "http" && allowsInsecureWAN,
             deviceID: normalizedDeviceID,
-            certificateFingerprint: normalizedFingerprint
+            certificateFingerprint: normalizedFingerprint,
+            tokenID: tokenID
         )
     }
 

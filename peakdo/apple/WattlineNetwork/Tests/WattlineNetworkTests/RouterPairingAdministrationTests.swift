@@ -138,6 +138,63 @@ final class RouterPairingAdministrationTests: XCTestCase {
             XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
         }
     }
+
+    func testTokenListDecodesMetadataOnly() async throws {
+        let body = #"""
+        [{"id":"bootstrap","label":"Bootstrap administrator","created_at":"2026-07-17T19:00:00Z","last_seen_at":"2026-07-17T20:00:00Z","bootstrap":true,"token":"must-not-be-captured"},
+         {"id":"7dd64d22b0c14e7b","label":"Keith's iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]
+        """#
+        let http = ScriptedRouterHTTPClient(results: [ScriptedRouterHTTPClient.ok(body)])
+        let client = try await makeAttachedClient(http: http)
+
+        let tokens = try await client.tokens()
+
+        XCTAssertEqual(http.calls, [.init(
+            method: "GET", path: "/api/v1/tokens", body: nil, token: "boot-admin"
+        )])
+        XCTAssertEqual(tokens.count, 2)
+        XCTAssertTrue(tokens[0].bootstrap)
+        XCTAssertNotNil(tokens[0].lastSeenAt)
+        XCTAssertEqual(tokens[1].id, "7dd64d22b0c14e7b")
+        XCTAssertNil(tokens[1].lastSeenAt)
+        XCTAssertFalse(tokens[1].bootstrap)
+        XCTAssertFalse(Mirror(reflecting: tokens[0]).children.contains { $0.label == "token" })
+        XCTAssertFalse(String(describing: tokens[0]).contains("must-not-be-captured"))
+    }
+
+    func testRevokeRejectsProtectedIDsLocallyEncodesPathAndVerifiesResponse() async throws {
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(#"{"revoked":"7dd64d22b0c14e7b"}"#),
+            ScriptedRouterHTTPClient.ok(#"{"revoked":"a b/c"}"#),
+            ScriptedRouterHTTPClient.ok(#"{"revoked":"mismatch"}"#),
+        ])
+        let client = try await makeAttachedClient(http: http)
+
+        for protected in ["", "bootstrap"] {
+            do {
+                _ = try await client.revokeToken(id: protected)
+                XCTFail("expected local rejection for \(protected)")
+            } catch {
+                XCTAssertEqual(error as? RouterAdministrationError, .protectedToken)
+            }
+        }
+        XCTAssertTrue(http.calls.isEmpty)
+
+        let revoked = try await client.revokeToken(id: "7dd64d22b0c14e7b")
+        XCTAssertEqual(revoked, "7dd64d22b0c14e7b")
+        XCTAssertEqual(http.calls[0].method, "DELETE")
+        XCTAssertEqual(http.calls[0].path, "/api/v1/tokens/7dd64d22b0c14e7b")
+
+        _ = try await client.revokeToken(id: "a b/c")
+        XCTAssertEqual(http.calls[1].path, "/api/v1/tokens/a%20b%2Fc")
+
+        do {
+            _ = try await client.revokeToken(id: "expected")
+            XCTFail("expected revoked-ID mismatch rejection")
+        } catch {
+            XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+        }
+    }
 }
 
 private actor PairingCredentialBackend: RouterCredentialBackend {
