@@ -53,8 +53,8 @@ final class RouterPairingAdministrationTests: XCTestCase {
         XCTAssertEqual(http.calls.map(\.body), [nil, nil, nil])
     }
 
-    func testQRFetchHasNoQueryRequiresPNGAndSurfacesClosedState() async throws {
-        let png = Data([0x89, 0x50, 0x4E, 0x47])
+    func testQRFetchHasNoQueryAcceptsParameterizedCaseInsensitivePNG() async throws {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
         let http = ScriptedRouterHTTPClient(results: [
             .success((
                 png,
@@ -62,10 +62,12 @@ final class RouterPairingAdministrationTests: XCTestCase {
                     url: URL(string: "https://router.local:8378")!,
                     statusCode: 200,
                     httpVersion: nil,
-                    headerFields: ["Content-Type": "image/png", "Cache-Control": "no-store"]
+                    headerFields: [
+                        "Content-Type": "Image/PNG; charset=binary",
+                        "Cache-Control": "no-store",
+                    ]
                 )!
             )),
-            ScriptedRouterHTTPClient.ok("{}"),
         ])
         let client = try await makeAttachedClient(http: http)
 
@@ -74,10 +76,48 @@ final class RouterPairingAdministrationTests: XCTestCase {
         XCTAssertEqual(http.calls[0].path, "/api/v1/pairing-mode/qr.png")
         XCTAssertFalse(http.calls[0].path.contains("?"))
         XCTAssertNil(http.calls[0].body)
+    }
+
+    func testQRFetchRejectsMalformedPNGMediaTypePrefix() async throws {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let http = ScriptedRouterHTTPClient(results: [
+            .success((
+                png,
+                HTTPURLResponse(
+                    url: URL(string: "https://router.local:8378")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "image/png-malformed"]
+                )!
+            )),
+        ])
+        let client = try await makeAttachedClient(http: http)
 
         do {
             _ = try await client.pairingQRCodePNG()
-            XCTFail("expected non-PNG rejection")
+            XCTFail("expected malformed media type rejection")
+        } catch {
+            XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+        }
+    }
+
+    func testQRFetchRejectsImagePNGWithoutStandardSignature() async throws {
+        let http = ScriptedRouterHTTPClient(results: [
+            .success((
+                Data("not really a PNG".utf8),
+                HTTPURLResponse(
+                    url: URL(string: "https://router.local:8378")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "image/png"]
+                )!
+            )),
+        ])
+        let client = try await makeAttachedClient(http: http)
+
+        do {
+            _ = try await client.pairingQRCodePNG()
+            XCTFail("expected invalid PNG signature rejection")
         } catch {
             XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
         }

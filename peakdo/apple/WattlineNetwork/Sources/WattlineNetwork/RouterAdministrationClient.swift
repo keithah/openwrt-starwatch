@@ -125,18 +125,36 @@ public actor RouterAdministrationClient {
     ) async throws -> (Data, HTTPURLResponse) {
         guard let endpoint, let http else { throw RouterAdministrationError.notAttached }
         let requestGeneration = generation
-        guard let token = try await credentials.readToken(
-            for: endpoint, role: .administrator
-        ) else { throw RouterAdministrationError.invalidAdministratorToken }
+        let storedToken: String?
+        do {
+            storedToken = try await credentials.readToken(
+                for: endpoint, role: .administrator
+            )
+        } catch {
+            guard generation == requestGeneration else { throw CancellationError() }
+            if error is CancellationError { throw CancellationError() }
+            if case NetworkError.unauthorized = error {
+                throw RouterAdministrationError.invalidAdministratorToken
+            }
+            throw error
+        }
         guard generation == requestGeneration else { throw CancellationError() }
+        guard let token = storedToken else {
+            throw RouterAdministrationError.invalidAdministratorToken
+        }
         do {
             let result = try await http.request(method, path, body: body, token: token)
             guard generation == requestGeneration else { throw CancellationError() }
             return result
-        } catch let error as URLError where error.code == .cancelled {
-            throw CancellationError()
-        } catch NetworkError.unauthorized {
-            throw RouterAdministrationError.invalidAdministratorToken
+        } catch {
+            guard generation == requestGeneration else { throw CancellationError() }
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                throw CancellationError()
+            }
+            if case NetworkError.unauthorized = error {
+                throw RouterAdministrationError.invalidAdministratorToken
+            }
+            throw error
         }
     }
 

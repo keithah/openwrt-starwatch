@@ -10,6 +10,12 @@ public struct RouterPairingMode: Equatable, Sendable, Decodable,
     public let expiresAt: Date
     public let pin: String?
 
+    public init(open: Bool, expiresAt: Date, pin: String?) {
+        self.open = open
+        self.expiresAt = expiresAt
+        self.pin = pin
+    }
+
     private enum CodingKeys: String, CodingKey {
         case open
         case expiresAt = "expires_at"
@@ -48,7 +54,14 @@ extension RouterAdministrationClient {
     public func pairingQRCodePNG() async throws -> Data {
         let (data, response) = try await send("GET", "/api/v1/pairing-mode/qr.png")
         let contentType = response.value(forHTTPHeaderField: "Content-Type") ?? ""
-        guard contentType.hasPrefix("image/png"), !data.isEmpty else {
+        let mediaType = contentType
+            .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let signature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        guard mediaType.caseInsensitiveCompare("image/png") == .orderedSame,
+              data.starts(with: signature)
+        else {
             throw RouterAdministrationError.invalidResponse
         }
         return data

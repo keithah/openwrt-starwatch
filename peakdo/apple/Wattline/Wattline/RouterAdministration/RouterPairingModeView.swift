@@ -16,15 +16,10 @@ struct RouterPairingModeView: View {
                             .textSelection(.enabled)
                     }
                 }
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text("Expires \(status.expiresAt.formatted(date: .omitted, time: .standard))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .onChange(of: context.date) {
-                            model.expirePairingSecretsIfNeeded()
-                        }
-                }
+                Text("Expires \(status.expiresAt.formatted(date: .omitted, time: .standard))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
                 if let png = model.pairingQRPNG,
                    let image = UIImage(data: png)
                 {
@@ -49,23 +44,27 @@ struct RouterPairingModeView: View {
                 Button("Close pairing", role: .destructive) {
                     Task { await model.closePairing() }
                 }
-            } else {
+            } else if model.pairingStatus != nil {
                 Text("Pairing is closed. Opening it shows a six-digit PIN and QR for about five minutes.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button("Open pairing") {
                     Task { await model.openPairing() }
                 }
+            } else {
+                ProgressView("Checking pairing status…")
             }
             if let message = model.pairingError {
                 Text(message).foregroundStyle(.orange)
             }
         }
-        .task { await model.reloadPairingMode() }
+        .task { await model.pairingDidBecomeActive() }
         .onDisappear { model.clearPairingSecrets() }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active {
-                model.clearPairingSecrets()
+            if phase == .active {
+                Task { await model.pairingDidBecomeActive() }
+            } else {
+                model.pairingDidEnterBackground()
             }
         }
     }

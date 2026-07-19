@@ -119,6 +119,53 @@ final class RouterAdministrationClientTests: XCTestCase {
         XCTAssertNil(newStored)
     }
 
+    func testStaleUnauthorizedSendIsCancellationBeforeAuthTranslation() async throws {
+        let http = ScriptedRouterHTTPClient(
+            results: [.failure(NetworkError.unauthorized)],
+            gateRequests: true
+        )
+        let (client, store) = makeClient(http: http)
+        try await store.saveToken("old-admin", for: endpoint, role: .administrator)
+        try await client.attach(endpoint: endpoint)
+
+        let stale = Task {
+            try await client.send("GET", "/api/v1/pairing-mode")
+        }
+        await http.waitForGateRegistration()
+        try await client.attach(endpoint: endpoint)
+        http.releaseGates()
+
+        do {
+            _ = try await stale.value
+            XCTFail("expected stale request cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
+    func testStaleMissingCredentialReadIsCancellationBeforeAuthTranslation() async throws {
+        let backend = FirstReadGatedCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        let http = ScriptedRouterHTTPClient(results: [])
+        let client = RouterAdministrationClient(credentials: store) { _ in http }
+        try await client.attach(endpoint: endpoint)
+
+        let stale = Task {
+            try await client.send("GET", "/api/v1/pairing-mode")
+        }
+        await backend.waitForFirstReadToStart()
+        try await client.attach(endpoint: endpoint)
+        await backend.releaseFirstRead()
+
+        do {
+            _ = try await stale.value
+            XCTFail("expected stale credential read cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertTrue(http.calls.isEmpty)
+    }
+
     func testReattachDuringCredentialSaveRemovesStaleAdministratorToken() async throws {
         let http = ScriptedRouterHTTPClient(results: [ScriptedRouterHTTPClient.ok("{}")])
         let backend = AdministrationCredentialBackend(gateSaves: true)
@@ -369,6 +416,35 @@ private actor AdministrationCredentialBackend: RouterCredentialBackend {
     func releaseSave() {
         saveGate?.resume()
         saveGate = nil
+    }
+}
+
+private actor FirstReadGatedCredentialBackend: RouterCredentialBackend {
+    private var firstReadStarted = false
+    private var firstReadStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstReadGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? {
+        guard firstReadStarted == false else { return nil }
+        firstReadStarted = true
+        let waiters = firstReadStartedWaiters
+        firstReadStartedWaiters = []
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { firstReadGate = $0 }
+        return nil
+    }
+
+    func save(_ data: Data, account: String) async throws {}
+    func delete(account: String) async throws {}
+
+    func waitForFirstReadToStart() async {
+        if firstReadStarted { return }
+        await withCheckedContinuation { firstReadStartedWaiters.append($0) }
+    }
+
+    func releaseFirstRead() {
+        firstReadGate?.resume()
+        firstReadGate = nil
     }
 }
 

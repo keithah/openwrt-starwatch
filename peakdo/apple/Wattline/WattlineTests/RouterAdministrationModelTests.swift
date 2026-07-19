@@ -621,7 +621,7 @@ final class RouterAdministrationModelTests: XCTestCase {
 
     func testPairingSecretsExistOnlyWhileOpenAndClearOnExpiryAndAdmin401() async throws {
         let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
-        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
         var currentTime = ISO8601DateFormatter().date(from: "2026-07-18T00:00:00Z")!
         let fixture = try await makeFixture(
             results: [
@@ -666,7 +666,7 @@ final class RouterAdministrationModelTests: XCTestCase {
     }
 
     func testLockAndSessionEndClearPairingSecrets() async throws {
-        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
             AdminScriptedHTTP.ok(openBody),
@@ -695,7 +695,7 @@ final class RouterAdministrationModelTests: XCTestCase {
     }
 
     func testClearingSecretsWhilePairingRequestIsInFlightPreventsLatePINResurrection() async throws {
-        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
             AdminScriptedHTTP.ok(openBody),
@@ -715,8 +715,8 @@ final class RouterAdministrationModelTests: XCTestCase {
     }
 
     func testClearingSecretsWhileQRRequestIsInFlightPreventsLateQRResurrection() async throws {
-        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
-        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
             AdminScriptedHTTP.ok(openBody),
@@ -736,6 +736,354 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(fixture.model.pairingStatus)
         XCTAssertNil(fixture.model.pairingQRPNG)
     }
+
+    func testStalePairing401AfterLockAndReunlockCannotRelockOrDeleteNewToken() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            .failure(NetworkError.unauthorized),
+            AdminScriptedHTTP.ok("{}"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        fixture.http.gateNextRequest()
+
+        let stale = Task { await fixture.model.openPairing() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.lock()
+        await fixture.model.unlock(token: "new-admin")
+        fixture.http.releaseGates()
+        await stale.value
+
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertNil(fixture.model.adminError)
+        let stored = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        XCTAssertEqual(stored, "new-admin")
+    }
+
+    func testPairingResponseFromOlderAdminOperationCannotPublishAfterReunlock() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            AdminScriptedHTTP.ok("{}"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "old-admin")
+        fixture.http.gateNextRequest()
+
+        let stale = Task { await fixture.model.openPairing() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.unlock(token: "new-admin")
+        fixture.http.releaseGates()
+        await stale.value
+
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertNil(fixture.model.pairingStatus)
+    }
+
+    func testNewerOpenReadbackWinsOverOlderClosedReload() async throws {
+        let closedBody = #"{"open":false,"expires_at":"0001-01-01T00:00:00Z"}"#
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"654321"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(closedBody),
+            AdminScriptedHTTP.ok(openBody),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let olderReload = Task { await fixture.model.reloadPairingMode() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.openPairing()
+        XCTAssertEqual(fixture.model.pairingStatus?.pin, "654321")
+        fixture.http.releaseGates()
+        await olderReload.value
+
+        XCTAssertEqual(fixture.model.pairingStatus?.pin, "654321")
+        XCTAssertNil(fixture.model.pairingError)
+    }
+
+    func testNewerClosedReadbackPreventsOlderOpenPINResurrection() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let closedBody = #"{"open":false,"expires_at":"0001-01-01T00:00:00Z"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            AdminScriptedHTTP.ok(closedBody),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let olderOpen = Task { await fixture.model.openPairing() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.reloadPairingMode()
+        XCTAssertEqual(fixture.model.pairingStatus?.open, false)
+        fixture.http.releaseGates()
+        await olderOpen.value
+
+        XCTAssertEqual(fixture.model.pairingStatus?.open, false)
+        XCTAssertNil(fixture.model.pairingStatus?.pin)
+    }
+
+    func testOlderPairingErrorCannotOverwriteNewerOpenSuccess() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"654321"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            .failure(NetworkError.timeout),
+            AdminScriptedHTTP.ok(openBody),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let olderReload = Task { await fixture.model.reloadPairingMode() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.openPairing()
+        fixture.http.releaseGates()
+        await olderReload.value
+
+        XCTAssertEqual(fixture.model.pairingStatus?.pin, "654321")
+        XCTAssertNil(fixture.model.pairingError)
+    }
+
+    func testClosedReadbackInvalidatesInFlightQRAndPreservesConfirmedClosedTruth() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let closedBody = #"{"open":false,"expires_at":"0001-01-01T00:00:00Z"}"#
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            .success((png, AdminScriptedHTTP.pngResponse())),
+            AdminScriptedHTTP.ok(closedBody),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        fixture.http.gateNextRequest()
+
+        let loadingQR = Task { await fixture.model.loadPairingQR() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.reloadPairingMode()
+        fixture.http.releaseGates()
+        await loadingQR.value
+
+        XCTAssertEqual(fixture.model.pairingStatus?.open, false)
+        XCTAssertNil(fixture.model.pairingStatus?.pin)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
+
+    func testAlreadyExpiredOpenReadbackNeverExposesPINOrQR() async throws {
+        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let currentTime = ISO8601DateFormatter().date(from: "2026-07-18T00:06:00Z")!
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(openBody),
+            ],
+            now: { currentTime }
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+
+        await fixture.model.openPairing()
+
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
+
+    func testSuccessfulClosePublishesConfirmedClosedInsteadOfUnknown() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            AdminScriptedHTTP.ok(#"{"open":false}"#),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+
+        await fixture.model.closePairing()
+
+        XCTAssertEqual(fixture.model.pairingStatus?.open, false)
+        XCTAssertNil(fixture.model.pairingStatus?.pin)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
+
+    func testBackgroundClearsToUnknownAndForegroundReloadsConfirmedTruth() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let closedBody = #"{"open":false,"expires_at":"0001-01-01T00:00:00Z"}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            AdminScriptedHTTP.ok(closedBody),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        XCTAssertEqual(fixture.model.pairingStatus?.open, true)
+
+        fixture.model.pairingDidEnterBackground()
+
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+
+        await fixture.model.pairingDidBecomeActive()
+
+        XCTAssertEqual(fixture.model.pairingStatus?.open, false)
+        XCTAssertEqual(
+            fixture.http.calls.map(\.path),
+            ["/api/v1/settings", "/api/v1/pairing-mode", "/api/v1/pairing-mode"]
+        )
+    }
+
+    func testScheduledExpiryUsesExactRouterDeadlineAndClearsSecrets() async throws {
+        let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let start = ISO8601DateFormatter().date(from: "2026-07-18T00:00:00Z")!
+        let expiry = ISO8601DateFormatter().date(from: "2026-07-18T00:05:00Z")!
+        var currentTime = start
+        let sleeper = PairingExpirySleepFixture()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(openBody),
+            ],
+            now: { currentTime },
+            pairingExpirySleep: { deadline in
+                try await sleeper.sleep(until: deadline)
+            }
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+
+        await fixture.model.openPairing()
+        await sleeper.waitForDeadlineCount(1)
+
+        XCTAssertEqual(sleeper.deadlineHistory, [expiry])
+        XCTAssertEqual(fixture.model.pairingStatus?.pin, "123456")
+
+        currentTime = expiry
+        sleeper.resumeFirst()
+        for _ in 0..<1_000 where fixture.model.pairingStatus != nil {
+            await Task.yield()
+        }
+
+        XCTAssertNil(fixture.model.pairingStatus)
+        XCTAssertNil(fixture.model.pairingQRPNG)
+    }
+
+    func testNewStatusReplacesExpiryTaskAndEndCancelsReplacement() async throws {
+        let firstBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
+        let secondBody = #"{"open":true,"expires_at":"2026-07-18T00:10:00Z","pin":"654321"}"#
+        let start = ISO8601DateFormatter().date(from: "2026-07-18T00:00:00Z")!
+        let firstExpiry = ISO8601DateFormatter().date(from: "2026-07-18T00:05:00Z")!
+        let secondExpiry = ISO8601DateFormatter().date(from: "2026-07-18T00:10:00Z")!
+        let sleeper = PairingExpirySleepFixture()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(firstBody),
+                AdminScriptedHTTP.ok(secondBody),
+            ],
+            now: { start },
+            pairingExpirySleep: { deadline in
+                try await sleeper.sleep(until: deadline)
+            }
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        await sleeper.waitForDeadlineCount(1)
+
+        await fixture.model.reloadPairingMode()
+        await sleeper.waitForDeadlineCount(2)
+        await sleeper.waitForCancellationCount(1)
+
+        XCTAssertEqual(sleeper.deadlineHistory, [firstExpiry, secondExpiry])
+        XCTAssertEqual(fixture.model.pairingStatus?.pin, "654321")
+
+        await fixture.model.end()
+        await sleeper.waitForCancellationCount(2)
+
+        XCTAssertEqual(sleeper.cancellationCount, 2)
+        XCTAssertNil(fixture.model.pairingStatus)
+    }
+}
+
+private final class PairingExpirySleepFixture: @unchecked Sendable {
+    private struct Pending {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private let lock = NSLock()
+    private var pending: [Pending] = []
+    private var canceledBeforeRegistration: Set<UUID> = []
+    private var completed: Set<UUID> = []
+    private var deadlines: [Date] = []
+    private var cancellations = 0
+
+    var deadlineHistory: [Date] { lock.withLock { deadlines } }
+    var cancellationCount: Int { lock.withLock { cancellations } }
+
+    func sleep(until deadline: Date) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let cancelImmediately = lock.withLock {
+                    deadlines.append(deadline)
+                    if canceledBeforeRegistration.remove(id) != nil {
+                        completed.insert(id)
+                        return true
+                    }
+                    pending.append(Pending(id: id, continuation: continuation))
+                    return false
+                }
+                if cancelImmediately {
+                    continuation.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            self.cancel(id: id)
+        }
+    }
+
+    func resumeFirst() {
+        let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
+            guard !pending.isEmpty else { return nil }
+            let next = pending.removeFirst()
+            completed.insert(next.id)
+            return next.continuation
+        }
+        continuation?.resume()
+    }
+
+    func waitForDeadlineCount(_ count: Int) async {
+        while deadlineHistory.count < count { await Task.yield() }
+    }
+
+    func waitForCancellationCount(_ count: Int) async {
+        while cancellationCount < count { await Task.yield() }
+    }
+
+    private func cancel(id: UUID) {
+        let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
+            guard completed.contains(id) == false else { return nil }
+            cancellations += 1
+            guard let index = pending.firstIndex(where: { $0.id == id }) else {
+                canceledBeforeRegistration.insert(id)
+                return nil
+            }
+            let value = pending.remove(at: index)
+            completed.insert(id)
+            return value.continuation
+        }
+        continuation?.resume(throwing: CancellationError())
+    }
 }
 
 @MainActor
@@ -753,6 +1101,7 @@ private func makeFixture(
     results: [Result<(Data, HTTPURLResponse), Error>],
     historyResults: [Result<(Data, HTTPURLResponse), Error>] = [],
     now: @escaping () -> Date = { Date() },
+    pairingExpirySleep: (@MainActor @Sendable (Date) async throws -> Void)? = nil,
     gateRequests: Bool = false,
     historyGateRequests: Bool = false,
     historyGatedCallNumbers: Set<Int> = [],
@@ -781,18 +1130,31 @@ private func makeFixture(
         gateRequests: historyGateRequests,
         gatedCallNumbers: historyGatedCallNumbers
     )
-    let model = RouterAdministrationModel(
-        connections: connections,
-        adminClient: RouterAdministrationClient(credentials: credentialStore) { _ in http },
-        historyClientFactory: { endpoint in
-            RouterHistoryClient(
-                httpClient: historyHTTP,
-                credentials: credentialStore,
-                endpoint: endpoint
-            )
-        },
-        now: now
-    )
+    let adminClient = RouterAdministrationClient(credentials: credentialStore) { _ in http }
+    let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient = { endpoint in
+        RouterHistoryClient(
+            httpClient: historyHTTP,
+            credentials: credentialStore,
+            endpoint: endpoint
+        )
+    }
+    let model: RouterAdministrationModel
+    if let pairingExpirySleep {
+        model = RouterAdministrationModel(
+            connections: connections,
+            adminClient: adminClient,
+            historyClientFactory: historyClientFactory,
+            now: now,
+            pairingExpirySleep: pairingExpirySleep
+        )
+    } else {
+        model = RouterAdministrationModel(
+            connections: connections,
+            adminClient: adminClient,
+            historyClientFactory: historyClientFactory,
+            now: now
+        )
+    }
     try await credentialStore.saveToken("wlt_client", for: host.endpoint)
     return AdministrationFixture(
         model: model,

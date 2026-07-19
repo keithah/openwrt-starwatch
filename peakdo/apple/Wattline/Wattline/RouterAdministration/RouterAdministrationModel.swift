@@ -5,6 +5,8 @@ import WattlineNetwork
 @MainActor
 @Observable
 final class RouterAdministrationModel {
+    typealias PairingExpirySleep = @MainActor @Sendable (Date) async throws -> Void
+
     enum AdminAccess: Equatable {
         case locked
         case verifying
@@ -34,21 +36,29 @@ final class RouterAdministrationModel {
     private let adminClient: RouterAdministrationClient
     private let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient
     private let now: () -> Date
+    private let pairingExpirySleep: PairingExpirySleep
     private var sessionGeneration: UInt64 = 0
     private var adminOperationGeneration: UInt64 = 0
     private var historyRequestGeneration: UInt64 = 0
     private var pairingSecretGeneration: UInt64 = 0
+    private var pairingStatusRequestGeneration: UInt64 = 0
+    private var pairingExpiryTask: Task<Void, Never>?
 
     init(
         connections: RouterConnectionModel,
         adminClient: RouterAdministrationClient,
         historyClientFactory: @escaping (RouterEndpoint) throws -> RouterHistoryClient,
-        now: @escaping () -> Date = { Date() }
+        now: @escaping () -> Date = { Date() },
+        pairingExpirySleep: @escaping PairingExpirySleep = { deadline in
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            try await Task.sleep(for: .seconds(remaining))
+        }
     ) {
         self.connections = connections
         self.adminClient = adminClient
         self.historyClientFactory = historyClientFactory
         self.now = now
+        self.pairingExpirySleep = pairingExpirySleep
     }
 
     static func production(
@@ -172,6 +182,7 @@ final class RouterAdministrationModel {
         adminOperationGeneration &+= 1
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
+        clearPairingSecrets()
         access = .verifying
         adminError = nil
         do {
@@ -206,7 +217,7 @@ final class RouterAdministrationModel {
     }
 
     func reloadPairingMode() async {
-        pairingError = await performPairingAdmin { client in
+        await performPairingStatusAdmin { client in
             try await client.pairingMode()
         } apply: { [weak self] status in
             self?.publishPairingStatus(status)
@@ -214,7 +225,7 @@ final class RouterAdministrationModel {
     }
 
     func openPairing() async {
-        pairingError = await performPairingAdmin { client in
+        await performPairingStatusAdmin { client in
             try await client.openPairingMode()
         } apply: { [weak self] status in
             self?.publishPairingStatus(status)
@@ -222,23 +233,37 @@ final class RouterAdministrationModel {
     }
 
     func closePairing() async {
-        pairingError = await performPairingAdmin { client in
+        await performPairingStatusAdmin { client in
             try await client.closePairingMode()
         } apply: { [weak self] in
-            self?.clearPairingSecrets()
+            self?.publishPairingStatus(RouterPairingMode(
+                open: false,
+                expiresAt: .distantPast,
+                pin: nil
+            ))
         }
     }
 
     func loadPairingQR() async {
         guard pairingStatus?.open == true else { return }
-        pairingError = await performPairingAdmin { client in
+        let result = await performPairingAdmin { client in
             try await client.pairingQRCodePNG()
-        } apply: { [weak self] png in
-            self?.pairingQRPNG = png
+        }
+        switch result {
+        case let .success(png):
+            guard pairingStatus?.open == true else { return }
+            pairingQRPNG = png
+            pairingError = nil
+        case let .failure(message):
+            pairingError = message
+        case .stale:
+            break
         }
     }
 
     func clearPairingSecrets() {
+        pairingExpiryTask?.cancel()
+        pairingExpiryTask = nil
         pairingSecretGeneration &+= 1
         pairingStatus = nil
         pairingQRPNG = nil
@@ -252,46 +277,113 @@ final class RouterAdministrationModel {
         clearPairingSecrets()
     }
 
+    func pairingDidEnterBackground() {
+        clearPairingSecrets()
+        pairingError = nil
+    }
+
+    func pairingDidBecomeActive() async {
+        await reloadPairingMode()
+    }
+
     private func publishPairingStatus(_ status: RouterPairingMode) {
+        pairingExpiryTask?.cancel()
+        pairingExpiryTask = nil
+        pairingSecretGeneration &+= 1
+        pairingQRPNG = nil
+        guard status.open else {
+            pairingStatus = status
+            return
+        }
+        guard status.expiresAt > now() else {
+            pairingStatus = nil
+            return
+        }
         pairingStatus = status
-        if status.open == false {
-            pairingQRPNG = nil
+        schedulePairingExpiry(at: status.expiresAt)
+    }
+
+    private func schedulePairingExpiry(at deadline: Date) {
+        let secretGeneration = pairingSecretGeneration
+        let sleep = pairingExpirySleep
+        pairingExpiryTask = Task { [weak self] in
+            do {
+                try await sleep(deadline)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  let self,
+                  pairingSecretGeneration == secretGeneration,
+                  pairingStatus?.open == true,
+                  pairingStatus?.expiresAt == deadline,
+                  deadline <= now()
+            else { return }
+            clearPairingSecrets()
         }
     }
 
+    private enum AdminResult<Value> {
+        case success(Value)
+        case failure(String)
+        case stale
+    }
+
     private func performAdmin<Value>(
-        _ operation: (RouterAdministrationClient) async throws -> Value,
-        apply: (Value) -> Void
-    ) async -> String? {
-        guard host != nil, access == .unlocked else { return nil }
-        let generation = sessionGeneration
+        _ operation: (RouterAdministrationClient) async throws -> Value
+    ) async -> AdminResult<Value> {
+        guard host != nil, access == .unlocked else { return .stale }
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
         do {
             let value = try await operation(adminClient)
-            guard sessionGeneration == generation else { return nil }
-            apply(value)
-            return nil
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation,
+                  access == .unlocked
+            else { return .stale }
+            return .success(value)
         } catch is CancellationError {
-            return nil
+            return .stale
         } catch {
-            guard sessionGeneration == generation else { return nil }
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation,
+                  access == .unlocked
+            else { return .stale }
             if handleAdminFailure(error) {
                 try? await adminClient.clearAdministratorCredential()
-                return nil
+                return .stale
             }
-            return "The request failed. Try again."
+            return .failure("The request failed. Try again.")
         }
     }
 
     private func performPairingAdmin<Value>(
+        _ operation: (RouterAdministrationClient) async throws -> Value
+    ) async -> AdminResult<Value> {
+        let secretGeneration = pairingSecretGeneration
+        let result = await performAdmin(operation)
+        guard pairingSecretGeneration == secretGeneration else {
+            return .stale
+        }
+        return result
+    }
+
+    private func performPairingStatusAdmin<Value>(
         _ operation: (RouterAdministrationClient) async throws -> Value,
         apply: (Value) -> Void
-    ) async -> String? {
-        let secretGeneration = pairingSecretGeneration
-        return await performAdmin(operation) { [weak self] value in
-            guard let self,
-                  pairingSecretGeneration == secretGeneration
-            else { return }
+    ) async {
+        pairingStatusRequestGeneration &+= 1
+        let requestGeneration = pairingStatusRequestGeneration
+        let result = await performPairingAdmin(operation)
+        guard pairingStatusRequestGeneration == requestGeneration else { return }
+        switch result {
+        case let .success(value):
             apply(value)
+            pairingError = nil
+        case let .failure(message):
+            pairingError = message
+        case .stale:
+            break
         }
     }
 
