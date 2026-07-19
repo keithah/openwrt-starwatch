@@ -9,6 +9,7 @@ struct ScanView: View {
     @State private var showsRouterSetup = false
     @State private var showsPairingEntry = false
     @State private var discoveredRouterSetup: DiscoveredRouter?
+    @State private var manualRecoveryHost: RouterHostMetadata?
     @State private var administrationHost: RouterHostMetadata?
 
     private var scanRecords: [AppDeviceConnectionRecord] {
@@ -70,7 +71,7 @@ struct ScanView: View {
                                         || presentation.offersRouterAdministration {
                                         Menu {
                                             if presentation.offersRouterAction {
-                                                Button(record.routerHost == nil ? "Enroll with router" : "Connect via router") {
+                                                Button(presentation.routerActionLabel) {
                                                     performRouterAction(record)
                                                 }
                                             }
@@ -123,6 +124,9 @@ struct ScanView: View {
             .sheet(item: $discoveredRouterSetup) { router in
                 RouterEnrollmentView(router: router)
             }
+            .sheet(item: $manualRecoveryHost) { host in
+                RouterSetupView(recoveryHost: host)
+            }
             .sheet(item: $administrationHost) { host in
                 RouterAdministrationView(host: host)
             }
@@ -156,11 +160,19 @@ struct ScanView: View {
             if let host = record.routerHost { model.connectViaRouter(host) }
         case .enrollRouter:
             if let router = record.discoveredRouter { discoveredRouterSetup = router }
+        case .manualRouterEnrollment:
+            if let host = record.routerHost { manualRecoveryHost = host }
         }
     }
 
     private func performRouterAction(_ record: AppDeviceConnectionRecord) {
-        if let host = record.routerHost {
+        if record.routerClientCredentialAvailability == .enrollmentRequired,
+           let router = record.discoveredRouter {
+            discoveredRouterSetup = router
+        } else if record.routerClientCredentialAvailability == .enrollmentRequired,
+                  let host = record.routerHost {
+            manualRecoveryHost = host
+        } else if let host = record.routerHost {
             model.connectViaRouter(host)
         } else if let router = record.discoveredRouter {
             discoveredRouterSetup = router
@@ -172,6 +184,7 @@ enum ScanPrimaryAction: Equatable, Sendable {
     case connectBluetooth
     case connectRouter
     case enrollRouter
+    case manualRouterEnrollment
 }
 
 struct ScanRecordPresentation: Equatable, Sendable {
@@ -181,6 +194,7 @@ struct ScanRecordPresentation: Equatable, Sendable {
     let primaryAction: ScanPrimaryAction
     let offersRouterAction: Bool
     let offersRouterAdministration: Bool
+    let routerActionLabel: String
 
     init(record: AppDeviceConnectionRecord) {
         title = record.bluetoothDevice?.localName
@@ -199,6 +213,11 @@ struct ScanRecordPresentation: Equatable, Sendable {
         }
         if record.bluetoothDevice != nil {
             primaryAction = .connectBluetooth
+        } else if record.routerHost != nil,
+                  record.routerClientCredentialAvailability == .enrollmentRequired {
+            primaryAction = record.discoveredRouter == nil
+                ? .manualRouterEnrollment
+                : .enrollRouter
         } else if record.routerHost != nil {
             primaryAction = .connectRouter
         } else {
@@ -207,6 +226,15 @@ struct ScanRecordPresentation: Equatable, Sendable {
         offersRouterAction = record.bluetoothDevice != nil
             && (record.routerHost != nil || record.discoveredRouter != nil)
         offersRouterAdministration = record.routerHost != nil
+        if record.routerClientCredentialAvailability == .enrollmentRequired {
+            routerActionLabel = record.discoveredRouter == nil
+                ? "Restore router connection"
+                : "Enroll with router"
+        } else {
+            routerActionLabel = record.routerHost == nil
+                ? "Enroll with router"
+                : "Connect via router"
+        }
     }
 }
 
@@ -312,9 +340,14 @@ private struct RouterSetupView: View {
     @State private var errorMessage: String?
     @State private var isSaving = false
     let discoveredRouter: DiscoveredRouter?
+    let recoveryHost: RouterHostMetadata?
 
-    init(discoveredRouter: DiscoveredRouter? = nil) {
+    init(
+        discoveredRouter: DiscoveredRouter? = nil,
+        recoveryHost: RouterHostMetadata? = nil
+    ) {
         self.discoveredRouter = discoveredRouter
+        self.recoveryHost = recoveryHost
     }
 
     var body: some View {
@@ -330,7 +363,12 @@ private struct RouterSetupView: View {
                         Text("VPN / Tailscale").tag(RouterHostReachability.vpn)
                         Text("WAN").tag(RouterHostReachability.wan)
                     }
-                    SecureField("Pairing bearer token", text: $token)
+                    SecureField(
+                        recoveryHost == nil
+                            ? "Pairing bearer token"
+                            : "Existing client bearer token (recovery)",
+                        text: $token
+                    )
                     TextField("Device MAC (optional)", text: $deviceID)
                         .textInputAutocapitalization(.characters)
                     TextField("HTTPS certificate fingerprint", text: $fingerprint)
@@ -354,14 +392,24 @@ private struct RouterSetupView: View {
                     Section { Text(errorMessage).foregroundStyle(.orange) }
                 }
             }
-            .navigationTitle("Advanced connection")
+            .navigationTitle(
+                recoveryHost == nil ? "Advanced connection" : "Restore router connection"
+            )
             .onAppear {
-                guard let discoveredRouter else { return }
-                name = discoveredRouter.serviceName
-                address = "\(discoveredRouter.endpoint.scheme)://\(discoveredRouter.endpoint.host):\(discoveredRouter.endpoint.port)"
-                deviceID = discoveredRouter.deviceID
-                fingerprint = discoveredRouter.certificateFingerprint ?? ""
-                reachability = .lan
+                if let discoveredRouter {
+                    name = discoveredRouter.serviceName
+                    address = "\(discoveredRouter.endpoint.scheme)://\(discoveredRouter.endpoint.host):\(discoveredRouter.endpoint.port)"
+                    deviceID = discoveredRouter.deviceID
+                    fingerprint = discoveredRouter.certificateFingerprint ?? ""
+                    reachability = .lan
+                } else if let recoveryHost {
+                    name = recoveryHost.displayName
+                    address = "\(recoveryHost.scheme)://\(recoveryHost.host):\(recoveryHost.port)"
+                    deviceID = recoveryHost.deviceID ?? ""
+                    fingerprint = recoveryHost.certificateFingerprint ?? ""
+                    reachability = recoveryHost.reachability
+                    allowsInsecureWAN = recoveryHost.allowsInsecureWAN
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

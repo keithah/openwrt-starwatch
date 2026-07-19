@@ -303,11 +303,20 @@ final class RouterAdministrationModel {
             adminOperation: adminOperation,
             endpoint: revokedHost?.endpoint
         ) else { return }
+        let authoritativeList: [RouterTokenMetadata]?
+        let readbackFailure: RouterTokenRevocationReadbackError.Cause?
         do {
-            try await adminClient.revokeToken(
+            authoritativeList = try await adminClient.revokeTokenAndReload(
                 id: token.id,
                 attachment: adminAttachment
             )
+            readbackFailure = nil
+        } catch let error as RouterTokenRevocationReadbackError {
+            // The actor validated the DELETE before attempting the failed
+            // authoritative readback, so conditional local cleanup must still
+            // run even when this presentation operation is now stale.
+            authoritativeList = nil
+            readbackFailure = error.cause
         } catch is CancellationError {
             return
         } catch {
@@ -342,37 +351,26 @@ final class RouterAdministrationModel {
             endpoint: revokedHost?.endpoint
         ) else { return }
 
-        do {
-            let list = try await adminClient.tokens()
-            guard isCurrentTokenOperation(
-                session: session,
-                adminOperation: adminOperation,
-                request: requestGeneration
-            ) else { return }
-            tokens = list
+        guard isCurrentTokenOperation(
+            session: session,
+            adminOperation: adminOperation,
+            request: requestGeneration
+        ) else { return }
+        if let authoritativeList {
+            tokens = authoritativeList
             tokensError = clientCleanupFailed ? Self.clientCleanupFailureMessage : nil
-        } catch is CancellationError {
-            guard clientCleanupFailed,
-                  isCurrentTokenOperation(
-                    session: session,
-                    adminOperation: adminOperation,
-                    request: requestGeneration
-                  )
-            else { return }
-            tokensError = Self.clientCleanupFailureMessage
-        } catch {
-            guard isCurrentTokenOperation(
-                session: session,
-                adminOperation: adminOperation,
-                request: requestGeneration
-            ) else { return }
-            if handleAdminFailure(error) {
+        } else if readbackFailure == .invalidAdministratorToken {
+            if handleAdminFailure(RouterAdministrationError.invalidAdministratorToken) {
                 try? await adminClient.clearAdministratorCredential()
-            } else if clientCleanupFailed {
-                tokensError = Self.clientCleanupFailureMessage
-            } else {
-                tokensError = "The token was revoked, but the updated client list could not be loaded."
             }
+        } else if readbackFailure == .cancelled {
+            if clientCleanupFailed {
+                tokensError = Self.clientCleanupFailureMessage
+            }
+        } else if clientCleanupFailed {
+            tokensError = Self.clientCleanupFailureMessage
+        } else {
+            tokensError = "The token was revoked, but the updated client list could not be loaded."
         }
     }
 

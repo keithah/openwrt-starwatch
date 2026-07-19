@@ -598,7 +598,8 @@ final class RouterAdministrationModelTests: XCTestCase {
             discoveredRouter: nil,
             routerHost: fixture.host,
             transportOptions: [.router],
-            preferredTransport: .router
+            preferredTransport: .router,
+            routerClientCredentialAvailability: .available
         )
         let unsaved = AppDeviceConnectionRecord(
             id: "unsaved",
@@ -614,9 +615,24 @@ final class RouterAdministrationModelTests: XCTestCase {
             transportOptions: [.bluetooth],
             preferredTransport: .bluetooth
         )
+        let manualNeedsEnrollment = AppDeviceConnectionRecord(
+            id: "manual-needs-enrollment",
+            identity: nil,
+            bluetoothDevice: nil,
+            discoveredRouter: nil,
+            routerHost: fixture.host,
+            transportOptions: [.router],
+            preferredTransport: .router,
+            routerClientCredentialAvailability: .enrollmentRequired
+        )
 
         XCTAssertTrue(ScanRecordPresentation(record: saved).offersRouterAdministration)
         XCTAssertFalse(ScanRecordPresentation(record: unsaved).offersRouterAdministration)
+        XCTAssertEqual(ScanRecordPresentation(record: saved).primaryAction, .connectRouter)
+        XCTAssertEqual(
+            ScanRecordPresentation(record: manualNeedsEnrollment).primaryAction,
+            .manualRouterEnrollment
+        )
     }
 
     func testPairingSecretsExistOnlyWhileOpenAndClearOnExpiryAndAdmin401() async throws {
@@ -1156,6 +1172,16 @@ final class RouterAdministrationModelTests: XCTestCase {
         await fixture.model.reloadTokens()
         XCTAssertEqual(fixture.model.tokens.count, 1)
         XCTAssertTrue(fixture.model.isCurrentClient(fixture.model.tokens[0]))
+        let unrelatedEndpoint = RouterEndpoint(
+            scheme: "https",
+            host: "unrelated.local",
+            port: 8378,
+            certificateFingerprint: String(repeating: "2", count: 64),
+            allowsInsecureWAN: false
+        )
+        try await fixture.credentialStore.saveToken(
+            "unrelated-client", for: unrelatedEndpoint
+        )
 
         await fixture.model.revoke(fixture.model.tokens[0])
 
@@ -1176,8 +1202,23 @@ final class RouterAdministrationModelTests: XCTestCase {
             for: fixture.host.endpoint, role: .administrator
         )
         XCTAssertEqual(admin, "boot-admin")
+        let unrelatedClient = try await fixture.credentialStore.readToken(
+            for: unrelatedEndpoint
+        )
+        XCTAssertEqual(unrelatedClient, "unrelated-client")
         XCTAssertEqual(fixture.connections.savedHosts, [fixture.host])
         XCTAssertEqual(fixture.model.host, fixture.host)
+        let record = try XCTUnwrap(
+            fixture.connections.scanRecords(bluetooth: [], identities: [:]).first
+        )
+        XCTAssertEqual(
+            record.routerClientCredentialAvailability,
+            .enrollmentRequired
+        )
+        XCTAssertEqual(
+            ScanRecordPresentation(record: record).primaryAction,
+            .manualRouterEnrollment
+        )
     }
 
     func testRevokingAnotherClientPreservesThisEndpointsCredential() async throws {
@@ -1200,6 +1241,47 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         let client = try await fixture.credentialStore.readToken(for: fixture.host.endpoint)
         XCTAssertEqual(client, "wlt_client")
+    }
+
+    func testConcurrentModelRevocationsUseAtomicFIFOReadbacksAndPublishFinalList() async throws {
+        let initial = #"[{"id":"first","label":"First","created_at":"2026-07-17T19:00:00Z","last_seen_at":null,"bootstrap":false},{"id":"second","label":"Second","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let afterFirst = #"[{"id":"second","label":"Second","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(initial),
+            AdminScriptedHTTP.ok(#"{"revoked":"first"}"#),
+            AdminScriptedHTTP.ok(afterFirst),
+            AdminScriptedHTTP.ok(#"{"revoked":"second"}"#),
+            AdminScriptedHTTP.ok("[]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadTokens()
+        let firstToken = try XCTUnwrap(fixture.model.tokens.first { $0.id == "first" })
+        let secondToken = try XCTUnwrap(fixture.model.tokens.first { $0.id == "second" })
+        fixture.http.gateNextRequest()
+
+        let first = Task { await fixture.model.revoke(firstToken) }
+        await fixture.http.waitForGateRegistration()
+        let second = Task { await fixture.model.revoke(secondToken) }
+        for _ in 0..<100 { await Task.yield() }
+        fixture.http.releaseGates()
+        await first.value
+        await second.value
+
+        XCTAssertEqual(fixture.model.tokens, [])
+        XCTAssertNil(fixture.model.tokensError)
+        XCTAssertEqual(
+            fixture.http.calls.map { "\($0.method) \($0.path)" },
+            [
+                "GET /api/v1/settings",
+                "GET /api/v1/tokens",
+                "DELETE /api/v1/tokens/first",
+                "GET /api/v1/tokens",
+                "DELETE /api/v1/tokens/second",
+                "GET /api/v1/tokens",
+            ]
+        )
     }
 
     func testBootstrapRowIsNeverRevocableFromTheModel() async throws {

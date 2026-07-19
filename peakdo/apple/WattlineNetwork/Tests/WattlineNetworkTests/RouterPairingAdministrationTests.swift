@@ -61,6 +61,37 @@ final class RouterPairingAdministrationTests: XCTestCase {
         XCTAssertEqual(http.calls.map(\.body), [nil, nil, nil])
     }
 
+    func testAdminRouteHelpersRejectUndocumentedNon200SuccessStatuses() async throws {
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.response(status: 201, "[]"),
+            ScriptedRouterHTTPClient.response(
+                status: 204,
+                #"{"open":true,"expires_at":"2026-07-17T20:05:00Z","pin":"123456"}"#
+            ),
+            ScriptedRouterHTTPClient.response(status: 202, #"{"revoked":"client-id"}"#),
+        ])
+        let client = try await makeAttachedClient(http: http)
+
+        do {
+            _ = try await client.tokens()
+            XCTFail("expected token-list status rejection")
+        } catch {
+            XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+        }
+        do {
+            _ = try await client.openPairingMode()
+            XCTFail("expected pairing mutation status rejection")
+        } catch {
+            XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+        }
+        do {
+            _ = try await client.revokeToken(id: "client-id")
+            XCTFail("expected durable mutation status rejection")
+        } catch {
+            XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+        }
+    }
+
     func testClosedPairingModeRejectsPayloadThatCarriesPIN() async throws {
         let http = ScriptedRouterHTTPClient(results: [
             ScriptedRouterHTTPClient.ok(
@@ -202,6 +233,65 @@ final class RouterPairingAdministrationTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
         }
+    }
+
+    func testConcurrentRevokeAndReloadWorkflowsRunFIFOThroughAuthoritativeReadback() async throws {
+        let afterFirst = #"[{"id":"second","label":"Second","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]"#
+        let http = ScriptedRouterHTTPClient(
+            results: [
+                ScriptedRouterHTTPClient.ok(#"{"revoked":"first"}"#),
+                ScriptedRouterHTTPClient.ok(afterFirst),
+                ScriptedRouterHTTPClient.ok(#"{"revoked":"second"}"#),
+                ScriptedRouterHTTPClient.ok("[]"),
+            ],
+            gateRequests: true
+        )
+        let client = try await makeAttachedClient(http: http)
+
+        let first = Task { try await client.revokeTokenAndReload(id: "first") }
+        await http.waitForCallCount(1)
+        let secondStarted = expectation(description: "second revoke submitted")
+        let second = Task {
+            secondStarted.fulfill()
+            return try await client.revokeTokenAndReload(id: "second")
+        }
+        await fulfillment(of: [secondStarted], timeout: 1)
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(
+            http.calls.map { "\($0.method) \($0.path)" },
+            ["DELETE /api/v1/tokens/first"]
+        )
+
+        http.releaseNextGate()
+        await http.waitForCallCount(2)
+        XCTAssertEqual(http.calls[1].method, "GET")
+        XCTAssertEqual(http.calls[1].path, "/api/v1/tokens")
+
+        http.releaseNextGate()
+        let firstList = try await first.value
+        XCTAssertEqual(firstList.map(\.id), ["second"])
+        await http.waitForCallCount(3)
+        XCTAssertEqual(http.calls[2].method, "DELETE")
+        XCTAssertEqual(http.calls[2].path, "/api/v1/tokens/second")
+
+        http.releaseNextGate()
+        await http.waitForCallCount(4)
+        XCTAssertEqual(http.calls[3].method, "GET")
+        XCTAssertEqual(http.calls[3].path, "/api/v1/tokens")
+
+        http.releaseNextGate()
+        let finalList = try await second.value
+        XCTAssertEqual(finalList, [])
+        XCTAssertEqual(
+            http.calls.map { "\($0.method) \($0.path)" },
+            [
+                "DELETE /api/v1/tokens/first",
+                "GET /api/v1/tokens",
+                "DELETE /api/v1/tokens/second",
+                "GET /api/v1/tokens",
+            ]
+        )
     }
 
     func testSuccessfulRevokeRemainsDurableWhenDetachedBeforeResponseDelivery() async throws {

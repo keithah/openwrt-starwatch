@@ -58,11 +58,42 @@ extension RouterAdministrationClient {
 
     @discardableResult
     public func revokeToken(id: String) async throws -> String {
-        try await revokeToken(id: id, attachment: attachmentLease())
+        await acquirePrivilegedMutation()
+        defer { releasePrivilegedMutation() }
+        return try await revokeTokenUnserialized(id: id, attachment: attachmentLease())
     }
 
     @discardableResult
     public func revokeToken(
+        id: String,
+        attachment: RouterAdministrationAttachmentLease
+    ) async throws -> String {
+        await acquirePrivilegedMutation()
+        defer { releasePrivilegedMutation() }
+        return try await revokeTokenUnserialized(id: id, attachment: attachment)
+    }
+
+    public func revokeTokenAndReload(id: String) async throws -> [RouterTokenMetadata] {
+        try await revokeTokenAndReload(id: id, attachment: attachmentLease())
+    }
+
+    public func revokeTokenAndReload(
+        id: String,
+        attachment: RouterAdministrationAttachmentLease
+    ) async throws -> [RouterTokenMetadata] {
+        await acquirePrivilegedMutation()
+        defer { releasePrivilegedMutation() }
+        try Task.checkCancellation()
+        _ = try await revokeTokenUnserialized(id: id, attachment: attachment)
+        do {
+            try validate(attachment: attachment)
+            return try await tokens()
+        } catch {
+            throw RouterTokenRevocationReadbackError(error)
+        }
+    }
+
+    private func revokeTokenUnserialized(
         id: String,
         attachment: RouterAdministrationAttachmentLease
     ) async throws -> String {
@@ -93,11 +124,17 @@ extension RouterAdministrationClient {
     }
 
     public func openPairingMode() async throws -> RouterPairingMode {
+        await acquirePrivilegedMutation()
+        defer { releasePrivilegedMutation() }
+        try Task.checkCancellation()
         let (data, _) = try await send("POST", "/api/v1/pairing-mode")
         return try Self.decodePairingMode(data)
     }
 
     public func closePairingMode() async throws {
+        await acquirePrivilegedMutation()
+        defer { releasePrivilegedMutation() }
+        try Task.checkCancellation()
         struct Closed: Decodable { let open: Bool }
 
         let (data, _) = try await send("DELETE", "/api/v1/pairing-mode")

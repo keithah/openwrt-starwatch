@@ -25,6 +25,33 @@ struct AppDeviceConnectionRecord: Identifiable, Equatable, Sendable {
     let routerHost: RouterHostMetadata?
     let transportOptions: Set<AppTransportKind>
     let preferredTransport: AppTransportKind
+    let routerClientCredentialAvailability: RouterClientCredentialAvailability
+
+    init(
+        id: String,
+        identity: DeviceIdentitySnapshot?,
+        bluetoothDevice: DiscoveredDevice?,
+        discoveredRouter: DiscoveredRouter?,
+        routerHost: RouterHostMetadata?,
+        transportOptions: Set<AppTransportKind>,
+        preferredTransport: AppTransportKind,
+        routerClientCredentialAvailability: RouterClientCredentialAvailability = .unknown
+    ) {
+        self.id = id
+        self.identity = identity
+        self.bluetoothDevice = bluetoothDevice
+        self.discoveredRouter = discoveredRouter
+        self.routerHost = routerHost
+        self.transportOptions = transportOptions
+        self.preferredTransport = preferredTransport
+        self.routerClientCredentialAvailability = routerClientCredentialAvailability
+    }
+}
+
+enum RouterClientCredentialAvailability: Equatable, Sendable {
+    case available
+    case enrollmentRequired
+    case unknown
 }
 
 @MainActor
@@ -48,6 +75,7 @@ final class RouterConnectionModel {
     private(set) var discoveryError: String?
     private(set) var loadError: String?
     private var routerIdentities: [UUID: DeviceIdentitySnapshot] = [:]
+    private var clientCredentialAvailability: [UUID: RouterClientCredentialAvailability] = [:]
     private var discoveryGeneration: UInt64 = 0
     private var discoveryTask: Task<Void, Never>?
 
@@ -134,6 +162,7 @@ final class RouterConnectionModel {
 
     func reloadSavedHosts() async {
         savedHosts = await hostStore.hosts()
+        await refreshClientCredentialAvailability(for: savedHosts)
         loadError = nil
     }
 
@@ -232,11 +261,17 @@ final class RouterConnectionModel {
         _ host: RouterHostMetadata,
         ifCurrent lease: RouterCredentialLease
     ) async throws {
-        _ = try await credentialStore.deleteToken(
-            for: host.endpoint,
-            role: .client,
-            ifCurrent: lease
-        )
+        do {
+            _ = try await credentialStore.deleteToken(
+                for: host.endpoint,
+                role: .client,
+                ifCurrent: lease
+            )
+            await refreshClientCredentialAvailability(for: host)
+        } catch {
+            await refreshClientCredentialAvailability(for: host)
+            throw error
+        }
     }
 
     func makeTransport(for host: RouterHostMetadata) throws -> any DeviceTransport {
@@ -292,7 +327,8 @@ final class RouterConnectionModel {
                 discoveredRouter: nil,
                 routerHost: nil,
                 transportOptions: [.bluetooth],
-                preferredTransport: .bluetooth
+                preferredTransport: .bluetooth,
+                routerClientCredentialAvailability: .unknown
             )
         }
 
@@ -320,7 +356,8 @@ final class RouterConnectionModel {
                     discoveredRouter: existing.discoveredRouter,
                     routerHost: host,
                     transportOptions: [.bluetooth, .router],
-                    preferredTransport: .bluetooth
+                    preferredTransport: .bluetooth,
+                    routerClientCredentialAvailability: availability(for: host)
                 )
             } else {
                 records.append(AppDeviceConnectionRecord(
@@ -330,7 +367,8 @@ final class RouterConnectionModel {
                     discoveredRouter: nil,
                     routerHost: host,
                     transportOptions: [.router],
-                    preferredTransport: .router
+                    preferredTransport: .router,
+                    routerClientCredentialAvailability: availability(for: host)
                 ))
             }
         }
@@ -349,7 +387,8 @@ final class RouterConnectionModel {
                 discoveredRouter: nil,
                 routerHost: nil,
                 transportOptions: [.bluetooth],
-                preferredTransport: .bluetooth
+                preferredTransport: .bluetooth,
+                routerClientCredentialAvailability: .unknown
             )
         }
 
@@ -368,7 +407,9 @@ final class RouterConnectionModel {
                     discoveredRouter: router,
                     routerHost: host,
                     transportOptions: [.bluetooth, .router],
-                    preferredTransport: .bluetooth
+                    preferredTransport: .bluetooth,
+                    routerClientCredentialAvailability: host.map(availability(for:))
+                        ?? .enrollmentRequired
                 )
             } else {
                 records.append(AppDeviceConnectionRecord(
@@ -378,7 +419,9 @@ final class RouterConnectionModel {
                     discoveredRouter: router,
                     routerHost: host,
                     transportOptions: [.router],
-                    preferredTransport: .router
+                    preferredTransport: .router,
+                    routerClientCredentialAvailability: host.map(availability(for:))
+                        ?? .enrollmentRequired
                 ))
             }
         }
@@ -398,7 +441,8 @@ final class RouterConnectionModel {
                     discoveredRouter: existing.discoveredRouter,
                     routerHost: host,
                     transportOptions: [.bluetooth, .router],
-                    preferredTransport: .bluetooth
+                    preferredTransport: .bluetooth,
+                    routerClientCredentialAvailability: availability(for: host)
                 )
             } else {
                 records.append(AppDeviceConnectionRecord(
@@ -408,7 +452,8 @@ final class RouterConnectionModel {
                     discoveredRouter: nil,
                     routerHost: host,
                     transportOptions: [.router],
-                    preferredTransport: .router
+                    preferredTransport: .router,
+                    routerClientCredentialAvailability: availability(for: host)
                 ))
             }
         }
@@ -419,6 +464,39 @@ final class RouterConnectionModel {
             }
             return Self.displayName(for: lhs)
                 .localizedCaseInsensitiveCompare(Self.displayName(for: rhs)) == .orderedAscending
+        }
+    }
+
+    private func availability(for host: RouterHostMetadata) -> RouterClientCredentialAvailability {
+        clientCredentialAvailability[host.endpoint.peripheralID] ?? .unknown
+    }
+
+    private func refreshClientCredentialAvailability(
+        for hosts: [RouterHostMetadata]
+    ) async {
+        var refreshed: [UUID: RouterClientCredentialAvailability] = [:]
+        for host in hosts {
+            refreshed[host.endpoint.peripheralID] = await readClientCredentialAvailability(
+                for: host.endpoint
+            )
+        }
+        clientCredentialAvailability = refreshed
+    }
+
+    private func refreshClientCredentialAvailability(for host: RouterHostMetadata) async {
+        clientCredentialAvailability[host.endpoint.peripheralID] =
+            await readClientCredentialAvailability(for: host.endpoint)
+    }
+
+    private func readClientCredentialAvailability(
+        for endpoint: RouterEndpoint
+    ) async -> RouterClientCredentialAvailability {
+        do {
+            return try await credentialStore.readToken(for: endpoint) == nil
+                ? .enrollmentRequired
+                : .available
+        } catch {
+            return .unknown
         }
     }
 

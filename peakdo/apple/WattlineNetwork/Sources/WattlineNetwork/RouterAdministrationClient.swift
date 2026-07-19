@@ -11,6 +11,36 @@ public enum RouterAdministrationError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+/// The DELETE was accepted and validated, but its required authoritative token
+/// readback did not complete. Callers can still perform local cleanup that is
+/// conditional on durable revocation without publishing a guessed token list.
+public struct RouterTokenRevocationReadbackError: Error, Equatable, Sendable {
+    public enum Cause: Equatable, Sendable {
+        case cancelled
+        case invalidAdministratorToken
+        case clientTokenRejected
+        case invalidResponse
+        case other
+    }
+
+    public let cause: Cause
+
+    init(_ error: any Error) {
+        cause = switch error {
+        case is CancellationError:
+            .cancelled
+        case RouterAdministrationError.invalidAdministratorToken:
+            .invalidAdministratorToken
+        case RouterAdministrationError.clientTokenRejected:
+            .clientTokenRejected
+        case RouterAdministrationError.invalidResponse:
+            .invalidResponse
+        default:
+            .other
+        }
+    }
+}
+
 public struct RouterAdministrationAttachmentLease: Sendable,
     CustomStringConvertible, CustomDebugStringConvertible
 {
@@ -38,6 +68,8 @@ public actor RouterAdministrationClient {
     // its generation and persists last.
     private var credentialPersistenceActive = false
     private var credentialPersistenceWaiters: [CheckedContinuation<Void, Never>] = []
+    private var privilegedMutationActive = false
+    private var privilegedMutationWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(credentials: RouterCredentialStore, httpFactory: @escaping HTTPFactory) {
         self.credentials = credentials
@@ -69,12 +101,20 @@ public actor RouterAdministrationClient {
         )
     }
 
+    func validate(attachment: RouterAdministrationAttachmentLease) throws {
+        guard generation == attachment.generation,
+              endpoint == attachment.endpoint,
+              http != nil
+        else { throw CancellationError() }
+    }
+
     public func verifyAdministrator(token: String) async throws {
         guard let endpoint, let http else { throw RouterAdministrationError.notAttached }
         guard !token.isEmpty else { throw RouterAdministrationError.invalidAdministratorToken }
         let requestGeneration = generation
+        let response: HTTPURLResponse
         do {
-            _ = try await http.get("/api/v1/settings", token: token)
+            (_, response) = try await http.get("/api/v1/settings", token: token)
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch NetworkError.unauthorized {
@@ -83,6 +123,9 @@ public actor RouterAdministrationClient {
             throw RouterAdministrationError.clientTokenRejected
         }
         guard generation == requestGeneration else { throw CancellationError() }
+        guard response.statusCode == 200 else {
+            throw RouterAdministrationError.invalidResponse
+        }
         await acquireCredentialPersistence()
         defer { releaseCredentialPersistence() }
         guard generation == requestGeneration else { throw CancellationError() }
@@ -106,8 +149,9 @@ public actor RouterAdministrationClient {
             role: .administrator
         ) else { throw RouterAdministrationError.invalidAdministratorToken }
         guard generation == requestGeneration else { throw CancellationError() }
+        let response: HTTPURLResponse
         do {
-            _ = try await http.get("/api/v1/settings", token: token)
+            (_, response) = try await http.get("/api/v1/settings", token: token)
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch NetworkError.unauthorized {
@@ -121,6 +165,9 @@ public actor RouterAdministrationClient {
             throw RouterAdministrationError.clientTokenRejected
         }
         guard generation == requestGeneration else { throw CancellationError() }
+        guard response.statusCode == 200 else {
+            throw RouterAdministrationError.invalidResponse
+        }
     }
 
     public func clearAdministratorCredential() async throws {
@@ -165,6 +212,9 @@ public actor RouterAdministrationClient {
         do {
             let result = try await http.request(method, path, body: body, token: token)
             guard generation == requestGeneration else { throw CancellationError() }
+            guard result.1.statusCode == 200 else {
+                throw RouterAdministrationError.invalidResponse
+            }
             return result
         } catch {
             guard generation == requestGeneration else { throw CancellationError() }
@@ -212,7 +262,11 @@ public actor RouterAdministrationClient {
             throw RouterAdministrationError.invalidAdministratorToken
         }
         do {
-            return try await http.request(method, path, body: body, token: token)
+            let result = try await http.request(method, path, body: body, token: token)
+            guard result.1.statusCode == 200 else {
+                throw RouterAdministrationError.invalidResponse
+            }
+            return result
         } catch {
             guard generation == requestGeneration else { throw CancellationError() }
             if let urlError = error as? URLError, urlError.code == .cancelled {
@@ -239,5 +293,21 @@ public actor RouterAdministrationClient {
             return
         }
         credentialPersistenceWaiters.removeFirst().resume()
+    }
+
+    func acquirePrivilegedMutation() async {
+        guard privilegedMutationActive else {
+            privilegedMutationActive = true
+            return
+        }
+        await withCheckedContinuation { privilegedMutationWaiters.append($0) }
+    }
+
+    func releasePrivilegedMutation() {
+        guard !privilegedMutationWaiters.isEmpty else {
+            privilegedMutationActive = false
+            return
+        }
+        privilegedMutationWaiters.removeFirst().resume()
     }
 }

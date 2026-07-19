@@ -37,11 +37,19 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
         _ json: String,
         contentType: String = "application/json"
     ) -> Result<(Data, HTTPURLResponse), Error> {
+        response(status: 200, json, contentType: contentType)
+    }
+
+    static func response(
+        status: Int,
+        _ json: String,
+        contentType: String = "application/json"
+    ) -> Result<(Data, HTTPURLResponse), Error> {
         .success((
             Data(json.utf8),
             HTTPURLResponse(
                 url: URL(string: "https://router.local:8378")!,
-                statusCode: 200,
+                statusCode: status,
                 httpVersion: nil,
                 headerFields: ["Content-Type": contentType]
             )!
@@ -112,6 +120,13 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
             return value
         }
         gates.forEach { $0.resume() }
+    }
+
+    func releaseNextGate() {
+        let gate = lock.withLock {
+            pendingGates.isEmpty ? nil : pendingGates.removeFirst()
+        }
+        gate?.resume()
     }
 
     private func removeSatisfiedCallCountWaiters() -> [CheckedContinuation<Void, Never>] {

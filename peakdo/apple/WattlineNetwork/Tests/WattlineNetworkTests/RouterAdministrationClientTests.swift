@@ -43,6 +43,52 @@ final class RouterAdministrationClientTests: XCTestCase {
         XCTAssertNil(clientToken)
     }
 
+    func testManualVerificationRejectsNon200SuccessWithoutSavingCredential() async throws {
+        let backend = AdministrationCredentialBackend()
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.response(status: 201, "{}"),
+            ScriptedRouterHTTPClient.response(status: 204, ""),
+        ])
+        let (client, store) = makeClient(http: http, backend: backend)
+        try await client.attach(endpoint: endpoint)
+
+        for status in [201, 204] {
+            do {
+                try await client.verifyAdministrator(token: "candidate-\(status)")
+                XCTFail("expected status \(status) rejection")
+            } catch {
+                XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+            }
+        }
+
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        let saveCount = await backend.saveCount
+        XCTAssertNil(stored)
+        XCTAssertEqual(saveCount, 0)
+    }
+
+    func testStoredVerificationRequires200WithoutRewritingOrDeletingCredential() async throws {
+        let backend = AdministrationCredentialBackend()
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.response(status: 204, ""),
+        ])
+        let (client, store) = makeClient(http: http, backend: backend)
+        try await store.saveToken("stored-admin", for: endpoint, role: .administrator)
+        try await client.attach(endpoint: endpoint)
+
+        do {
+            try await client.verifyStoredAdministrator()
+            XCTFail("expected exact-status rejection")
+        } catch {
+            XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+        }
+
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        let saveCount = await backend.saveCount
+        XCTAssertEqual(stored, "stored-admin")
+        XCTAssertEqual(saveCount, 1)
+    }
+
     func testInvalidTokenAndClientTokenAreDistinguishedAndNeverSaved() async throws {
         let http = ScriptedRouterHTTPClient(results: [
             .failure(NetworkError.unauthorized),
@@ -384,6 +430,7 @@ final class RouterAdministrationClientTests: XCTestCase {
 
 private actor AdministrationCredentialBackend: RouterCredentialBackend {
     private var values: [String: Data] = [:]
+    private(set) var saveCount = 0
     private let gateSaves: Bool
     private var saveStarted = false
     private var saveStartedWaiters: [CheckedContinuation<Void, Never>] = []
@@ -396,6 +443,7 @@ private actor AdministrationCredentialBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
 
     func save(_ data: Data, account: String) async throws {
+        saveCount += 1
         saveStarted = true
         let waiters = saveStartedWaiters
         saveStartedWaiters = []
