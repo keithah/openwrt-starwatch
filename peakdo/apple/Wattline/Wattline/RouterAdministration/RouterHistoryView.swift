@@ -74,14 +74,32 @@ struct RouterHistoryView: View {
                     .chartYScale(domain: 0...100)
                     .frame(minHeight: 160)
 
-                    Chart(
-                        presentation.history.powerPoints.filter { $0.watts != nil },
-                        id: \.at
-                    ) { point in
-                        LineMark(
-                            x: .value("Time", point.at),
-                            y: .value("Watts", point.watts ?? 0)
-                        )
+                    Chart {
+                        ForEach(presentation.history.powerSeriesPoints) { point in
+                            if let watts = point.watts,
+                               let segment = point.segment {
+                                LineMark(
+                                    x: .value("Time", point.at),
+                                    y: .value("Watts", watts),
+                                    series: .value(
+                                        "Line segment",
+                                        "\(point.series.rawValue)-\(segment)"
+                                    )
+                                )
+                                .foregroundStyle(by: .value(
+                                    "Power series",
+                                    point.series.label
+                                ))
+                                .symbol(by: .value(
+                                    "Power series",
+                                    point.series.label
+                                ))
+                                .lineStyle(StrokeStyle(
+                                    lineWidth: point.series == .aggregate ? 3 : 1.5,
+                                    dash: point.series == .typeC ? [5, 3] : []
+                                ))
+                            }
+                        }
                     }
                     .frame(minHeight: 120)
 

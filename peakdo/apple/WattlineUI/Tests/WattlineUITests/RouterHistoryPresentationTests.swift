@@ -121,4 +121,37 @@ final class RouterHistoryPresentationTests: XCTestCase {
         XCTAssertTrue(empty.isEmpty)
         XCTAssertNil(empty.fetchedAt)
     }
+
+    func testPowerSeriesPreserveExactValuesSortingAndMissingValueGaps() {
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        let t1 = Date(timeIntervalSince1970: 1_060)
+        let t2 = Date(timeIntervalSince1970: 1_120)
+        let t3 = Date(timeIntervalSince1970: 1_180)
+        let t4 = Date(timeIntervalSince1970: 1_240)
+        let presentation = RouterHistoryPresentation(
+            points: [
+                RouterHistoryPoint(at: t4, level: 73, dcWatts: 1, typeCWatts: 2),
+                RouterHistoryPoint(at: t2, level: 75, dcWatts: 4, typeCWatts: nil),
+                RouterHistoryPoint(at: t0, level: 77, dcWatts: 12, typeCWatts: 20),
+                RouterHistoryPoint(at: t3, level: 74, dcWatts: nil, typeCWatts: nil),
+                RouterHistoryPoint(at: t1, level: 76, dcWatts: nil, typeCWatts: 7.5),
+            ],
+            fetchedAt: t4
+        )
+
+        let aggregate = presentation.powerSeriesPoints.filter { $0.series == .aggregate }
+        XCTAssertEqual(aggregate.map(\.at), [t0, t1, t2, t3, t4])
+        XCTAssertEqual(aggregate.map(\.watts), [32, 7.5, 4, nil, 3])
+        XCTAssertEqual(aggregate.map(\.segment), [0, 0, 0, nil, 1])
+
+        let dc = presentation.powerSeriesPoints.filter { $0.series == .dc }
+        XCTAssertEqual(dc.map(\.watts), [12, nil, 4, nil, 1])
+        XCTAssertEqual(dc.map(\.segment), [0, nil, 1, nil, 2])
+
+        let typeC = presentation.powerSeriesPoints.filter { $0.series == .typeC }
+        XCTAssertEqual(typeC.map(\.watts), [20, 7.5, nil, nil, 2])
+        XCTAssertEqual(typeC.map(\.segment), [0, 0, nil, nil, 1])
+
+        XCTAssertEqual(presentation.powerPoints.map(\.watts), [32, 7.5, 4, nil, 3])
+    }
 }

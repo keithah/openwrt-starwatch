@@ -24,9 +24,48 @@ public struct RouterHistoryPowerPoint: Equatable, Sendable {
     }
 }
 
+public enum RouterHistoryPowerSeries: String, Equatable, Hashable, Sendable {
+    case aggregate
+    case dc
+    case typeC
+
+    public var label: String {
+        switch self {
+        case .aggregate: "Total"
+        case .dc: "DC"
+        case .typeC: "Type-C"
+        }
+    }
+}
+
+public struct RouterHistoryPowerSeriesPoint: Equatable, Hashable, Sendable, Identifiable {
+    public let id: Int
+    public let at: Date
+    public let series: RouterHistoryPowerSeries
+    public let watts: Double?
+    /// Equal values form one continuous line. A nil sample has no segment and
+    /// increments the next observed segment, so charts render a real gap.
+    public let segment: Int?
+
+    public init(
+        id: Int,
+        at: Date,
+        series: RouterHistoryPowerSeries,
+        watts: Double?,
+        segment: Int?
+    ) {
+        self.id = id
+        self.at = at
+        self.series = series
+        self.watts = watts
+        self.segment = segment
+    }
+}
+
 public struct RouterHistoryPresentation: Equatable, Sendable {
     public let points: [RouterHistoryPoint]
     public let powerPoints: [RouterHistoryPowerPoint]
+    public let powerSeriesPoints: [RouterHistoryPowerSeriesPoint]
     public let fetchedAt: Date?
 
     public var isEmpty: Bool { points.isEmpty }
@@ -34,14 +73,64 @@ public struct RouterHistoryPresentation: Equatable, Sendable {
     public init(points: [RouterHistoryPoint], fetchedAt: Date?) {
         let sorted = points.sorted { $0.at < $1.at }
         self.points = sorted
-        powerPoints = sorted.map { point in
+        let aggregateWatts = sorted.map { point in
             let watts: Double? = switch (point.dcWatts, point.typeCWatts) {
             case (nil, nil): nil
             case let (dc, typeC): (dc ?? 0) + (typeC ?? 0)
             }
-            return RouterHistoryPowerPoint(at: point.at, watts: watts)
+            return watts
         }
+        powerPoints = zip(sorted, aggregateWatts).map {
+            RouterHistoryPowerPoint(at: $0.0.at, watts: $0.1)
+        }
+
+        let dcWatts = sorted.map(\.dcWatts)
+        let typeCWatts = sorted.map(\.typeCWatts)
+        let aggregateSegments = Self.segments(for: aggregateWatts)
+        let dcSegments = Self.segments(for: dcWatts)
+        let typeCSegments = Self.segments(for: typeCWatts)
+        var seriesPoints: [RouterHistoryPowerSeriesPoint] = []
+        seriesPoints.reserveCapacity(sorted.count * 3)
+        for index in sorted.indices {
+            let values: [(
+                RouterHistoryPowerSeries,
+                Double?,
+                Int?
+            )] = [
+                (.aggregate, aggregateWatts[index], aggregateSegments[index]),
+                (.dc, dcWatts[index], dcSegments[index]),
+                (.typeC, typeCWatts[index], typeCSegments[index]),
+            ]
+            for (series, watts, segment) in values {
+                seriesPoints.append(RouterHistoryPowerSeriesPoint(
+                    id: seriesPoints.count,
+                    at: sorted[index].at,
+                    series: series,
+                    watts: watts,
+                    segment: segment
+                ))
+            }
+        }
+        powerSeriesPoints = seriesPoints
         self.fetchedAt = fetchedAt
+    }
+
+    private static func segments(for values: [Double?]) -> [Int?] {
+        var currentSegment = 0
+        var hasObservedValue = false
+        var gapAfterObservedValue = false
+        return values.map { value in
+            guard value != nil else {
+                if hasObservedValue { gapAfterObservedValue = true }
+                return nil
+            }
+            if gapAfterObservedValue {
+                currentSegment += 1
+                gapAfterObservedValue = false
+            }
+            hasObservedValue = true
+            return currentSegment
+        }
     }
 }
 
