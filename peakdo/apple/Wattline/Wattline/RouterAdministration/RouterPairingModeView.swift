@@ -8,50 +8,65 @@ struct RouterPairingModeView: View {
 
     var body: some View {
         Group {
-            if let status = model.pairingStatus, status.open {
-                if let pin = status.pin {
-                    LabeledContent("Pairing PIN") {
-                        Text(pin)
-                            .monospacedDigit()
-                            .textSelection(.enabled)
+            switch model.pairingDisplayState {
+            case .open:
+                if let status = model.pairingStatus {
+                    if let pin = status.pin {
+                        LabeledContent("Pairing PIN") {
+                            Text(pin)
+                                .monospacedDigit()
+                                .textSelection(.enabled)
+                        }
                     }
-                }
-                Text("Expires \(status.expiresAt.formatted(date: .omitted, time: .standard))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                if let png = model.pairingQRPNG,
-                   let image = UIImage(data: png)
-                {
-                    Image(uiImage: image)
-                        .resizable()
-                        .interpolation(.none)
-                        .scaledToFit()
-                        .frame(maxWidth: 240)
-                        .accessibilityLabel("Router pairing QR code")
-                    ShareLink(
-                        item: Image(uiImage: image),
-                        preview: SharePreview(
-                            "Wattline pairing QR",
-                            image: Image(uiImage: image)
+                    Text("Expires \(status.expiresAt.formatted(date: .omitted, time: .standard))")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    if let png = model.pairingQRPNG,
+                       let image = UIImage(data: png)
+                    {
+                        Image(uiImage: image)
+                            .resizable()
+                            .interpolation(.none)
+                            .scaledToFit()
+                            .frame(maxWidth: 240)
+                            .accessibilityLabel("Router pairing QR code")
+                        ShareLink(
+                            item: Image(uiImage: image),
+                            preview: SharePreview(
+                                "Wattline pairing QR",
+                                image: Image(uiImage: image)
+                            )
                         )
-                    )
-                } else {
-                    Button("Show pairing QR") {
-                        Task { await model.loadPairingQR() }
+                    } else if model.isPairingQRLoading {
+                        ProgressView("Loading pairing QR…")
+                    } else {
+                        Button("Show pairing QR") {
+                            Task { await model.loadPairingQR() }
+                        }
+                    }
+                    Button("Close pairing", role: .destructive) {
+                        Task { await model.closePairing() }
                     }
                 }
-                Button("Close pairing", role: .destructive) {
-                    Task { await model.closePairing() }
-                }
-            } else if model.pairingStatus != nil {
+            case .closed:
                 Text("Pairing is closed. Opening it shows a six-digit PIN and QR for about five minutes.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button("Open pairing") {
                     Task { await model.openPairing() }
                 }
-            } else {
+            case .expired:
+                Text("The pairing window expired. Open a new pairing window or refresh the router status.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Open new pairing") {
+                    Task { await model.openPairing() }
+                }
+                Button("Refresh pairing status") {
+                    Task { await model.reloadPairingMode() }
+                }
+            case .unknown:
                 ProgressView("Checking pairing status…")
             }
             if let message = model.pairingError {

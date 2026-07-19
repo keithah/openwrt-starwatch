@@ -53,6 +53,22 @@ final class RouterPairingAdministrationTests: XCTestCase {
         XCTAssertEqual(http.calls.map(\.body), [nil, nil, nil])
     }
 
+    func testClosedPairingModeRejectsPayloadThatCarriesPIN() async throws {
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(
+                #"{"open":false,"expires_at":"0001-01-01T00:00:00Z","pin":"123456"}"#
+            ),
+        ])
+        let client = try await makeAttachedClient(http: http)
+
+        do {
+            _ = try await client.pairingMode()
+            XCTFail("expected incoherent closed pairing response rejection")
+        } catch {
+            XCTAssertEqual(error as? RouterAdministrationError, .invalidResponse)
+        }
+    }
+
     func testQRFetchHasNoQueryAcceptsParameterizedCaseInsensitivePNG() async throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
         let http = ScriptedRouterHTTPClient(results: [

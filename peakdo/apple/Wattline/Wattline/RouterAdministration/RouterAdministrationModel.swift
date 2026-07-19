@@ -21,6 +21,16 @@ final class RouterAdministrationModel {
         case refreshing
     }
 
+    enum PairingDisplayState: Equatable {
+        case unknown
+        case open
+        case closed
+        case expired
+
+        var canOpenPairing: Bool { self == .closed || self == .expired }
+        var canRefresh: Bool { self == .expired }
+    }
+
     private(set) var host: RouterHostMetadata?
     private(set) var access: AdminAccess = .locked
     private(set) var adminError: String?
@@ -31,6 +41,8 @@ final class RouterAdministrationModel {
     private(set) var pairingStatus: RouterPairingMode?
     private(set) var pairingQRPNG: Data?
     private(set) var pairingError: String?
+    private(set) var pairingDisplayState: PairingDisplayState = .unknown
+    private(set) var isPairingQRLoading = false
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
@@ -42,6 +54,7 @@ final class RouterAdministrationModel {
     private var historyRequestGeneration: UInt64 = 0
     private var pairingSecretGeneration: UInt64 = 0
     private var pairingStatusRequestGeneration: UInt64 = 0
+    private var pairingQRRequestGeneration: UInt64 = 0
     private var pairingExpiryTask: Task<Void, Never>?
 
     init(
@@ -246,9 +259,17 @@ final class RouterAdministrationModel {
 
     func loadPairingQR() async {
         guard pairingStatus?.open == true else { return }
-        let result = await performPairingAdmin { client in
+        pairingQRRequestGeneration &+= 1
+        let requestGeneration = pairingQRRequestGeneration
+        isPairingQRLoading = true
+        pairingError = nil
+        let result = await performPairingAdmin({ client in
             try await client.pairingQRCodePNG()
-        }
+        }, isCurrent: { [weak self] in
+            self?.pairingQRRequestGeneration == requestGeneration
+        })
+        guard pairingQRRequestGeneration == requestGeneration else { return }
+        isPairingQRLoading = false
         switch result {
         case let .success(png):
             guard pairingStatus?.open == true else { return }
@@ -262,11 +283,7 @@ final class RouterAdministrationModel {
     }
 
     func clearPairingSecrets() {
-        pairingExpiryTask?.cancel()
-        pairingExpiryTask = nil
-        pairingSecretGeneration &+= 1
-        pairingStatus = nil
-        pairingQRPNG = nil
+        invalidatePairingSecrets(displayState: .unknown)
     }
 
     func expirePairingSecretsIfNeeded() {
@@ -274,7 +291,7 @@ final class RouterAdministrationModel {
               status.open,
               status.expiresAt <= now()
         else { return }
-        clearPairingSecrets()
+        expirePairingSecrets()
     }
 
     func pairingDidEnterBackground() {
@@ -290,16 +307,21 @@ final class RouterAdministrationModel {
         pairingExpiryTask?.cancel()
         pairingExpiryTask = nil
         pairingSecretGeneration &+= 1
+        pairingQRRequestGeneration &+= 1
+        isPairingQRLoading = false
         pairingQRPNG = nil
         guard status.open else {
             pairingStatus = status
+            pairingDisplayState = .closed
             return
         }
         guard status.expiresAt > now() else {
             pairingStatus = nil
+            pairingDisplayState = .expired
             return
         }
         pairingStatus = status
+        pairingDisplayState = .open
         schedulePairingExpiry(at: status.expiresAt)
     }
 
@@ -319,8 +341,23 @@ final class RouterAdministrationModel {
                   pairingStatus?.expiresAt == deadline,
                   deadline <= now()
             else { return }
-            clearPairingSecrets()
+            expirePairingSecrets()
         }
+    }
+
+    private func expirePairingSecrets() {
+        invalidatePairingSecrets(displayState: .expired)
+    }
+
+    private func invalidatePairingSecrets(displayState: PairingDisplayState) {
+        pairingExpiryTask?.cancel()
+        pairingExpiryTask = nil
+        pairingSecretGeneration &+= 1
+        pairingQRRequestGeneration &+= 1
+        pairingStatus = nil
+        pairingQRPNG = nil
+        isPairingQRLoading = false
+        pairingDisplayState = displayState
     }
 
     private enum AdminResult<Value> {
@@ -330,7 +367,8 @@ final class RouterAdministrationModel {
     }
 
     private func performAdmin<Value>(
-        _ operation: (RouterAdministrationClient) async throws -> Value
+        _ operation: (RouterAdministrationClient) async throws -> Value,
+        isCurrent: () -> Bool = { true }
     ) async -> AdminResult<Value> {
         guard host != nil, access == .unlocked else { return .stale }
         let session = sessionGeneration
@@ -339,7 +377,8 @@ final class RouterAdministrationModel {
             let value = try await operation(adminClient)
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
-                  access == .unlocked
+                  access == .unlocked,
+                  isCurrent()
             else { return .stale }
             return .success(value)
         } catch is CancellationError {
@@ -347,7 +386,8 @@ final class RouterAdministrationModel {
         } catch {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
-                  access == .unlocked
+                  access == .unlocked,
+                  isCurrent()
             else { return .stale }
             if handleAdminFailure(error) {
                 try? await adminClient.clearAdministratorCredential()
@@ -358,10 +398,13 @@ final class RouterAdministrationModel {
     }
 
     private func performPairingAdmin<Value>(
-        _ operation: (RouterAdministrationClient) async throws -> Value
+        _ operation: (RouterAdministrationClient) async throws -> Value,
+        isCurrent: () -> Bool = { true }
     ) async -> AdminResult<Value> {
         let secretGeneration = pairingSecretGeneration
-        let result = await performAdmin(operation)
+        let result = await performAdmin(operation) {
+            pairingSecretGeneration == secretGeneration && isCurrent()
+        }
         guard pairingSecretGeneration == secretGeneration else {
             return .stale
         }
@@ -374,7 +417,9 @@ final class RouterAdministrationModel {
     ) async {
         pairingStatusRequestGeneration &+= 1
         let requestGeneration = pairingStatusRequestGeneration
-        let result = await performPairingAdmin(operation)
+        let result = await performPairingAdmin(operation) {
+            pairingStatusRequestGeneration == requestGeneration
+        }
         guard pairingStatusRequestGeneration == requestGeneration else { return }
         switch result {
         case let .success(value):

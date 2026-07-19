@@ -70,7 +70,9 @@ extension RouterAdministrationClient {
     private static func decodePairingMode(_ data: Data) throws -> RouterPairingMode {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let mode = try? decoder.decode(RouterPairingMode.self, from: data) else {
+        guard let mode = try? decoder.decode(RouterPairingMode.self, from: data),
+              mode.open || mode.pin == nil
+        else {
             throw RouterAdministrationError.invalidResponse
         }
         return mode

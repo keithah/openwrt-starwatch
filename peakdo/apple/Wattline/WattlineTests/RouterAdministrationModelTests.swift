@@ -737,6 +737,37 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(fixture.model.pairingQRPNG)
     }
 
+    func testNewerQRSuccessWinsOverOlderErrorAndOwnsLoadingState() async throws {
+        let openBody = #"{"open":true,"expires_at":"2099-07-18T00:05:00Z","pin":"123456"}"#
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(openBody),
+            .failure(NetworkError.timeout),
+            .success((png, AdminScriptedHTTP.pngResponse())),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.openPairing()
+        fixture.http.gateNextRequest()
+
+        let olderLoad = Task { await fixture.model.loadPairingQR() }
+        await fixture.http.waitForGateRegistration()
+        XCTAssertTrue(fixture.model.isPairingQRLoading)
+
+        await fixture.model.loadPairingQR()
+        XCTAssertEqual(fixture.model.pairingQRPNG, png)
+        XCTAssertNil(fixture.model.pairingError)
+        XCTAssertFalse(fixture.model.isPairingQRLoading)
+
+        fixture.http.releaseGates()
+        await olderLoad.value
+
+        XCTAssertEqual(fixture.model.pairingQRPNG, png)
+        XCTAssertNil(fixture.model.pairingError)
+        XCTAssertFalse(fixture.model.isPairingQRLoading)
+    }
+
     func testStalePairing401AfterLockAndReunlockCannotRelockOrDeleteNewToken() async throws {
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
@@ -877,7 +908,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(fixture.model.pairingQRPNG)
     }
 
-    func testAlreadyExpiredOpenReadbackNeverExposesPINOrQR() async throws {
+    func testAlreadyExpiredOpenReadbackClearsSecretsAndOffersRecoveryActions() async throws {
         let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
         let currentTime = ISO8601DateFormatter().date(from: "2026-07-18T00:06:00Z")!
         let fixture = try await makeFixture(
@@ -894,6 +925,9 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         XCTAssertNil(fixture.model.pairingStatus)
         XCTAssertNil(fixture.model.pairingQRPNG)
+        XCTAssertEqual(fixture.model.pairingDisplayState, .expired)
+        XCTAssertTrue(fixture.model.pairingDisplayState.canOpenPairing)
+        XCTAssertTrue(fixture.model.pairingDisplayState.canRefresh)
     }
 
     func testSuccessfulClosePublishesConfirmedClosedInsteadOfUnknown() async throws {
@@ -931,6 +965,7 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         XCTAssertNil(fixture.model.pairingStatus)
         XCTAssertNil(fixture.model.pairingQRPNG)
+        XCTAssertEqual(fixture.model.pairingDisplayState, .unknown)
 
         await fixture.model.pairingDidBecomeActive()
 
@@ -941,7 +976,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         )
     }
 
-    func testScheduledExpiryUsesExactRouterDeadlineAndClearsSecrets() async throws {
+    func testScheduledExpiryClearsSecretsAndOffersRecoveryActionsAtExactDeadline() async throws {
         let openBody = #"{"open":true,"expires_at":"2026-07-18T00:05:00Z","pin":"123456"}"#
         let start = ISO8601DateFormatter().date(from: "2026-07-18T00:00:00Z")!
         let expiry = ISO8601DateFormatter().date(from: "2026-07-18T00:05:00Z")!
@@ -974,6 +1009,9 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         XCTAssertNil(fixture.model.pairingStatus)
         XCTAssertNil(fixture.model.pairingQRPNG)
+        XCTAssertEqual(fixture.model.pairingDisplayState, .expired)
+        XCTAssertTrue(fixture.model.pairingDisplayState.canOpenPairing)
+        XCTAssertTrue(fixture.model.pairingDisplayState.canRefresh)
     }
 
     func testNewStatusReplacesExpiryTaskAndEndCancelsReplacement() async throws {
