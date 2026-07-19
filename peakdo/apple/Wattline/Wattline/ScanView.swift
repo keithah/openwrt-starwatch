@@ -9,6 +9,7 @@ struct ScanView: View {
     @State private var showsRouterSetup = false
     @State private var showsPairingEntry = false
     @State private var discoveredRouterSetup: DiscoveredRouter?
+    @State private var administrationHost: RouterHostMetadata?
 
     private var scanRecords: [AppDeviceConnectionRecord] {
         model.routerConnections.scanRecords(
@@ -65,10 +66,17 @@ struct ScanView: View {
                                     }
                                     .buttonStyle(.plain)
 
-                                    if presentation.offersRouterAction {
+                                    if presentation.offersRouterAction || record.routerHost != nil {
                                         Menu {
-                                            Button(record.routerHost == nil ? "Enroll with router" : "Connect via router") {
-                                                performRouterAction(record)
+                                            if presentation.offersRouterAction {
+                                                Button(record.routerHost == nil ? "Enroll with router" : "Connect via router") {
+                                                    performRouterAction(record)
+                                                }
+                                            }
+                                            if let host = record.routerHost {
+                                                Button("Router administration") {
+                                                    administrationHost = host
+                                                }
                                             }
                                         } label: {
                                             Image(systemName: "ellipsis.circle")
@@ -112,6 +120,9 @@ struct ScanView: View {
             }
             .sheet(item: $discoveredRouterSetup) { router in
                 RouterEnrollmentView(router: router)
+            }
+            .sheet(item: $administrationHost) { host in
+                RouterAdministrationView(host: host)
             }
             .sheet(isPresented: pairingPayloadPresented) {
                 if let payload = model.routerEnrollmentRoute.payload {

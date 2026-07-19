@@ -52,7 +52,7 @@ final class RouterConnectionModel {
     private var discoveryTask: Task<Void, Never>?
 
     private let hostStore: RouterHostStore
-    private let credentialStore: RouterCredentialStore
+    let credentialStore: RouterCredentialStore
     private let discovery: RouterDiscovery?
     private let enrollmentClientFactory: EnrollmentClientFactory
     private let transportFactory: TransportFactory

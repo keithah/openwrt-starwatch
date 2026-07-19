@@ -220,6 +220,7 @@ final class AppModel {
     private let widgetReloadAdapter: WidgetReloadAdapter?
     private let liveActivityCoordinator: LiveActivityCoordinator
     let routerConnections: RouterConnectionModel
+    let routerAdministration: RouterAdministrationModel
     let routerEnrollmentRoute: RouterEnrollmentRoute
     private var snapshotFlushTask: Task<Void, Never>?
     private var transport: (any DeviceTransport)?
@@ -310,6 +311,7 @@ final class AppModel {
         widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter(),
         liveActivityAdapter: any LiveActivityAdapter = SystemLiveActivityAdapter(),
         routerConnections: RouterConnectionModel = .production(),
+        routerAdministration: RouterAdministrationModel? = nil,
         routerEnrollmentRoute: RouterEnrollmentRoute = RouterEnrollmentRoute()
     ) {
         self.persistence = persistence
@@ -325,6 +327,13 @@ final class AppModel {
         self.widgetReloadAdapter = widgetReloadAdapter
         self.liveActivityCoordinator = LiveActivityCoordinator(adapter: liveActivityAdapter)
         self.routerConnections = routerConnections
+        self.routerAdministration = routerAdministration ?? RouterAdministrationModel(
+            connections: routerConnections,
+            adminClient: RouterAdministrationClient(
+                credentials: routerConnections.credentialStore,
+                httpFactory: { try HTTPClient(endpoint: $0) }
+            )
+        )
         self.routerEnrollmentRoute = routerEnrollmentRoute
         let onboardingComplete = persistence.onboardingComplete
         route = onboardingComplete ? .scan : .onboarding
