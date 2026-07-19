@@ -14,9 +14,10 @@ import {
 import {DISH_GRAPH_SERIES, dashboardSection, normalizeOverviewPreferences, starlinkConnected, visibleDashboardCards, visibleOverviewCards} from './dashboard-model.js';
 import {DisconnectedState, SectionHeader} from './dashboard.js';
 import {axisTickLabels, chartStructureKey, mountChart} from './charts.js';
-import {APIError} from './api.js';
+import {APIError, apiFetch, LiveClient} from './api.js';
 import {h, render} from './vendor/preact.module.js';
 import {ClientManagement, GraphCard, WifiEditor} from './cards.js';
+import {SettingsView} from './views.js';
 
 const results = [];
 const assert = (name, condition) => {
@@ -88,6 +89,48 @@ try {
   ]);
   assert('series timestamps align', aligned.timestamps.length === 3 && aligned.series[0].values[1] === null);
   assert('aggregate envelope survives', aligned.series[1].min[1] === 1 && aligned.series[1].max[1] === 4);
+  const nullGap = assembleSeries([{series: 'a', points: [{time: '2026-01-01T00:00:00Z', value: null, min: null, max: null}]}]);
+  assert('null history values remain gaps instead of becoming zero', nullGap.series[0].values[0] === null && nullGap.series[0].min[0] === null && nullGap.series[0].max[0] === null);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('', {status: 200});
+  assert('empty successful API response resolves to null', await apiFetch('token', '/empty') === null);
+  globalThis.fetch = async () => new Response('not json', {status: 200, headers: {'Content-Type': 'text/plain'}});
+  assert('non-JSON successful API response resolves to null', await apiFetch('token', '/text') === null);
+  globalThis.fetch = originalFetch;
+  const OriginalWebSocket = globalThis.WebSocket;
+  let fakeSocket;
+  class FakeWebSocket {
+    constructor() { fakeSocket = this; }
+    close() {}
+  }
+  globalThis.WebSocket = FakeWebSocket;
+  let unauthorizedCalls = 0;
+  let pollCalls = 0;
+  let statusCalls = 0;
+  const authClient = new LiveClient({
+    token: 'bad-token',
+    onUnauthorized: () => { unauthorizedCalls++; },
+    onStatus: () => { statusCalls++; },
+    onFrame: () => {},
+    poll: async () => { pollCalls++; return {}; },
+  });
+  authClient.start();
+  fakeSocket.onclose({code: 1008});
+  await Promise.resolve();
+  assert('WebSocket policy close stops without orphaned polling', unauthorizedCalls === 1 && pollCalls === 0 && statusCalls === 0 && !authClient.pollTimer && !authClient.retryTimer);
+  authClient.stop();
+  globalThis.WebSocket = OriginalWebSocket;
+  const settingsHost = document.createElement('div');
+  document.body.append(settingsHost);
+  let savedSettings;
+  render(h(SettingsView, {config: {}, embedded: true, onSave: value => { savedSettings = value; }}), settingsHost);
+  assert('partial settings config renders without blanking the view', !!settingsHost.querySelector('form'));
+  const probeInterval = settingsHost.querySelector('[name="probe_interval"]');
+  probeInterval.value = '';
+  settingsHost.querySelector('form').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+  assert('blank numeric settings are omitted instead of coerced to zero', !('probe_interval' in savedSettings.main));
+  render(null, settingsHost);
+  settingsHost.remove();
   assert('throughput ticks use rate units', axisTickLabels('throughput', [250000000])[0] === '250.0 Mb/s');
   assert('latency ticks use milliseconds', axisTickLabels('latency', [42.5])[0] === '42.5 ms');
   assert('loss ticks use percentages', axisTickLabels('loss', [.125])[0] === '12.5%');

@@ -89,9 +89,9 @@ export function assembleSeries(responses = []) {
     for (const point of response?.points || []) {
       const index = indexes.get(new Date(point.time).getTime() / 1000);
       if (index === undefined) continue;
-      values[index] = Number(point.value);
-      min[index] = point.min === undefined ? null : Number(point.min);
-      max[index] = point.max === undefined ? null : Number(point.max);
+      values[index] = point.value == null ? null : Number(point.value);
+      min[index] = point.min == null ? null : Number(point.min);
+      max[index] = point.max == null ? null : Number(point.max);
     }
     return {name: response.series, tier: response.tier || 'ram', values, min, max};
   });

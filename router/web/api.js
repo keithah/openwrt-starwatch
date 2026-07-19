@@ -32,7 +32,9 @@ export async function apiFetch(token, path, options = {}) {
   const response = await fetch(path, {...options, headers});
   if (!response.ok) throw new APIError(await errorMessage(response), response.status);
   if (response.status === 204) return null;
-  return response.json();
+  const text = await response.text();
+  if (!text.trim()) return null;
+  try { return JSON.parse(text); } catch (_) { return null; }
 }
 
 export const getHistory = (token, series, span, signal) =>
@@ -69,7 +71,10 @@ export class LiveClient {
     };
     this.socket.onclose = event => {
       if (this.stopped) return;
-      if (event.code === 1008) this.onUnauthorized?.();
+      if (event.code === 1008) {
+        this.onUnauthorized?.();
+        return;
+      }
       this.beginPolling();
       this.retryTimer = setTimeout(() => this.connect(), this.backoff);
       this.backoff = Math.min(30000, this.backoff * 2);
