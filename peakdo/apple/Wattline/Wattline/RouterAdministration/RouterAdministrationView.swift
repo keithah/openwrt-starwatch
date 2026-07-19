@@ -18,6 +18,16 @@ struct RouterAdministrationView: View {
                     LabeledContent("Address", value: "\(host.host):\(host.port)")
                 }
 
+                Section("History") {
+                    RouterHistoryView(model: admin)
+                    if let message = admin.historyError {
+                        Text(message).foregroundStyle(.orange)
+                    }
+                    Button("Refresh history") {
+                        Task { await admin.reloadHistory() }
+                    }
+                }
+
                 if presentation.showsUnlockField {
                     Section {
                         SecureField("Administrator token", text: $adminToken)

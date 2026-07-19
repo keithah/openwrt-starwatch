@@ -6,6 +6,82 @@ import XCTest
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testReloadHistoryIsLazyStampsFetchTimeAndQuarantinesStaleSessions() async throws {
+        let sample = #"[{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]"#
+        let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            historyResults: [AdminScriptedHTTP.ok(sample)],
+            now: { fixedNow }
+        )
+        await fixture.model.begin(host: fixture.host)
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertNil(fixture.model.historyFetchedAt)
+
+        await fixture.model.reloadHistory()
+
+        XCTAssertEqual(fixture.model.history.count, 1)
+        XCTAssertEqual(fixture.model.history.first?.level, 77)
+        XCTAssertEqual(fixture.model.historyFetchedAt, fixedNow)
+
+        await fixture.model.end()
+        XCTAssertEqual(fixture.model.history, [])
+    }
+
+    func testHistoryResultFromEndedSessionDoesNotPublish() async throws {
+        let sample = #"[{"at":"2026-07-17T19:59:00Z","level":77,"status":1}]"#
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok(sample)],
+            historyGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        let reload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+        await fixture.model.end()
+        fixture.historyHTTP.releaseGates()
+        await reload.value
+
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertNil(fixture.model.historyFetchedAt)
+        XCTAssertNil(fixture.model.historyError)
+    }
+
+    func testHistoryErrorFromEndedSessionDoesNotPublish() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [.failure(NetworkError.timeout)],
+            historyGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        let reload = Task { await fixture.model.reloadHistory() }
+        await fixture.historyHTTP.waitForGateRegistration()
+        await fixture.model.end()
+        fixture.historyHTTP.releaseGates()
+        await reload.value
+
+        XCTAssertNil(fixture.model.historyError)
+    }
+
+    func testBeginningReplacementSessionClearsPublishedHistory() async throws {
+        let sample = #"[{"at":"2026-07-17T19:59:00Z","level":77,"status":1}]"#
+        let fixture = try await makeFixture(
+            results: [],
+            historyResults: [AdminScriptedHTTP.ok(sample)]
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.reloadHistory()
+        XCTAssertEqual(fixture.model.history.count, 1)
+
+        await fixture.model.begin(host: fixture.host)
+
+        XCTAssertEqual(fixture.model.history, [])
+        XCTAssertNil(fixture.model.historyFetchedAt)
+        XCTAssertNil(fixture.model.historyError)
+    }
+
     func testUnlockRequiresSettings200AndGatesSectionsStructurally() async throws {
         let fixture = try await makeFixture(results: [AdminScriptedHTTP.ok("{}")])
         await fixture.model.begin(host: fixture.host)
@@ -274,12 +350,16 @@ private struct AdministrationFixture {
     let host: RouterHostMetadata
     let credentialStore: RouterCredentialStore
     let http: AdminScriptedHTTP
+    let historyHTTP: AdminScriptedHTTP
 }
 
 @MainActor
 private func makeFixture(
     results: [Result<(Data, HTTPURLResponse), Error>],
+    historyResults: [Result<(Data, HTTPURLResponse), Error>] = [],
+    now: @escaping () -> Date = { Date() },
     gateRequests: Bool = false,
+    historyGateRequests: Bool = false,
     credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend()
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
@@ -300,16 +380,30 @@ private func makeFixture(
         transportFactory: { _, _ in throw NetworkError.unsupported("no transport in tests") }
     )
     let http = AdminScriptedHTTP(results: results, gateRequests: gateRequests)
+    let historyHTTP = AdminScriptedHTTP(
+        results: historyResults,
+        gateRequests: historyGateRequests
+    )
     let model = RouterAdministrationModel(
         connections: connections,
-        adminClient: RouterAdministrationClient(credentials: credentialStore) { _ in http }
+        adminClient: RouterAdministrationClient(credentials: credentialStore) { _ in http },
+        historyClientFactory: { endpoint in
+            RouterHistoryClient(
+                httpClient: historyHTTP,
+                credentials: credentialStore,
+                endpoint: endpoint
+            )
+        },
+        now: now
     )
+    try await credentialStore.saveToken("wlt_client", for: host.endpoint)
     return AdministrationFixture(
         model: model,
         connections: connections,
         host: host,
         credentialStore: credentialStore,
-        http: http
+        http: http,
+        historyHTTP: historyHTTP
     )
 }
 
@@ -451,7 +545,9 @@ private actor FirstDeleteGatedAdministrationBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
     func save(_ data: Data, account: String) async throws {
         values[account] = data
-        saveCount += 1
+        if account.hasSuffix(".administrator") {
+            saveCount += 1
+        }
     }
 
     func delete(account: String) async throws {
@@ -487,8 +583,10 @@ private actor FirstSaveGatedAdministrationBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
 
     func save(_ data: Data, account: String) async throws {
-        saveCount += 1
-        if saveCount == 1 {
+        if account.hasSuffix(".administrator") {
+            saveCount += 1
+        }
+        if saveCount == 1, account.hasSuffix(".administrator") {
             firstSaveStarted = true
             let waiters = firstSaveStartedWaiters
             firstSaveStartedWaiters = []

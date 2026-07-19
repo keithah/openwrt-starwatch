@@ -14,14 +14,26 @@ final class RouterAdministrationModel {
     private(set) var host: RouterHostMetadata?
     private(set) var access: AdminAccess = .locked
     private(set) var adminError: String?
+    private(set) var history: [RouterHistorySample] = []
+    private(set) var historyFetchedAt: Date?
+    private(set) var historyError: String?
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
+    private let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient
+    private let now: () -> Date
     private var sessionGeneration: UInt64 = 0
 
-    init(connections: RouterConnectionModel, adminClient: RouterAdministrationClient) {
+    init(
+        connections: RouterConnectionModel,
+        adminClient: RouterAdministrationClient,
+        historyClientFactory: @escaping (RouterEndpoint) throws -> RouterHistoryClient,
+        now: @escaping () -> Date = { Date() }
+    ) {
         self.connections = connections
         self.adminClient = adminClient
+        self.historyClientFactory = historyClientFactory
+        self.now = now
     }
 
     func begin(host: RouterHostMetadata) async {
@@ -30,6 +42,9 @@ final class RouterAdministrationModel {
         self.host = host
         access = .locked
         adminError = nil
+        history = []
+        historyFetchedAt = nil
+        historyError = nil
         do {
             try await adminClient.attach(endpoint: host.endpoint)
         } catch {
@@ -54,7 +69,26 @@ final class RouterAdministrationModel {
         host = nil
         access = .locked
         adminError = nil
+        history = []
+        historyFetchedAt = nil
+        historyError = nil
         await adminClient.detach()
+    }
+
+    func reloadHistory() async {
+        guard let host else { return }
+        let generation = sessionGeneration
+        do {
+            let client = try historyClientFactory(host.endpoint)
+            let samples = try await client.fetch()
+            guard sessionGeneration == generation else { return }
+            history = samples
+            historyFetchedAt = now()
+            historyError = nil
+        } catch {
+            guard sessionGeneration == generation else { return }
+            historyError = "Could not load router history."
+        }
     }
 
     func unlock(token: String) async {

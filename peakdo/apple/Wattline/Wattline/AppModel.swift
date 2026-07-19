@@ -332,7 +332,14 @@ final class AppModel {
             adminClient: RouterAdministrationClient(
                 credentials: routerConnections.credentialStore,
                 httpFactory: { try HTTPClient(endpoint: $0) }
-            )
+            ),
+            historyClientFactory: { [credentials = routerConnections.credentialStore] endpoint in
+                RouterHistoryClient(
+                    httpClient: try HTTPClient(endpoint: endpoint),
+                    credentials: credentials,
+                    endpoint: endpoint
+                )
+            }
         )
         self.routerEnrollmentRoute = routerEnrollmentRoute
         let onboardingComplete = persistence.onboardingComplete
