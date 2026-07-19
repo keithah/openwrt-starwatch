@@ -113,9 +113,9 @@ func newSection(typ, name string) *UCISection {
 
 func unquote(s string) string {
 	if len(s) >= 2 && ((s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"')) {
-		return s[1 : len(s)-1]
+		s = s[1 : len(s)-1]
 	}
-	return s
+	return strings.ReplaceAll(s, "'\\''", "'")
 }
 
 func ParseUCI(src string) (*UCIDoc, error) {

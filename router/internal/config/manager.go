@@ -162,22 +162,27 @@ func (m *Manager) View() PublicConfig {
 
 func (m *Manager) Update(update Update) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	candidate := cloneConfig(m.config)
 	changes, err := applyUpdate(candidate, update, m.options.Now())
 	if err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("%w: %w", ErrInvalidUpdate, err)
 	}
 	rewritten, err := RewriteUCI(m.source, changes)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	if err := m.options.Write(m.path, rewritten); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	m.source, m.config = rewritten, candidate
-	if m.options.Apply != nil {
-		m.options.Apply(cloneConfig(candidate))
+	applied := cloneConfig(candidate)
+	apply := m.options.Apply
+	m.mu.Unlock()
+	if apply != nil {
+		apply(applied)
 	}
 	m.audit("update", update)
 	return nil
@@ -295,10 +300,16 @@ func applyUpdate(cfg *Config, update Update, now time.Time) ([]OptionValue, erro
 	}
 	if input := update.Alerts; input != nil {
 		if input.WebhookURL != nil {
+			if strings.ContainsAny(*input.WebhookURL, "\r\n") {
+				return nil, fmt.Errorf("webhook_url must not contain newlines")
+			}
 			cfg.Alerts.WebhookURL = *input.WebhookURL
 			add("alerts", "", "webhook_url", *input.WebhookURL)
 		}
 		if input.NtfyURL != nil {
+			if strings.ContainsAny(*input.NtfyURL, "\r\n") {
+				return nil, fmt.Errorf("ntfy_url must not contain newlines")
+			}
 			cfg.Alerts.NtfyURL = *input.NtfyURL
 			add("alerts", "", "ntfy_url", *input.NtfyURL)
 		}
@@ -315,39 +326,45 @@ func applyUpdate(cfg *Config, update Update, now time.Time) ([]OptionValue, erro
 				if *patch.Threshold < 0 {
 					return nil, fmt.Errorf("threshold must be nonnegative")
 				}
-				rule.Threshold = *patch.Threshold
 				option, scale := thresholdOption(name, false)
-				if option != "" {
-					add("alerts", "", option, strconv.FormatFloat(*patch.Threshold*scale, 'f', -1, 64))
+				if option == "" {
+					return nil, fmt.Errorf("threshold is not configurable for alert rule %q", name)
 				}
+				rule.Threshold = *patch.Threshold
+				add("alerts", "", option, strconv.FormatFloat(*patch.Threshold*scale, 'f', -1, 64))
 			}
 			if patch.Threshold2 != nil {
 				if *patch.Threshold2 < 0 {
 					return nil, fmt.Errorf("threshold2 must be nonnegative")
 				}
-				rule.Threshold2 = *patch.Threshold2
 				option, scale := thresholdOption(name, true)
-				if option != "" {
-					add("alerts", "", option, strconv.FormatFloat(*patch.Threshold2*scale, 'f', -1, 64))
+				if option == "" {
+					return nil, fmt.Errorf("threshold2 is not configurable for alert rule %q", name)
 				}
+				rule.Threshold2 = *patch.Threshold2
+				add("alerts", "", option, strconv.FormatFloat(*patch.Threshold2*scale, 'f', -1, 64))
 			}
 			if patch.HoldSeconds != nil {
 				if *patch.HoldSeconds < 0 {
 					return nil, fmt.Errorf("hold_seconds must be nonnegative")
 				}
-				rule.Hold = time.Duration(*patch.HoldSeconds) * time.Second
-				if option := holdOption(name, false); option != "" {
-					add("alerts", "", option, strconv.Itoa(*patch.HoldSeconds))
+				option := holdOption(name, false)
+				if option == "" {
+					return nil, fmt.Errorf("hold_seconds is not configurable for alert rule %q", name)
 				}
+				rule.Hold = time.Duration(*patch.HoldSeconds) * time.Second
+				add("alerts", "", option, strconv.Itoa(*patch.HoldSeconds))
 			}
 			if patch.ClearSeconds != nil {
 				if *patch.ClearSeconds < 0 {
 					return nil, fmt.Errorf("clear_seconds must be nonnegative")
 				}
-				rule.ClearHold = time.Duration(*patch.ClearSeconds) * time.Second
-				if option := holdOption(name, true); option != "" {
-					add("alerts", "", option, strconv.Itoa(*patch.ClearSeconds))
+				option := holdOption(name, true)
+				if option == "" {
+					return nil, fmt.Errorf("clear_seconds is not configurable for alert rule %q", name)
 				}
+				rule.ClearHold = time.Duration(*patch.ClearSeconds) * time.Second
+				add("alerts", "", option, strconv.Itoa(*patch.ClearSeconds))
 			}
 			cfg.Alerts.Rules[name] = rule
 		}

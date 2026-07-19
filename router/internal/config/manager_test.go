@@ -201,3 +201,97 @@ func TestManagerAuditsUpdateAndTokenRegeneration(t *testing.T) {
 		t.Fatalf("events=%+v", events.items)
 	}
 }
+
+func TestManagerRejectsNewlinesInDeliveryEndpoints(t *testing.T) {
+	for name, update := range map[string]Update{
+		"webhook": {Alerts: &AlertsUpdate{WebhookURL: stringPointer("https://example.test/hook\noption token 'injected'")}},
+		"ntfy":    {Alerts: &AlertsUpdate{NtfyURL: stringPointer("https://ntfy.test/topic\r\nconfig injected")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "starwatch")
+			if err := os.WriteFile(path, []byte("config alerts\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writes := 0
+			manager, err := NewManager(path, cfg, ManagerOptions{Write: func(string, string) error { writes++; return nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Update(update); !errors.Is(err, ErrInvalidUpdate) {
+				t.Fatalf("err=%v", err)
+			}
+			if writes != 0 {
+				t.Fatalf("writes=%d", writes)
+			}
+		})
+	}
+}
+
+func TestManagerRejectsRuleFieldsWithoutPersistedOptions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "starwatch")
+	if err := os.WriteFile(path, []byte("config alerts\n\toption thermal_throttle_enabled '1'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := cfg.Alerts.Rules["thermal_throttle"]
+	writes := 0
+	manager, err := NewManager(path, cfg, ManagerOptions{Write: func(string, string) error { writes++; return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	threshold := 12.0
+	err = manager.Update(Update{Alerts: &AlertsUpdate{Rules: map[string]RuleUpdate{
+		"thermal_throttle": {Threshold: &threshold},
+	}}})
+	if !errors.Is(err, ErrInvalidUpdate) {
+		t.Fatalf("err=%v", err)
+	}
+	if writes != 0 || manager.Snapshot().Alerts.Rules["thermal_throttle"] != original {
+		t.Fatalf("writes=%d rule=%+v original=%+v", writes, manager.Snapshot().Alerts.Rules["thermal_throttle"], original)
+	}
+}
+
+func TestManagerInvokesApplyAfterReleasingLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "starwatch")
+	if err := os.WriteFile(path, []byte("config starwatch 'main'\n\toption probe_interval '2'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manager *Manager
+	applied := make(chan struct{})
+	manager, err = NewManager(path, cfg, ManagerOptions{Apply: func(*Config) {
+		_ = manager.View()
+		close(applied)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval := 3
+	done := make(chan error, 1)
+	go func() { done <- manager.Update(Update{Main: &MainUpdate{ProbeInterval: &interval}}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Update deadlocked while Apply re-entered the manager")
+	}
+	select {
+	case <-applied:
+	default:
+		t.Fatal("Apply was not invoked")
+	}
+}
+
+func stringPointer(value string) *string { return &value }

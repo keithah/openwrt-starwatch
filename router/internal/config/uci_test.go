@@ -82,3 +82,20 @@ config vendor 'future'
 		}
 	}
 }
+
+func TestRewriteAndParseUCIRoundTripsSpacesAndApostrophes(t *testing.T) {
+	source := "config alerts\n\toption webhook_url 'old'\n"
+	want := "https://example.test/O'Brien Hook"
+	rewritten, err := RewriteUCI(source, []OptionValue{{SectionType: "alerts", Option: "webhook_url", Value: want}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := ParseUCI(rewritten)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := document.Find("alerts", "")
+	if alerts == nil || alerts.Options["webhook_url"] != want {
+		t.Fatalf("rewritten=%q parsed=%#v want=%q", rewritten, alerts, want)
+	}
+}
