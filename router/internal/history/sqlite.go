@@ -117,7 +117,7 @@ func openSQLite(path string, options SQLiteOptions) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=FULL;"); err != nil {
+	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;"); err != nil {
 		return fail(err)
 	}
 	var check string

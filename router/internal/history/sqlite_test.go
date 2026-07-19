@@ -67,12 +67,19 @@ func TestSQLiteFlushAggregatesMinuteAndQuarter(t *testing.T) {
 	}
 }
 
-func TestSQLiteUsesMemoryJournalAndCreatesAllTables(t *testing.T) {
+func TestSQLiteUsesCrashSafeWALAndCreatesAllTables(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	store, _ := openTestSQLite(t, now)
 	var journal string
-	if err := store.db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil || journal != "memory" {
+	if err := store.db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil || journal != "wal" {
 		t.Fatalf("journal=%q err=%v", journal, err)
+	}
+	var synchronous, busyTimeout int
+	if err := store.db.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil || synchronous != 2 {
+		t.Fatalf("synchronous=%d err=%v", synchronous, err)
+	}
+	if err := store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil || busyTimeout != 5000 {
+		t.Fatalf("busy_timeout=%d err=%v", busyTimeout, err)
 	}
 	for _, table := range []string{"minute", "quarter", "events", "outages", "speedtests"} {
 		var count int
