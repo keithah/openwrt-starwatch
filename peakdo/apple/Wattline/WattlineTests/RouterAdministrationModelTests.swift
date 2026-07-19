@@ -69,6 +69,85 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(client, "wlt_client")
     }
 
+    func testStoredUnauthorizedDeletionCannotEraseReplacementSessionCredential() async throws {
+        let backend = FirstDeleteGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                .failure(NetworkError.unauthorized),
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok("{}"),
+            ],
+            credentialBackend: backend
+        )
+        try await fixture.credentialStore.saveToken(
+            "stale-admin",
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+
+        let staleBegin = Task { await fixture.model.begin(host: fixture.host) }
+        await backend.waitForFirstDeleteToStart()
+        await fixture.model.begin(host: fixture.host)
+        let replacementUnlock = Task {
+            await fixture.model.unlock(token: "current-admin")
+        }
+        await fixture.http.waitForCallCount(3)
+        await backend.releaseFirstDelete()
+        await staleBegin.value
+        await replacementUnlock.value
+
+        XCTAssertEqual(fixture.model.host, fixture.host)
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        let stored = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        XCTAssertEqual(stored, "current-admin")
+    }
+
+    func testStoredAdministratorReverificationDoesNotRewriteCredential() async throws {
+        let backend = FirstDeleteGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            credentialBackend: backend
+        )
+        try await fixture.credentialStore.saveToken(
+            "stored-admin",
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+
+        await fixture.model.begin(host: fixture.host)
+
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        let saveCount = await backend.saveCount
+        XCTAssertEqual(saveCount, 1)
+    }
+
+    func testLockInvalidatesInFlightUnlockSaveAndLeavesNoCredential() async throws {
+        let backend = FirstSaveGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            credentialBackend: backend
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        let unlock = Task { await fixture.model.unlock(token: "current-admin") }
+        await backend.waitForFirstSaveToStart()
+        let lock = Task { await fixture.model.lock() }
+        while fixture.model.access != .locked { await Task.yield() }
+        await backend.releaseFirstSave()
+        await unlock.value
+        await lock.value
+
+        XCTAssertEqual(fixture.model.access, .locked)
+        let stored = try await fixture.credentialStore.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        XCTAssertNil(stored)
+    }
+
     func testEndLocksAndStaleUnlockCannotPublishIntoNextSession() async throws {
         let fixture = try await makeFixture(
             results: [AdminScriptedHTTP.ok("{}")],
@@ -155,7 +234,8 @@ private struct AdministrationFixture {
 @MainActor
 private func makeFixture(
     results: [Result<(Data, HTTPURLResponse), Error>],
-    gateRequests: Bool = false
+    gateRequests: Bool = false,
+    credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend()
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
         "https://router.local:8378",
@@ -165,7 +245,7 @@ private func makeFixture(
         deviceID: "DC:04:5A:EB:72:2B",
         certificateFingerprint: String(repeating: "0", count: 64)
     )
-    let credentialStore = RouterCredentialStore(backend: AdministrationMemoryBackend())
+    let credentialStore = RouterCredentialStore(backend: credentialBackend)
     let connections = RouterConnectionModel(
         hostStore: RouterHostStore(backend: AdministrationHostBackend()),
         credentialStore: credentialStore,
@@ -200,6 +280,7 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     private var recorded: [Call] = []
     private var gates: [CheckedContinuation<Void, Never>] = []
     private var gateRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var callCountWaiters: [(minimum: Int, continuation: CheckedContinuation<Void, Never>)] = []
     private let shouldGate: Bool
 
     init(results: [Result<(Data, HTTPURLResponse), Error>], gateRequests: Bool) {
@@ -235,19 +316,23 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     ) async throws -> (Data, HTTPURLResponse) {
         if shouldGate {
             await withCheckedContinuation { gate in
-                let waiters = lock.withLock {
+                let (gateWaiters, callWaiters) = lock.withLock {
                     recorded.append(Call(method: method, path: path, token: token))
                     gates.append(gate)
-                    let waiters = gateRegistrationWaiters
+                    let gateWaiters = gateRegistrationWaiters
                     gateRegistrationWaiters = []
-                    return waiters
+                    let callWaiters = removeSatisfiedCallCountWaiters()
+                    return (gateWaiters, callWaiters)
                 }
-                waiters.forEach { $0.resume() }
+                gateWaiters.forEach { $0.resume() }
+                callWaiters.forEach { $0.resume() }
             }
         } else {
-            lock.withLock {
+            let callWaiters = lock.withLock {
                 recorded.append(Call(method: method, path: path, token: token))
+                return removeSatisfiedCallCountWaiters()
             }
+            callWaiters.forEach { $0.resume() }
         }
         let result = lock.withLock { scripted.isEmpty ? nil : scripted.removeFirst() }
         guard let result else { throw NetworkError.decode("admin HTTP fixture exhausted") }
@@ -265,6 +350,17 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         }
     }
 
+    func waitForCallCount(_ minimum: Int) async {
+        await withCheckedContinuation { continuation in
+            let isAlreadySatisfied = lock.withLock {
+                guard recorded.count < minimum else { return true }
+                callCountWaiters.append((minimum, continuation))
+                return false
+            }
+            if isAlreadySatisfied { continuation.resume() }
+        }
+    }
+
     func releaseGates() {
         let pending = lock.withLock {
             let pending = gates
@@ -273,6 +369,12 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         }
         pending.forEach { $0.resume() }
     }
+
+    private func removeSatisfiedCallCountWaiters() -> [CheckedContinuation<Void, Never>] {
+        let satisfied = callCountWaiters.filter { recorded.count >= $0.minimum }
+        callCountWaiters.removeAll { recorded.count >= $0.minimum }
+        return satisfied.map(\.continuation)
+    }
 }
 
 private actor AdministrationMemoryBackend: RouterCredentialBackend {
@@ -280,6 +382,77 @@ private actor AdministrationMemoryBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
     func save(_ data: Data, account: String) async throws { values[account] = data }
     func delete(account: String) async throws { values[account] = nil }
+}
+
+private actor FirstDeleteGatedAdministrationBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private(set) var saveCount = 0
+    private var deleteCount = 0
+    private var firstDeleteStarted = false
+    private var firstDeleteStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstDeleteGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? { values[account] }
+    func save(_ data: Data, account: String) async throws {
+        values[account] = data
+        saveCount += 1
+    }
+
+    func delete(account: String) async throws {
+        deleteCount += 1
+        if deleteCount == 1 {
+            firstDeleteStarted = true
+            let waiters = firstDeleteStartedWaiters
+            firstDeleteStartedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { firstDeleteGate = $0 }
+        }
+        values[account] = nil
+    }
+
+    func waitForFirstDeleteToStart() async {
+        if firstDeleteStarted { return }
+        await withCheckedContinuation { firstDeleteStartedWaiters.append($0) }
+    }
+
+    func releaseFirstDelete() {
+        firstDeleteGate?.resume()
+        firstDeleteGate = nil
+    }
+}
+
+private actor FirstSaveGatedAdministrationBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private var saveCount = 0
+    private var firstSaveStarted = false
+    private var firstSaveStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstSaveGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? { values[account] }
+
+    func save(_ data: Data, account: String) async throws {
+        saveCount += 1
+        if saveCount == 1 {
+            firstSaveStarted = true
+            let waiters = firstSaveStartedWaiters
+            firstSaveStartedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { firstSaveGate = $0 }
+        }
+        values[account] = data
+    }
+
+    func delete(account: String) async throws { values[account] = nil }
+
+    func waitForFirstSaveToStart() async {
+        if firstSaveStarted { return }
+        await withCheckedContinuation { firstSaveStartedWaiters.append($0) }
+    }
+
+    func releaseFirstSave() {
+        firstSaveGate?.resume()
+        firstSaveGate = nil
+    }
 }
 
 private final class AdministrationHostBackend: RouterHostKeyValueStore, @unchecked Sendable {

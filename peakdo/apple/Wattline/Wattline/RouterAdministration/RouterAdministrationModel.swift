@@ -37,21 +37,15 @@ final class RouterAdministrationModel {
             adminError = "Could not prepare a connection to this router."
             return
         }
-        guard sessionGeneration == generation,
-              let stored = try? await connections.credentialStore.readToken(
-                  for: host.endpoint, role: .administrator
-              ),
-              sessionGeneration == generation
-        else { return }
+        guard sessionGeneration == generation else { return }
         access = .verifying
         do {
-            try await adminClient.verifyAdministrator(token: stored)
+            try await adminClient.verifyStoredAdministrator()
             guard sessionGeneration == generation else { return }
             access = .unlocked
         } catch {
             guard sessionGeneration == generation else { return }
             access = .locked
-            await invalidateAdminCredentialIfRejected(error, endpoint: host.endpoint)
         }
     }
 
@@ -83,21 +77,11 @@ final class RouterAdministrationModel {
     }
 
     func lock() async {
-        guard let host else { return }
+        guard host != nil else { return }
+        sessionGeneration &+= 1
         access = .locked
         adminError = nil
-        try? await connections.credentialStore.deleteToken(
-            for: host.endpoint, role: .administrator
-        )
-    }
-
-    private func invalidateAdminCredentialIfRejected(
-        _ error: Error, endpoint: RouterEndpoint
-    ) async {
-        guard case RouterAdministrationError.invalidAdministratorToken = error else { return }
-        try? await connections.credentialStore.deleteToken(
-            for: endpoint, role: .administrator
-        )
+        try? await adminClient.clearAdministratorCredential()
     }
 
     private static func unlockMessage(for error: Error) -> String {

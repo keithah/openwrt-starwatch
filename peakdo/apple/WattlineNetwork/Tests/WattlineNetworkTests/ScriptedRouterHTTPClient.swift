@@ -19,6 +19,7 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
     private var results: [Result<(Data, HTTPURLResponse), Error>]
     private var pendingGates: [CheckedContinuation<Void, Never>] = []
     private var gateRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var callCountWaiters: [(minimum: Int, continuation: CheckedContinuation<Void, Never>)] = []
     private var _calls: [Call] = []
     private let gateRequests: Bool
 
@@ -59,19 +60,23 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
     ) async throws -> (Data, HTTPURLResponse) {
         if gateRequests {
             await withCheckedContinuation { gate in
-                let waiters = lock.withLock {
+                let (gateWaiters, callWaiters) = lock.withLock {
                     _calls.append(Call(method: method, path: path, body: body, token: token))
                     pendingGates.append(gate)
-                    let waiters = gateRegistrationWaiters
+                    let gateWaiters = gateRegistrationWaiters
                     gateRegistrationWaiters = []
-                    return waiters
+                    let callWaiters = removeSatisfiedCallCountWaiters()
+                    return (gateWaiters, callWaiters)
                 }
-                waiters.forEach { $0.resume() }
+                gateWaiters.forEach { $0.resume() }
+                callWaiters.forEach { $0.resume() }
             }
         } else {
-            lock.withLock {
+            let callWaiters = lock.withLock {
                 _calls.append(Call(method: method, path: path, body: body, token: token))
+                return removeSatisfiedCallCountWaiters()
             }
+            callWaiters.forEach { $0.resume() }
         }
         let next = lock.withLock { results.isEmpty ? nil : results.removeFirst() }
         guard let next else { throw NetworkError.decode("ScriptedRouterHTTPClient exhausted") }
@@ -89,6 +94,17 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
         }
     }
 
+    func waitForCallCount(_ minimum: Int) async {
+        await withCheckedContinuation { continuation in
+            let isAlreadySatisfied = lock.withLock {
+                guard _calls.count < minimum else { return true }
+                callCountWaiters.append((minimum, continuation))
+                return false
+            }
+            if isAlreadySatisfied { continuation.resume() }
+        }
+    }
+
     func releaseGates() {
         let gates = lock.withLock {
             let value = pendingGates
@@ -96,5 +112,11 @@ final class ScriptedRouterHTTPClient: RouterHTTPClient, @unchecked Sendable {
             return value
         }
         gates.forEach { $0.resume() }
+    }
+
+    private func removeSatisfiedCallCountWaiters() -> [CheckedContinuation<Void, Never>] {
+        let satisfied = callCountWaiters.filter { _calls.count >= $0.minimum }
+        callCountWaiters.removeAll { _calls.count >= $0.minimum }
+        return satisfied.map(\.continuation)
     }
 }

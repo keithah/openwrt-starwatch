@@ -74,6 +74,44 @@ public actor RouterAdministrationClient {
         }
     }
 
+    public func verifyStoredAdministrator() async throws {
+        guard let endpoint, let http else { throw RouterAdministrationError.notAttached }
+        let requestGeneration = generation
+        guard let token = try await credentials.readToken(
+            for: endpoint,
+            role: .administrator
+        ) else { throw RouterAdministrationError.invalidAdministratorToken }
+        guard generation == requestGeneration else { throw CancellationError() }
+        do {
+            _ = try await http.get("/api/v1/settings", token: token)
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch NetworkError.unauthorized {
+            await acquireCredentialPersistence()
+            defer { releaseCredentialPersistence() }
+            guard generation == requestGeneration else { throw CancellationError() }
+            try Task.checkCancellation()
+            try? await credentials.deleteToken(for: endpoint, role: .administrator)
+            guard generation == requestGeneration else { throw CancellationError() }
+            throw RouterAdministrationError.invalidAdministratorToken
+        } catch NetworkError.api(403, RouterAPIErrorCode.adminRequired, _) {
+            throw RouterAdministrationError.clientTokenRejected
+        }
+        guard generation == requestGeneration else { throw CancellationError() }
+    }
+
+    public func clearAdministratorCredential() async throws {
+        guard let endpoint else { throw RouterAdministrationError.notAttached }
+        generation &+= 1
+        let clearGeneration = generation
+        await acquireCredentialPersistence()
+        defer { releaseCredentialPersistence() }
+        guard generation == clearGeneration else { throw CancellationError() }
+        try Task.checkCancellation()
+        try await credentials.deleteToken(for: endpoint, role: .administrator)
+        guard generation == clearGeneration else { throw CancellationError() }
+    }
+
     /// Shared admin-authenticated request path for pairing-mode and token routes.
     /// A missing stored administrator credential surfaces as
     /// invalidAdministratorToken so the model re-locks instead of retrying.

@@ -199,6 +199,96 @@ final class RouterAdministrationClientTests: XCTestCase {
         XCTAssertNil(stored)
     }
 
+    func testStoredUnauthorizedDeletionFinishesBeforeReplacementCredentialSave() async throws {
+        let http = ScriptedRouterHTTPClient(results: [
+            .failure(NetworkError.unauthorized),
+            ScriptedRouterHTTPClient.ok("{}"),
+        ])
+        let backend = FirstDeleteGatedCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        let client = RouterAdministrationClient(credentials: store) { _ in http }
+        try await store.saveToken("stale-admin", for: endpoint, role: .administrator)
+        try await client.attach(endpoint: endpoint)
+
+        let stale = Task { try await client.verifyStoredAdministrator() }
+        await backend.waitForFirstDeleteToStart()
+        try await client.attach(endpoint: endpoint)
+        let successor = Task {
+            try await client.verifyAdministrator(token: "current-admin")
+        }
+        await http.waitForCallCount(2)
+        await backend.releaseFirstDelete()
+
+        try await successor.value
+        do {
+            try await stale.value
+            XCTFail("expected stale stored-token verification to be discarded")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        XCTAssertEqual(stored, "current-admin")
+    }
+
+    func testReattachBeforeStoredUnauthorizedDeletionSuppressesStaleDelete() async throws {
+        let administratorAccount = "\(endpoint.peripheralID.uuidString).administrator"
+        let backend = FirstSaveGatedWithInitialValueBackend(
+            account: administratorAccount,
+            value: Data("stale-admin".utf8)
+        )
+        let store = RouterCredentialStore(backend: backend)
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok("{}"),
+            .failure(NetworkError.unauthorized),
+        ])
+        let client = RouterAdministrationClient(credentials: store) { _ in http }
+        try await client.attach(endpoint: endpoint)
+
+        let blockingSave = Task {
+            try await client.verifyAdministrator(token: "blocking-admin")
+        }
+        await backend.waitForFirstSaveToStart()
+        let stale = Task { try await client.verifyStoredAdministrator() }
+        await http.waitForCallCount(2)
+        try await client.attach(endpoint: endpoint)
+        await backend.releaseFirstSave()
+
+        for task in [blockingSave, stale] {
+            do {
+                try await task.value
+                XCTFail("expected old-generation work to be discarded")
+            } catch {
+                XCTAssertTrue(error is CancellationError)
+            }
+        }
+        let deleteCount = await backend.deleteCount
+        XCTAssertEqual(deleteCount, 1)
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        XCTAssertNil(stored)
+    }
+
+    func testExplicitClearFinishesBeforeLaterAdministratorSave() async throws {
+        let http = ScriptedRouterHTTPClient(results: [ScriptedRouterHTTPClient.ok("{}")])
+        let backend = FirstDeleteGatedCredentialBackend()
+        let store = RouterCredentialStore(backend: backend)
+        let client = RouterAdministrationClient(credentials: store) { _ in http }
+        try await store.saveToken("old-admin", for: endpoint, role: .administrator)
+        try await client.attach(endpoint: endpoint)
+
+        let clear = Task { try await client.clearAdministratorCredential() }
+        await backend.waitForFirstDeleteToStart()
+        let successor = Task {
+            try await client.verifyAdministrator(token: "current-admin")
+        }
+        await http.waitForCallCount(1)
+        await backend.releaseFirstDelete()
+
+        try await clear.value
+        try await successor.value
+        let stored = try await store.readToken(for: endpoint, role: .administrator)
+        XCTAssertEqual(stored, "current-admin")
+    }
+
     func testCancelledURLErrorMapsToCancellationErrorAndDetachRequiresReattach() async throws {
         let http = ScriptedRouterHTTPClient(results: [
             .failure(URLError(.cancelled)),
@@ -310,6 +400,81 @@ private actor FirstSaveGatedCredentialBackend: RouterCredentialBackend {
     }
 
     func delete(account: String) async throws { values[account] = nil }
+
+    func waitForFirstSaveToStart() async {
+        if firstSaveStarted { return }
+        await withCheckedContinuation { firstSaveStartedWaiters.append($0) }
+    }
+
+    func releaseFirstSave() {
+        firstSaveGate?.resume()
+        firstSaveGate = nil
+    }
+}
+
+private actor FirstDeleteGatedCredentialBackend: RouterCredentialBackend {
+    private var values: [String: Data] = [:]
+    private var deleteCount = 0
+    private var firstDeleteStarted = false
+    private var firstDeleteStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstDeleteGate: CheckedContinuation<Void, Never>?
+
+    func read(account: String) async throws -> Data? { values[account] }
+    func save(_ data: Data, account: String) async throws { values[account] = data }
+
+    func delete(account: String) async throws {
+        deleteCount += 1
+        if deleteCount == 1 {
+            firstDeleteStarted = true
+            let waiters = firstDeleteStartedWaiters
+            firstDeleteStartedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { firstDeleteGate = $0 }
+        }
+        values[account] = nil
+    }
+
+    func waitForFirstDeleteToStart() async {
+        if firstDeleteStarted { return }
+        await withCheckedContinuation { firstDeleteStartedWaiters.append($0) }
+    }
+
+    func releaseFirstDelete() {
+        firstDeleteGate?.resume()
+        firstDeleteGate = nil
+    }
+}
+
+private actor FirstSaveGatedWithInitialValueBackend: RouterCredentialBackend {
+    private var values: [String: Data]
+    private var saveCount = 0
+    private(set) var deleteCount = 0
+    private var firstSaveStarted = false
+    private var firstSaveStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstSaveGate: CheckedContinuation<Void, Never>?
+
+    init(account: String, value: Data) {
+        values = [account: value]
+    }
+
+    func read(account: String) async throws -> Data? { values[account] }
+
+    func save(_ data: Data, account: String) async throws {
+        saveCount += 1
+        if saveCount == 1 {
+            firstSaveStarted = true
+            let waiters = firstSaveStartedWaiters
+            firstSaveStartedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { firstSaveGate = $0 }
+        }
+        values[account] = data
+    }
+
+    func delete(account: String) async throws {
+        deleteCount += 1
+        values[account] = nil
+    }
 
     func waitForFirstSaveToStart() async {
         if firstSaveStarted { return }
