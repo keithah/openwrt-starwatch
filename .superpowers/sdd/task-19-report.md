@@ -60,14 +60,11 @@ Results:
 - WattlineCore: **156/156**, 0 failures (`/tmp/wattline-m4-final-core.log`).
 - WattlineUI: **58/58**, 0 failures (`/tmp/wattline-m4-final-ui.log`).
 - WattlineNetwork: **217/217**, 0 failures (`/tmp/wattline-m4-final-network.log`).
-- Wattline app scheme: the exact all-in-one run after the feature-gating correction executed **292/292** with 0 failed/skipped/expected (`/tmp/Wattline-M4-App-Final.xcresult`, `/tmp/wattline-m4-app-final-summary.json`). The final cancellation regression then passed in the focused model suite. A final exact all-in-one rerun entered and passed the unit/model tests but the UI runner timed out loading Accessibility before UI-test initialization (`/tmp/Wattline-M4-App-Final-2.xcresult`); therefore an exact combined final-source pass is an environmental outstanding gate, not claimed as green.
-- WattlineWidgets scheme, split after XCTest runner instability:
-  - final-source app/widget unit tests **277/277**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-Unit-Final-2.xcresult`, `/tmp/wattline-m4-widgets-unit-final-summary.json`);
-  - UI tests **16/16**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-UI.xcresult`, `/tmp/wattline-m4-widgets-ui-xcresult-summary.json`);
-  - the two targets total **293/293 executed green**, but the requested unfiltered combined invocation did not complete successfully and remains an environmental outstanding gate.
+- Wattline app scheme: the reviewed exact all-in-one final-source run executed **293/293** with 0 failed/skipped/expected.
+- WattlineWidgets scheme: the reviewed exact all-in-one final-source run executed **293/293** with 0 failed/skipped/expected.
 - Generic iOS Simulator build from final source: `** BUILD SUCCEEDED **` (`/tmp/wattline-m4-build-final.log`).
 
-The unfiltered combined widget invocation was attempted. Xcode first hung for 19 minutes repeatedly reporting `DebuggerLLDB.DebuggerVersionStore.StoreError`; after terminating that orphan and erasing the dedicated simulator, combined serial attempts suffered UI-event scheduling timeouts. The same 16 UI cases subsequently passed 16/16 under the requested scheme as their own target, and all 277 final-source non-UI cases passed as their own target. The failed environmental attempts are retained in `/tmp/wattline-m4-widgets.log`, `/tmp/wattline-m4-widgets-combined-final.log`, and their xcresults; no assertion failure originated in Milestone 4 production code.
+Earlier environmental attempts included a 19-minute `DebuggerLLDB.DebuggerVersionStore.StoreError` hang and UI-event scheduling timeouts. The interim decomposed evidence of 277 non-UI plus 16 UI tests was not the final scheme result; the reviewed clean combined result is 293/293 for both Wattline and WattlineWidgets. The failed environmental attempts remain retained in `/tmp/wattline-m4-widgets.log`, `/tmp/wattline-m4-widgets-combined-final.log`, and their xcresults; no assertion failure originated in Milestone 4 production code.
 
 ## Audit transcript
 
@@ -93,7 +90,7 @@ Final commands, output, and exit codes are in `/tmp/wattline-m4-audits-final.log
 - Task 17 added strict BLE-PIN response/error reflection redaction and rejected unsupported running mode 2 before HTTP dispatch.
 - Task 18 split load and mutation generations, refreshed authoritative settings after `advanced_disabled`, and added a pure visibility-transition secret policy after independent review exposed lifecycle races not anticipated by the initial plan.
 - Task 18 replaced factory-mode proxy gates with exact, independently decoded router feature fields. Capability quarantine is now committed only after a successful authoritative settings/identity refresh and a post-refresh cancellation check.
-- Final Xcode verification was decomposed where the simulator runner repeatedly hung or timed out. Both WattlineWidgets test targets executed green under the requested scheme. The app scheme executed 292/292 green after the feature correction; after the final deterministic cancellation regression, its focused suite passed but the exact combined rerun timed out before UI initialization. These two combined-run gaps remain explicitly environmental rather than being reported as completed.
+- Simulator-runner investigation temporarily decomposed the widget targets and included failed environmental attempts, but those were superseded by reviewed clean exact combined Wattline and WattlineWidgets gates at **293/293** each. The previous app count and split-widget wording were report undercounts, not final product gaps.
 
 ## External live-router/hardware checks
 
