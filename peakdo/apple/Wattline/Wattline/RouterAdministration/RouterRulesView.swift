@@ -1,6 +1,206 @@
+import Foundation
 import SwiftUI
 import WattlineNetwork
 import WattlineUI
+
+enum RouterRuleConditionDraftKind: String, CaseIterable, Identifiable {
+    case inputPower
+    case batteryLevel
+    case portPower
+    case schedule
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .inputPower: "Input power"
+        case .batteryLevel: "Battery level"
+        case .portPower: "Port power"
+        case .schedule: "Schedule"
+        }
+    }
+}
+
+enum RouterRuleActionDraftKind: String, CaseIterable, Identifiable {
+    case dcOn
+    case dcOff
+    case usbcOn
+    case usbcOff
+    case bypassOn
+    case bypassOff
+    case restart
+    case shutdown
+    case webhook
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .dcOn: "DC on"
+        case .dcOff: "DC off"
+        case .usbcOn: "USB-C on"
+        case .usbcOff: "USB-C off"
+        case .bypassOn: "Bypass on"
+        case .bypassOff: "Bypass off"
+        case .restart: "Restart"
+        case .shutdown: "Shutdown"
+        case .webhook: "Webhook"
+        }
+    }
+}
+
+struct RouterRuleActionDraft: Identifiable, Equatable {
+    let id: UUID
+    var kind: RouterRuleActionDraftKind
+    var webhookURL: String
+
+    init(
+        id: UUID = UUID(),
+        kind: RouterRuleActionDraftKind,
+        webhookURL: String = ""
+    ) {
+        self.id = id
+        self.kind = kind
+        self.webhookURL = webhookURL
+    }
+
+    init(action: RouterRuleAction) {
+        switch action {
+        case .dcOn: self.init(kind: .dcOn)
+        case .dcOff: self.init(kind: .dcOff)
+        case .usbcOn: self.init(kind: .usbcOn)
+        case .usbcOff: self.init(kind: .usbcOff)
+        case .bypassOn: self.init(kind: .bypassOn)
+        case .bypassOff: self.init(kind: .bypassOff)
+        case .restart: self.init(kind: .restart)
+        case .shutdown: self.init(kind: .shutdown)
+        case let .webhook(url):
+            self.init(kind: .webhook, webhookURL: url.absoluteString)
+        }
+    }
+
+    func validatedAction() throws -> RouterRuleAction {
+        switch kind {
+        case .dcOn: return .dcOn
+        case .dcOff: return .dcOff
+        case .usbcOn: return .usbcOn
+        case .usbcOff: return .usbcOff
+        case .bypassOn: return .bypassOn
+        case .bypassOff: return .bypassOff
+        case .restart: return .restart
+        case .shutdown: return .shutdown
+        case .webhook:
+            guard let url = URL(string: webhookURL) else {
+                throw RouterRuleDraftError.invalidField
+            }
+            return .webhook(url)
+        }
+    }
+}
+
+enum RouterRuleDraftError: Error {
+    case invalidField
+}
+
+struct RouterRuleDraft: Equatable {
+    var name = ""
+    var enabled = true
+    var conditionKind = RouterRuleConditionDraftKind.inputPower
+    var inputState = RouterRuleInputState.present
+    var comparison = RouterRuleComparison.below
+    var percent = "20"
+    var port = RouterRulePort.dc
+    var watts = "0"
+    var cron = "0 0 * * *"
+    var hold = RouterRuleDurationDraft(value: "0", unit: .seconds)
+    var hysteresisMargin = "5"
+    var hasRepeatEvery = false
+    var repeatEvery = RouterRuleDurationDraft(value: "0", unit: .seconds)
+    var actions = [RouterRuleActionDraft(kind: .dcOff)]
+    var confirmShutdown = false
+
+    init() {}
+
+    init(rule: RouterRule) {
+        name = rule.name
+        enabled = rule.enabled
+        switch rule.condition {
+        case let .inputPower(state):
+            conditionKind = .inputPower
+            inputState = state
+        case let .batteryLevel(op, percent):
+            conditionKind = .batteryLevel
+            comparison = op
+            self.percent = String(percent)
+        case let .portPower(port, op, watts):
+            conditionKind = .portPower
+            self.port = port
+            comparison = op
+            self.watts = String(watts)
+        case let .schedule(cron):
+            conditionKind = .schedule
+            self.cron = cron
+        }
+        hold = RouterRuleDurationDraft(
+            nanoseconds: (try? rule.hold.nanoseconds()) ?? 0
+        )
+        hysteresisMargin = String(rule.hysteresisMargin)
+        if let repeatEvery = rule.repeatEvery {
+            hasRepeatEvery = true
+            self.repeatEvery = RouterRuleDurationDraft(
+                nanoseconds: (try? repeatEvery.nanoseconds()) ?? 0
+            )
+        }
+        actions = rule.actions.map(RouterRuleActionDraft.init(action:))
+        confirmShutdown = rule.confirmShutdown
+    }
+
+    func validatedRule() throws -> RouterRule {
+        guard !name.isEmpty,
+              name != RouterPowerLossPreset.reservedName,
+              name == name.trimmingCharacters(in: .whitespacesAndNewlines),
+              let hysteresisMargin = Double(hysteresisMargin)
+        else { throw RouterRuleDraftError.invalidField }
+
+        let condition: RouterRuleCondition
+        switch conditionKind {
+        case .inputPower:
+            condition = .inputPower(state: inputState)
+        case .batteryLevel:
+            guard let percent = Int(percent) else {
+                throw RouterRuleDraftError.invalidField
+            }
+            condition = .batteryLevel(op: comparison, percent: percent)
+        case .portPower:
+            guard let watts = Double(watts) else {
+                throw RouterRuleDraftError.invalidField
+            }
+            condition = .portPower(port: port, op: comparison, watts: watts)
+        case .schedule:
+            condition = .schedule(cron: cron)
+        }
+
+        let hold = try RouterRuleDuration(nanoseconds: hold.nanoseconds())
+        let repeatDuration: RouterRuleDuration?
+        if hasRepeatEvery {
+            repeatDuration = try RouterRuleDuration(
+                nanoseconds: repeatEvery.nanoseconds()
+            )
+        } else {
+            repeatDuration = nil
+        }
+        return try RouterRule(
+            name: name,
+            enabled: enabled,
+            condition: condition,
+            hold: hold,
+            hysteresisMargin: hysteresisMargin,
+            repeatEvery: repeatDuration,
+            actions: try actions.map { try $0.validatedAction() },
+            confirmShutdown: confirmShutdown
+        )
+    }
+}
 
 struct RouterRulesView: View {
     let model: RouterAdministrationModel
@@ -34,6 +234,14 @@ struct RouterRulesView: View {
             powerLossSection
 
             Section("Automation Rules") {
+                if model.access == .unlocked {
+                    NavigationLink {
+                        Form { RouterRuleEditor(model: model, mode: .create) }
+                            .navigationTitle("Create rule")
+                    } label: {
+                        Label("Create rule", systemImage: "plus")
+                    }
+                }
                 if automationDocuments.isEmpty, model.rulesLoadState == .loaded {
                     Text("No additional automation rules.")
                         .foregroundStyle(.secondary)
@@ -159,7 +367,7 @@ struct RouterRulesView: View {
                 .foregroundStyle(.secondary)
             if model.access == .unlocked {
                 NavigationLink("Edit rule") {
-                    Form { RouterKnownRuleEditor(model: model, rule: rule) }
+                    Form { RouterRuleEditor(model: model, mode: .update(rule)) }
                         .navigationTitle(rule.name)
                 }
                 Button("Delete \(rule.name)", role: .destructive) {
@@ -170,47 +378,122 @@ struct RouterRulesView: View {
     }
 }
 
-private struct RouterKnownRuleEditor: View {
+enum RouterRuleEditorMode {
+    case create
+    case update(RouterRule)
+}
+
+struct RouterRuleEditor: View {
     @Environment(\.dismiss) private var dismiss
     let model: RouterAdministrationModel
-    let rule: RouterRule
 
-    @State private var enabled: Bool
-    @State private var holdNanoseconds: String
-    @State private var confirmShutdown: Bool
+    private let mode: RouterRuleEditorMode
+    @State private var draft: RouterRuleDraft
     @State private var confirmsShutdownSave = false
 
-    init(model: RouterAdministrationModel, rule: RouterRule) {
+    init(model: RouterAdministrationModel, mode: RouterRuleEditorMode) {
         self.model = model
-        self.rule = rule
-        _enabled = State(initialValue: rule.enabled)
-        _holdNanoseconds = State(
-            initialValue: (try? rule.hold.nanoseconds()).map(String.init) ?? ""
-        )
-        _confirmShutdown = State(initialValue: rule.confirmShutdown)
+        self.mode = mode
+        switch mode {
+        case .create:
+            _draft = State(initialValue: RouterRuleDraft())
+        case let .update(rule):
+            _draft = State(initialValue: RouterRuleDraft(rule: rule))
+        }
     }
 
     private var hasWebhook: Bool {
-        rule.actions.contains { action in
-            if case .webhook = action { return true }
-            return false
-        }
+        draft.actions.contains { $0.kind == .webhook }
     }
 
-    private var hasShutdown: Bool { rule.actions.contains(.shutdown) }
+    private var hasShutdown: Bool {
+        draft.actions.contains { $0.kind == .shutdown }
+    }
 
     var body: some View {
         Section("Rule") {
-            Toggle("Enabled", isOn: $enabled)
-            TextField("Hold (nanoseconds)", text: $holdNanoseconds)
-                .keyboardType(.numberPad)
-                .monospacedDigit()
-            if hasShutdown {
-                Toggle("Confirm shutdown", isOn: $confirmShutdown)
-            }
-            LabeledContent("Condition", value: RouterRuleCopy.condition(rule.condition))
-            LabeledContent("Actions", value: RouterRuleCopy.actions(rule.actions))
+            TextField("Rule name", text: $draft.name)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Toggle("Enabled", isOn: $draft.enabled)
         }
+
+        Section("Condition") {
+            Picker("Condition", selection: $draft.conditionKind) {
+                ForEach(RouterRuleConditionDraftKind.allCases) { kind in
+                    Text(kind.label).tag(kind)
+                }
+            }
+            switch draft.conditionKind {
+            case .inputPower:
+                Picker("Input state", selection: $draft.inputState) {
+                    Text("Present").tag(RouterRuleInputState.present)
+                    Text("Absent").tag(RouterRuleInputState.absent)
+                }
+            case .batteryLevel:
+                comparisonPicker
+                TextField("Percent", text: $draft.percent)
+                    .keyboardType(.numberPad)
+            case .portPower:
+                Picker("Port", selection: $draft.port) {
+                    Text("DC").tag(RouterRulePort.dc)
+                    Text("USB-C").tag(RouterRulePort.usbc)
+                }
+                comparisonPicker
+                TextField("Watts", text: $draft.watts)
+                    .keyboardType(.decimalPad)
+            case .schedule:
+                TextField("Cron", text: $draft.cron)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+        }
+
+        Section("Timing") {
+            TextField("Hold", text: $draft.hold.value)
+                .keyboardType(.decimalPad)
+                .monospacedDigit()
+            Picker("Hold unit", selection: $draft.hold.unit) {
+                durationUnitChoices
+            }
+            TextField("Hysteresis margin", text: $draft.hysteresisMargin)
+                .keyboardType(.decimalPad)
+            Toggle("Repeat", isOn: $draft.hasRepeatEvery)
+            if draft.hasRepeatEvery {
+                TextField("Repeat every", text: $draft.repeatEvery.value)
+                    .keyboardType(.decimalPad)
+                    .monospacedDigit()
+                Picker("Repeat unit", selection: $draft.repeatEvery.unit) {
+                    durationUnitChoices
+                }
+            }
+        }
+
+        Section("Actions") {
+            ForEach($draft.actions) { $action in
+                Picker("Action", selection: $action.kind) {
+                    ForEach(RouterRuleActionDraftKind.allCases) { kind in
+                        Text(kind.label).tag(kind)
+                    }
+                }
+                if action.kind == .webhook {
+                    TextField("Webhook URL", text: $action.webhookURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+            }
+            .onDelete { draft.actions.remove(atOffsets: $0) }
+            Menu("Add action") {
+                ForEach(RouterRuleActionDraftKind.allCases) { kind in
+                    Button(kind.label) {
+                        draft.actions.append(RouterRuleActionDraft(kind: kind))
+                    }
+                }
+            }
+            Toggle("Confirm shutdown", isOn: $draft.confirmShutdown)
+        }
+
         if hasWebhook {
             Section("Webhook") {
                 Text(RouterRulesPresentation.webhookWarning)
@@ -222,10 +505,10 @@ private struct RouterKnownRuleEditor: View {
                 Button("Save shutdown rule", role: .destructive) {
                     confirmsShutdownSave = true
                 }
-                .disabled(updatedRule == nil || !canSave)
+                .disabled(validatedRule == nil || !canSave)
             } else {
                 Button("Save rule") { save(confirmation: nil) }
-                    .disabled(updatedRule == nil || !canSave)
+                    .disabled(validatedRule == nil || !canSave)
             }
         }
         .onChange(of: model.access) { _, access in
@@ -253,28 +536,51 @@ private struct RouterKnownRuleEditor: View {
             )
     }
 
-    private var updatedRule: RouterRule? {
-        guard let nanoseconds = Int64(holdNanoseconds), nanoseconds >= 0 else { return nil }
-        return try? RouterRule(
-            name: rule.name,
-            enabled: enabled,
-            condition: rule.condition,
-            hold: RouterRuleDuration(nanoseconds: nanoseconds),
-            hysteresisMargin: rule.hysteresisMargin,
-            repeatEvery: rule.repeatEvery,
-            actions: rule.actions,
-            confirmShutdown: confirmShutdown
-        )
+    @ViewBuilder
+    private var comparisonPicker: some View {
+        Picker("Comparison", selection: $draft.comparison) {
+            Text("Below").tag(RouterRuleComparison.below)
+            Text("Above").tag(RouterRuleComparison.above)
+        }
+    }
+
+    @ViewBuilder
+    private var durationUnitChoices: some View {
+        ForEach(RouterRuleDurationUnit.allCases, id: \.rawValue) { unit in
+            Text(unit.rawValue.capitalized).tag(unit)
+        }
+    }
+
+    private var validatedRule: RouterRule? {
+        guard let rule = try? draft.validatedRule() else { return nil }
+        let conflictingName = model.rules.contains { document in
+            let name: String?
+            switch document {
+            case let .known(existing): name = existing.name
+            case let .unknown(raw): name = raw.name
+            }
+            guard name == rule.name else { return false }
+            if case let .update(original) = mode {
+                return name != original.name
+            }
+            return true
+        }
+        return conflictingName ? nil : rule
     }
 
     private func save(confirmation: RouterRuleConfirmation?) {
-        guard let updatedRule else { return }
+        guard let validatedRule else { return }
         Task {
-            await model.updateRule(
-                named: rule.name,
-                rule: updatedRule,
-                confirmation: confirmation
-            )
+            switch mode {
+            case .create:
+                await model.createRule(validatedRule, confirmation: confirmation)
+            case let .update(original):
+                await model.updateRule(
+                    named: original.name,
+                    rule: validatedRule,
+                    confirmation: confirmation
+                )
+            }
             if model.rulesError == nil { dismiss() }
         }
     }
@@ -285,7 +591,7 @@ private struct RouterPowerLossEditor: View {
     let rule: RouterRule
 
     @State private var enabled: Bool
-    @State private var holdNanoseconds: String
+    @State private var hold: RouterRuleDurationDraft
     @State private var confirmShutdown: Bool
     @State private var confirmsSave = false
 
@@ -293,17 +599,24 @@ private struct RouterPowerLossEditor: View {
         self.model = model
         self.rule = rule
         _enabled = State(initialValue: rule.enabled)
-        _holdNanoseconds = State(
-            initialValue: (try? rule.hold.nanoseconds()).map(String.init) ?? "600000000000"
+        _hold = State(
+            initialValue: RouterRuleDurationDraft(
+                nanoseconds: (try? rule.hold.nanoseconds()) ?? 600_000_000_000
+            )
         )
         _confirmShutdown = State(initialValue: rule.confirmShutdown)
     }
 
     var body: some View {
         Toggle("Enabled", isOn: $enabled)
-        TextField("Hold (nanoseconds)", text: $holdNanoseconds)
-            .keyboardType(.numberPad)
+        TextField("Hold", text: $hold.value)
+            .keyboardType(.decimalPad)
             .monospacedDigit()
+        Picker("Hold unit", selection: $hold.unit) {
+            ForEach(RouterRuleDurationUnit.allCases, id: \.rawValue) { unit in
+                Text(unit.rawValue.capitalized).tag(unit)
+            }
+        }
         Toggle("Confirm shutdown", isOn: $confirmShutdown)
         if rule.actions.contains(where: {
             if case .webhook = $0 { return true }
@@ -315,14 +628,14 @@ private struct RouterPowerLossEditor: View {
         Button("Review shutdown change", role: .destructive) {
             confirmsSave = true
         }
-        .disabled(hold == nil || !confirmShutdown || model.access != .unlocked)
+        .disabled(validatedHold == nil || !confirmShutdown || model.access != .unlocked)
         .confirmationDialog(
             "Save the power-loss shutdown preset?",
             isPresented: $confirmsSave,
             titleVisibility: .visible
         ) {
             Button("Save shutdown rule", role: .destructive) {
-                guard let hold else { return }
+                guard let hold = validatedHold else { return }
                 Task {
                     await model.savePowerLossPreset(
                         enabled: enabled,
@@ -338,9 +651,9 @@ private struct RouterPowerLossEditor: View {
         }
     }
 
-    private var hold: RouterRuleDuration? {
-        guard let value = Int64(holdNanoseconds), value >= 0 else { return nil }
-        return try? RouterRuleDuration(nanoseconds: value)
+    private var validatedHold: RouterRuleDuration? {
+        guard let nanoseconds = try? hold.nanoseconds() else { return nil }
+        return try? RouterRuleDuration(nanoseconds: nanoseconds)
     }
 }
 

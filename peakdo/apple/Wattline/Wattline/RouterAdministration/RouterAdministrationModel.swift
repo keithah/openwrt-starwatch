@@ -521,7 +521,8 @@ final class RouterAdministrationModel {
         _ rule: RouterRule,
         confirmation: RouterRuleConfirmation?
     ) async {
-        guard ruleConfirmationAllowsMutation(rule, confirmation: confirmation),
+        guard rule.name != RouterPowerLossPreset.reservedName,
+              ruleConfirmationAllowsMutation(rule, confirmation: confirmation),
               !rules.contains(where: { Self.ruleName($0) == rule.name })
         else { return }
         await mutateRules { try await $0.createRule(rule) }
@@ -532,9 +533,15 @@ final class RouterAdministrationModel {
         rule: RouterRule,
         confirmation: RouterRuleConfirmation?
     ) async {
-        guard rules.contains(where: {
+        guard name != RouterPowerLossPreset.reservedName,
+              rule.name != RouterPowerLossPreset.reservedName,
+              rules.contains(where: {
             guard Self.ruleName($0) == name, case .known = $0 else { return false }
             return true
+        }),
+        !rules.contains(where: {
+            let existingName = Self.ruleName($0)
+            return existingName == rule.name && existingName != name
         }),
         ruleConfirmationAllowsMutation(rule, confirmation: confirmation)
         else { return }
@@ -542,7 +549,8 @@ final class RouterAdministrationModel {
     }
 
     func deleteRule(named name: String) async {
-        guard rules.contains(where: {
+        guard name != RouterPowerLossPreset.reservedName,
+              rules.contains(where: {
             guard Self.ruleName($0) == name, case .known = $0 else { return false }
             return true
         }) else { return }
@@ -1637,14 +1645,16 @@ final class RouterAdministrationModel {
 
     private func performAdmin<Value>(
         _ operation: (RouterAdministrationClient) async throws -> Value,
-        isCurrent: () -> Bool = { true }
+        isCurrent: () -> Bool = { true },
+        onInvalidAdministrator: () -> Void = {}
     ) async -> AdminResult<Value> {
         guard host != nil, access == .unlocked else { return .stale }
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
         do {
             let value = try await operation(adminClient)
-            guard sessionGeneration == session,
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
                   access == .unlocked,
                   isCurrent()
@@ -1653,12 +1663,14 @@ final class RouterAdministrationModel {
         } catch is CancellationError {
             return .stale
         } catch {
-            guard sessionGeneration == session,
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
                   access == .unlocked,
                   isCurrent()
             else { return .stale }
             if handleAdminFailure(error) {
+                onInvalidAdministrator()
                 try? await adminClient.clearAdministratorCredential()
                 return .stale
             }
@@ -1673,9 +1685,16 @@ final class RouterAdministrationModel {
         rulesRequestGeneration &+= 1
         let request = rulesRequestGeneration
         rulesError = nil
-        let result = await performAdmin(operation) { [weak self] in
-            self?.rulesRequestGeneration == request
-        }
+        var invalidAdministrator = false
+        let result = await performAdmin(
+            operation,
+            isCurrent: { [weak self] in
+                self?.rulesRequestGeneration == request
+            },
+            onInvalidAdministrator: {
+                invalidAdministrator = true
+            }
+        )
         guard rulesRequestGeneration == request else { return }
         switch result {
         case let .success(mutation):
@@ -1684,7 +1703,12 @@ final class RouterAdministrationModel {
             rulesError = message
             rulesLoadState = .stale
         case .stale:
-            break
+            if invalidAdministrator,
+               access == .locked,
+               adminError == "The administrator session is no longer valid." {
+                rulesError = "Unlock administration and refresh rules before editing again."
+                rulesLoadState = .stale
+            }
         }
     }
 
@@ -1714,9 +1738,12 @@ final class RouterAdministrationModel {
         isCurrent: () -> Bool = { true }
     ) async -> AdminResult<Value> {
         let secretGeneration = pairingSecretGeneration
-        let result = await performAdmin(operation) {
-            pairingSecretGeneration == secretGeneration && isCurrent()
-        }
+        let result = await performAdmin(
+            operation,
+            isCurrent: {
+                pairingSecretGeneration == secretGeneration && isCurrent()
+            }
+        )
         guard pairingSecretGeneration == secretGeneration else {
             return .stale
         }

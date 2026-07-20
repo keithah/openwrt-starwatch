@@ -7,6 +7,328 @@ import XCTest
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testTypedRuleDraftBuildsAllConditionsAndEveryDocumentedAction() throws {
+        var draft = RouterRuleDraft()
+        draft.name = "complete"
+        draft.enabled = false
+        draft.hold = RouterRuleDurationDraft(value: "10", unit: .minutes)
+        draft.hysteresisMargin = "7.5"
+        draft.hasRepeatEvery = true
+        draft.repeatEvery = RouterRuleDurationDraft(value: "2", unit: .hours)
+        draft.actions = [
+            RouterRuleActionDraft(kind: .dcOn),
+            RouterRuleActionDraft(kind: .dcOff),
+            RouterRuleActionDraft(kind: .usbcOn),
+            RouterRuleActionDraft(kind: .usbcOff),
+            RouterRuleActionDraft(kind: .bypassOn),
+            RouterRuleActionDraft(kind: .bypassOff),
+            RouterRuleActionDraft(kind: .restart),
+            RouterRuleActionDraft(kind: .shutdown),
+            RouterRuleActionDraft(
+                kind: .webhook,
+                webhookURL: "https://example.test/rules"
+            ),
+        ]
+        draft.confirmShutdown = true
+
+        draft.conditionKind = .inputPower
+        draft.inputState = .absent
+        XCTAssertEqual(
+            try draft.validatedRule().condition,
+            .inputPower(state: .absent)
+        )
+
+        draft.conditionKind = .batteryLevel
+        draft.comparison = .above
+        draft.percent = "42"
+        XCTAssertEqual(
+            try draft.validatedRule().condition,
+            .batteryLevel(op: .above, percent: 42)
+        )
+
+        draft.conditionKind = .portPower
+        draft.port = .usbc
+        draft.comparison = .below
+        draft.watts = "45.5"
+        XCTAssertEqual(
+            try draft.validatedRule().condition,
+            .portPower(port: .usbc, op: .below, watts: 45.5)
+        )
+
+        draft.conditionKind = .schedule
+        draft.cron = "15 2 * * 1"
+        let rule = try draft.validatedRule()
+        XCTAssertEqual(rule.condition, .schedule(cron: "15 2 * * 1"))
+        XCTAssertEqual(try rule.hold.nanoseconds(), 600_000_000_000)
+        XCTAssertEqual(rule.hysteresisMargin, 7.5)
+        XCTAssertEqual(try rule.repeatEvery?.nanoseconds(), 7_200_000_000_000)
+        XCTAssertEqual(rule.actions, [
+            .dcOn, .dcOff, .usbcOn, .usbcOff, .bypassOn, .bypassOff,
+            .restart, .shutdown,
+            .webhook(try XCTUnwrap(URL(string: "https://example.test/rules"))),
+        ])
+        XCTAssertFalse(rule.enabled)
+        XCTAssertTrue(rule.confirmShutdown)
+    }
+
+    func testTypedRuleDraftPrepopulatesAndRoundTripsEveryConditionFamily() throws {
+        let conditions: [RouterRuleCondition] = [
+            .inputPower(state: .absent),
+            .batteryLevel(op: .above, percent: 73),
+            .portPower(port: .usbc, op: .below, watts: 45.5),
+            .schedule(cron: "0 6 * * 1"),
+        ]
+        let actions: [RouterRuleAction] = [
+            .webhook(try XCTUnwrap(URL(string: "https://example.test/first"))),
+            .shutdown,
+            .webhook(try XCTUnwrap(URL(string: "https://example.test/second"))),
+        ]
+
+        for (index, condition) in conditions.enumerated() {
+            let source = try RouterRule(
+                name: "edit_\(index)",
+                enabled: false,
+                condition: condition,
+                hold: RouterRuleDuration(.seconds(90)),
+                hysteresisMargin: 9.25,
+                repeatEvery: RouterRuleDuration(.seconds(300)),
+                actions: actions,
+                confirmShutdown: true
+            )
+
+            let draft = RouterRuleDraft(rule: source)
+
+            XCTAssertEqual(draft.name, source.name)
+            XCTAssertFalse(draft.enabled)
+            XCTAssertEqual(draft.hold, .init(value: "90", unit: .seconds))
+            XCTAssertEqual(draft.hysteresisMargin, "9.25")
+            XCTAssertTrue(draft.hasRepeatEvery)
+            XCTAssertEqual(draft.repeatEvery, .init(value: "5", unit: .minutes))
+            XCTAssertEqual(draft.actions.map(\.kind), [.webhook, .shutdown, .webhook])
+            XCTAssertEqual(
+                draft.actions.map(\.webhookURL),
+                ["https://example.test/first", "", "https://example.test/second"]
+            )
+            XCTAssertTrue(draft.confirmShutdown)
+            XCTAssertEqual(try draft.validatedRule(), source)
+        }
+
+        let noActionSource = try RouterRule(
+            name: "no_action",
+            enabled: false,
+            condition: .inputPower(state: .present),
+            hold: RouterRuleDuration(.seconds(0)),
+            hysteresisMargin: 5,
+            actions: [],
+            confirmShutdown: false
+        )
+        XCTAssertEqual(
+            try RouterRuleDraft(rule: noActionSource).validatedRule(),
+            noActionSource
+        )
+    }
+
+    func testTypedRuleDraftRejectsInvalidFieldsAndDurationOverflow() throws {
+        var valid = RouterRuleDraft()
+        valid.name = "valid"
+        valid.actions = [RouterRuleActionDraft(kind: .dcOn)]
+
+        var invalidName = valid
+        invalidName.name = ""
+        XCTAssertThrowsError(try invalidName.validatedRule())
+
+        var reservedName = valid
+        reservedName.name = RouterPowerLossPreset.reservedName
+        XCTAssertThrowsError(try reservedName.validatedRule())
+
+        var invalidPercent = valid
+        invalidPercent.conditionKind = .batteryLevel
+        invalidPercent.percent = "101"
+        XCTAssertThrowsError(try invalidPercent.validatedRule())
+
+        var invalidWatts = valid
+        invalidWatts.conditionKind = .portPower
+        invalidWatts.watts = "not-a-number"
+        XCTAssertThrowsError(try invalidWatts.validatedRule())
+
+        var invalidCron = valid
+        invalidCron.conditionKind = .schedule
+        invalidCron.cron = "only four cron fields"
+        XCTAssertThrowsError(try invalidCron.validatedRule())
+
+        var invalidWebhook = valid
+        invalidWebhook.actions = [
+            RouterRuleActionDraft(kind: .webhook, webhookURL: "file:///tmp/hook"),
+        ]
+        XCTAssertThrowsError(try invalidWebhook.validatedRule())
+
+        var unconfirmedShutdown = valid
+        unconfirmedShutdown.actions = [RouterRuleActionDraft(kind: .shutdown)]
+        unconfirmedShutdown.confirmShutdown = false
+        XCTAssertThrowsError(try unconfirmedShutdown.validatedRule())
+
+        var invalidMargin = valid
+        invalidMargin.hysteresisMargin = "-1"
+        XCTAssertThrowsError(try invalidMargin.validatedRule())
+
+        var overflowingHold = valid
+        overflowingHold.hold = .init(value: String(Int64.max), unit: .hours)
+        XCTAssertThrowsError(try overflowingHold.validatedRule())
+
+        var overflowingRepeat = valid
+        overflowingRepeat.hasRepeatEvery = true
+        overflowingRepeat.repeatEvery = .init(value: String(Int64.max), unit: .minutes)
+        XCTAssertThrowsError(try overflowingRepeat.validatedRule())
+    }
+
+    func testRuleViewOffersCompleteCreateAndEditFormWithoutRawNanoseconds() throws {
+        let source = try String(
+            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(#"Label("Create rule", systemImage: "plus")"#))
+        XCTAssertTrue(source.contains("RouterRuleEditor(model: model, mode: .create)"))
+        for field in [
+            "Rule name", "Condition", "Input state", "Comparison", "Percent",
+            "Port", "Watts", "Cron", "Hold", "Hysteresis margin", "Repeat",
+            "Repeat every", "Actions", "Add action", "Webhook URL",
+            "Confirm shutdown",
+        ] {
+            XCTAssertTrue(source.contains("\"\(field)\""), "Missing field \(field)")
+        }
+        for action in [
+            "DC on", "DC off", "USB-C on", "USB-C off", "Bypass on",
+            "Bypass off", "Restart", "Shutdown", "Webhook",
+        ] {
+            XCTAssertTrue(source.contains("\"\(action)\""), "Missing action \(action)")
+        }
+        XCTAssertTrue(source.contains("Picker(\"Hold unit\""))
+        XCTAssertTrue(source.contains("Picker(\"Repeat unit\""))
+        XCTAssertFalse(source.contains("Hold (nanoseconds)"))
+    }
+
+    func testInvalidAdminRuleMutationKeepsPriorRulesAndMarksStale() async throws {
+        let existingJSON = administrationKnownRuleJSON(name: "existing", enabled: true)
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(existingJSON)]"),
+            .failure(RouterAdministrationError.invalidAdministratorToken),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+        let priorRules = fixture.model.rules
+        let priorFetch = fixture.model.rulesFetchedAt
+
+        await fixture.model.updateRule(
+            named: "existing",
+            rule: try administrationKnownRule(
+                administrationKnownRuleJSON(name: "existing", enabled: false)
+            ),
+            confirmation: nil
+        )
+
+        XCTAssertEqual(fixture.model.rules, priorRules)
+        XCTAssertEqual(fixture.model.rulesFetchedAt, priorFetch)
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertEqual(fixture.model.rulesLoadState, .stale)
+        XCTAssertNotNil(fixture.model.rulesError)
+        XCTAssertEqual(
+            fixture.model.adminError,
+            "The administrator session is no longer valid."
+        )
+    }
+
+    func testCancelledRuleMutationDoesNotPublishOrMarkCurrentRulesStale() async throws {
+        let existingJSON = administrationKnownRuleJSON(name: "existing", enabled: true)
+        let updatedJSON = administrationKnownRuleJSON(name: "existing", enabled: false)
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(existingJSON)]"),
+            AdminScriptedHTTP.ok(updatedJSON),
+            AdminScriptedHTTP.ok("[\(updatedJSON)]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+        let priorRules = fixture.model.rules
+        let priorFetch = fixture.model.rulesFetchedAt
+        let updatedRule = try administrationKnownRule(updatedJSON)
+        fixture.http.gateNextRequest()
+
+        let mutation = Task {
+            await fixture.model.updateRule(
+                named: "existing",
+                rule: updatedRule,
+                confirmation: nil
+            )
+        }
+        await fixture.http.waitForGateRegistration()
+        mutation.cancel()
+        fixture.http.releaseGates()
+        await mutation.value
+
+        XCTAssertEqual(fixture.model.rules, priorRules)
+        XCTAssertEqual(fixture.model.rulesFetchedAt, priorFetch)
+        XCTAssertEqual(fixture.model.rulesLoadState, .loaded)
+        XCTAssertNil(fixture.model.rulesError)
+        XCTAssertEqual(fixture.model.access, .unlocked)
+    }
+
+    func testUnknownAndReservedRulesHaveNoOrdinaryMutationPath() async throws {
+        let unknown = administrationUnknownRuleJSON(name: "future")
+        let known = administrationKnownRuleJSON(name: "known")
+        let reserved = #"{"name":"no_input_shutdown","enabled":false,"condition":"battery_level","op":"below","percent":20,"hold":1,"hysteresis_margin":2,"actions":["dc_off"],"confirm_shutdown":false}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(unknown),\(known),\(reserved)]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+        let callCount = fixture.http.calls.count
+
+        await fixture.model.createRule(
+            try administrationKnownRule(administrationKnownRuleJSON(name: "future")),
+            confirmation: nil
+        )
+        await fixture.model.updateRule(
+            named: "future",
+            rule: try administrationKnownRule(administrationKnownRuleJSON(name: "future")),
+            confirmation: nil
+        )
+        await fixture.model.deleteRule(named: "future")
+        await fixture.model.updateRule(
+            named: "known",
+            rule: try administrationKnownRule(
+                administrationKnownRuleJSON(name: "future")
+            ),
+            confirmation: nil
+        )
+        await fixture.model.createRule(
+            try administrationKnownRule(
+                administrationKnownRuleJSON(name: RouterPowerLossPreset.reservedName)
+            ),
+            confirmation: nil
+        )
+        await fixture.model.updateRule(
+            named: RouterPowerLossPreset.reservedName,
+            rule: try administrationKnownRule(
+                administrationKnownRuleJSON(name: RouterPowerLossPreset.reservedName)
+            ),
+            confirmation: nil
+        )
+        await fixture.model.deleteRule(named: RouterPowerLossPreset.reservedName)
+
+        XCTAssertEqual(fixture.http.calls.count, callCount)
+        XCTAssertEqual(fixture.model.rules, [
+            try administrationRuleDocument(unknown),
+            try administrationRuleDocument(known),
+            try administrationRuleDocument(reserved),
+        ])
+    }
+
     func testReloadRulesPublishesKnownAndUnknownOnlyForCurrentSession() async throws {
         let knownJSON = administrationKnownRuleJSON(name: "known")
         let unknownJSON = administrationUnknownRuleJSON(name: "future")
