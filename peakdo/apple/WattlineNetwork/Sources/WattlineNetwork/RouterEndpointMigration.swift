@@ -161,16 +161,18 @@ public struct RouterEndpointMigrationValidator: Sendable {
         expectedDeviceID: String,
         isCurrent: @escaping @MainActor @Sendable () -> Bool
     ) async throws -> RouterSettingsUpdateResult {
-        try await client.updateSettings(
+        let currentCheck: @Sendable () async -> Bool = { await isCurrent() }
+        return try await client.updateSettings(
             patch,
             sourceEndpoint: source.endpoint,
-            isCurrent: { await isCurrent() },
+            isCurrent: currentCheck,
             authorizingDispatch: { dispatch in
                 try await performWhileCurrent(
                     validation,
                     source: source,
                     candidate: candidate,
                     expectedDeviceID: expectedDeviceID,
+                    isCurrent: currentCheck,
                     operation: dispatch
                 )
             }
@@ -182,6 +184,7 @@ public struct RouterEndpointMigrationValidator: Sendable {
         source: RouterHostMetadata,
         candidate: RouterHostMetadata,
         expectedDeviceID: String,
+        isCurrent: @escaping @Sendable () async -> Bool,
         operation: @Sendable () async throws -> Result
     ) async throws -> Result {
         guard source.id != candidate.id,
@@ -204,7 +207,12 @@ public struct RouterEndpointMigrationValidator: Sendable {
                     validation.credentialLease,
                     for: candidate.endpoint,
                     role: .client,
-                    operation: operation
+                    operation: {
+                        try Task.checkCancellation()
+                        guard await isCurrent() else { throw CancellationError() }
+                        try Task.checkCancellation()
+                        return try await operation()
+                    }
                 )
             }
         ), let result = credentialGuard else {

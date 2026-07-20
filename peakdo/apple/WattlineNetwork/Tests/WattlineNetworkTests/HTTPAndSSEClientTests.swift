@@ -99,6 +99,37 @@ final class HTTPAndSSEClientTests: XCTestCase {
         }
     }
 
+    func testHTTPClientRedactsBearerFromUnknownAPIErrorCodeAndReflection() async {
+        let token = "unknown-code-bearer-secret"
+        URLProtocolFixture.response = .init(
+            status: 409,
+            body: Data(
+                #"{"error":{"code":"unknown-code-bearer-secret","message":"Unknown router failure"}}"#.utf8
+            )
+        )
+        let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())
+
+        do {
+            _ = try await client.get("/api/v1/device", token: token)
+            XCTFail("expected canonical API error")
+        } catch {
+            XCTAssertEqual(
+                error as? NetworkError,
+                .api(
+                    status: 409,
+                    code: .unknown("[REDACTED]"),
+                    message: "Unknown router failure"
+                )
+            )
+            XCTAssertFalse(String(describing: error).contains(token))
+            XCTAssertFalse(String(reflecting: error).contains(token))
+            XCTAssertFalse(recursiveMirrorText(error).contains(token))
+            var dumped = ""
+            dump(error, to: &dumped)
+            XCTAssertFalse(dumped.contains(token))
+        }
+    }
+
     func testHTTPClientRejectsInvalidURL() async {
         let client = HTTPClient(baseURL: URL(string: "http://fixture.local")!, session: session())
         do { _ = try await client.get("://bad", token: "secret"); XCTFail("expected error") }
@@ -262,6 +293,14 @@ final class HTTPAndSSEClientTests: XCTestCase {
         do { for try await _ in client.events(path: "events", token: "token") {}; XCTFail("expected error") }
         catch { XCTAssertEqual(error as? NetworkError, .invalidURL) }
     }
+}
+
+private func recursiveMirrorText(_ value: Any, depth: Int = 0) -> String {
+    guard depth < 12 else { return "" }
+    return Mirror(reflecting: value).children.map { child in
+        String(describing: child.value)
+            + recursiveMirrorText(child.value, depth: depth + 1)
+    }.joined(separator: " ")
 }
 
 final class URLProtocolFixture: URLProtocol {

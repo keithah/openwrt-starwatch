@@ -58,7 +58,13 @@ enum RouterHTTPErrorMapper {
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else {
             return status == 401 ? .unauthorized : .httpStatus(status, redactedBody)
         }
-        let code = RouterAPIErrorCode(envelope.error.code)
+        let decodedCode = RouterAPIErrorCode(envelope.error.code)
+        let code = switch decodedCode {
+        case .unknown:
+            RouterAPIErrorCode.unknown(redact(envelope.error.code, token: token))
+        default:
+            decodedCode
+        }
         if status == 401, code != .invalidOrExpiredPIN {
             return .unauthorized
         }

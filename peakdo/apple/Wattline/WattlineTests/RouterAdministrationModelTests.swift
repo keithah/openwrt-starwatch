@@ -877,6 +877,65 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.http.calls.map(\.method), ["GET"])
     }
 
+    func testReplacementSaveRechecksCurrentGenerationInsideCredentialGuardBeforePUT() async throws {
+        let backend = SpecificClientReadGatedAdministrationBackend()
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(administrationSettingsJSON(
+                    advanced: false,
+                    httpPort: 8377,
+                    restartRequired: true
+                )),
+            ],
+            credentialBackend: backend,
+            migrationResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let candidate = try await fixture.connections.saveManualHost(
+            address: "http://router.local:8377",
+            displayName: "Saved HTTP route",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil,
+            token: "candidate-client"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        let original = try administrationSettingsValue(advanced: false, httpPort: 8377)
+        var draft = RouterSettingsDraft(original)
+        draft.https.enabled = false
+        let draftPatch = try draft.patch(from: original)
+        let patch = RouterSettingsPatch(https: .init(enabled: false))
+        await fixture.model.validateReplacement(
+            candidate,
+            draft: draft,
+            draftPatch: draftPatch,
+            patch: patch
+        )
+        await backend.gateNextClientRead(account: candidate.endpoint.peripheralID.uuidString)
+
+        let save = Task {
+            await fixture.model.saveSettings(
+                patch,
+                draft: draft,
+                draftPatch: draftPatch,
+                replacement: candidate,
+                requiresValidatedReplacement: true
+            )
+        }
+        await backend.waitForClientReadToStart()
+
+        fixture.model.invalidateReplacementValidation()
+        await backend.releaseClientRead()
+        let outcome = await save.value
+
+        XCTAssertEqual(outcome, .stale)
+        XCTAssertEqual(fixture.http.calls.map(\.method), ["GET"])
+    }
+
     func testRawBonjourCandidateIsIneligibleAndReceivesNoAuthorizationOrRequest() async throws {
         let discoverySource = AdministrationRouterDiscoverySource()
         let fixture = try await makeFixture(
