@@ -77,6 +77,33 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(persisted.first, fixture.model.host)
     }
 
+    func testLockedStagedHostCanPromoteAfterRestartThenUnlockOnPromotedPin() async throws {
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        XCTAssertEqual(fixture.model.access, .locked)
+
+        await fixture.model.promoteStagedTLSPin()
+
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appStagedPin)
+        XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
+        XCTAssertEqual(
+            fixture.adminHTTPFactory.endpoints.last?.certificateFingerprint,
+            appStagedPin
+        )
+
+        await fixture.model.unlock(token: "boot-admin")
+        XCTAssertEqual(fixture.model.access, .unlocked)
+    }
+
     func testUnlockedModelLoadsSettingsAndPublishesOnlyCompletePUTReadback() async throws {
         let original = try administrationSettings(advanced: false, httpPort: 8377)
         let readback = try administrationSettings(advanced: true, httpPort: 9000)
@@ -2369,6 +2396,7 @@ private struct AdministrationFixture {
     let historyHTTP: AdminScriptedHTTP
     let migrationHTTP: AdminScriptedHTTP
     let tlsPromotionHTTP: AdminScriptedHTTP
+    let adminHTTPFactory: AdminRecordingHTTPFactory
 }
 
 @MainActor
@@ -2417,7 +2445,11 @@ private func makeFixture(
         gatedCallNumbers: historyGatedCallNumbers
     )
     let migrationHTTP = AdminScriptedHTTP(results: migrationResults, gateRequests: false)
-    let adminClient = RouterAdministrationClient(credentials: credentialStore) { _ in http }
+    let adminHTTPFactory = AdminRecordingHTTPFactory(client: http)
+    let adminClient = RouterAdministrationClient(
+        credentials: credentialStore,
+        httpFactory: adminHTTPFactory.make
+    )
     let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient = { endpoint in
         RouterHistoryClient(
             httpClient: historyHTTP,
@@ -2461,7 +2493,8 @@ private func makeFixture(
         http: http,
         historyHTTP: historyHTTP,
         migrationHTTP: migrationHTTP,
-        tlsPromotionHTTP: tlsPromotionHTTP
+        tlsPromotionHTTP: tlsPromotionHTTP,
+        adminHTTPFactory: adminHTTPFactory
     )
 }
 
@@ -2618,6 +2651,23 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         let satisfied = callCountWaiters.filter { recorded.count >= $0.minimum }
         callCountWaiters.removeAll { recorded.count >= $0.minimum }
         return satisfied.map(\.continuation)
+    }
+}
+
+private final class AdminRecordingHTTPFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private let client: any RouterHTTPClient
+    private var recordedEndpoints: [RouterEndpoint] = []
+
+    init(client: any RouterHTTPClient) {
+        self.client = client
+    }
+
+    var endpoints: [RouterEndpoint] { lock.withLock { recordedEndpoints } }
+
+    func make(_ endpoint: RouterEndpoint) throws -> any RouterHTTPClient {
+        lock.withLock { recordedEndpoints.append(endpoint) }
+        return client
     }
 }
 

@@ -38,6 +38,21 @@ struct RouterAdministrationView: View {
                             Task { await admin.unlock(token: token) }
                         }
                         .disabled(adminToken.isEmpty || admin.access == .verifying)
+                        if admin.host?.stagedCertificateFingerprint != nil {
+                            Button(
+                                admin.isTLSPromotionRunning
+                                    ? "Verifying new certificate…"
+                                    : "Verify new certificate"
+                            ) {
+                                Task { await admin.promoteStagedTLSPin() }
+                            }
+                            .disabled(admin.access == .verifying || admin.isTLSPromotionRunning)
+                            Text("Use this after wattlined restarts to verify and promote the staged certificate pin.")
+                                .foregroundStyle(.secondary)
+                        }
+                        if let message = admin.tlsError {
+                            Text(message).foregroundStyle(.orange)
+                        }
                     } header: {
                         Text("Administration")
                     } footer: {

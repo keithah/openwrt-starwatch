@@ -385,8 +385,9 @@ final class RouterAdministrationModel {
         guard let source = host,
               source.scheme == "https",
               source.stagedCertificateFingerprint != nil,
-              access == .unlocked
+              access != .verifying
         else { return }
+        let operationAccess = access
         tlsRequestGeneration &+= 1
         let request = tlsRequestGeneration
         let session = sessionGeneration
@@ -399,7 +400,32 @@ final class RouterAdministrationModel {
                 source: source,
                 session: session,
                 adminOperation: adminOperation,
-                request: request
+                request: request,
+                expectedAccess: operationAccess
+            ) else { return }
+            do {
+                try await adminClient.attach(endpoint: promoted.endpoint)
+            } catch {
+                guard isCurrentTLSOperation(
+                    source: source,
+                    session: session,
+                    adminOperation: adminOperation,
+                    request: request,
+                    expectedAccess: operationAccess
+                ) else { return }
+                host = promoted
+                access = .locked
+                tlsRestartRequired = false
+                isTLSPromotionRunning = false
+                tlsError = "The pin was promoted, but administration must be reopened."
+                return
+            }
+            guard isCurrentTLSOperation(
+                source: source,
+                session: session,
+                adminOperation: adminOperation,
+                request: request,
+                expectedAccess: operationAccess
             ) else { return }
             host = promoted
             tlsRestartRequired = false
@@ -409,7 +435,8 @@ final class RouterAdministrationModel {
                 source: source,
                 session: session,
                 adminOperation: adminOperation,
-                request: request
+                request: request,
+                expectedAccess: operationAccess
             ) else { return }
             isTLSPromotionRunning = false
             tlsError = "The new certificate could not be verified."
@@ -773,13 +800,14 @@ final class RouterAdministrationModel {
         source: RouterHostMetadata,
         session: UInt64,
         adminOperation: UInt64,
-        request: UInt64
+        request: UInt64,
+        expectedAccess: AdminAccess = .unlocked
     ) -> Bool {
         sessionGeneration == session
             && adminOperationGeneration == adminOperation
             && tlsRequestGeneration == request
             && host == source
-            && access == .unlocked
+            && access == expectedAccess
     }
 
     private static let clientCleanupFailureMessage =
