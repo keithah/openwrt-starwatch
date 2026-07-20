@@ -1,5 +1,16 @@
 import Foundation
 
+private func exactDouble(_ value: Decimal) -> Double? {
+    let converted = NSDecimalNumber(decimal: value).doubleValue
+    guard converted.isFinite,
+          Decimal(
+              string: String(converted),
+              locale: Locale(identifier: "en_US_POSIX")
+          ) == value
+    else { return nil }
+    return converted
+}
+
 public enum RouterRuleValidationError: Error, Equatable, Sendable {
     case invalidDuration
     case durationOverflow
@@ -12,6 +23,11 @@ public enum RouterRuleValidationError: Error, Equatable, Sendable {
 public enum RouterJSONValue: Codable, Equatable, Sendable {
     case null
     case bool(Bool)
+    case integer(Int64)
+    case decimal(Decimal)
+    /// Preserved for source compatibility when callers construct JSON values
+    /// from an already-represented finite Double. Decoding uses the exact
+    /// integer and Decimal cases instead.
     case number(Double)
     case string(String)
     case array([RouterJSONValue])
@@ -23,8 +39,13 @@ public enum RouterJSONValue: Codable, Equatable, Sendable {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
+        } else if let value = try? container.decode(Int64.self) {
+            let converted = Double(value)
+            self = Int64(exactly: converted) == value
+                ? .number(converted)
+                : .integer(value)
+        } else if let value = try? container.decode(Decimal.self) {
+            self = exactDouble(value).map(Self.number) ?? .decimal(value)
         } else if let value = try? container.decode(String.self) {
             self = .string(value)
         } else if let value = try? container.decode([RouterJSONValue].self) {
@@ -45,6 +66,10 @@ public enum RouterJSONValue: Codable, Equatable, Sendable {
         case .null:
             try container.encodeNil()
         case let .bool(value):
+            try container.encode(value)
+        case let .integer(value):
+            try container.encode(value)
+        case let .decimal(value):
             try container.encode(value)
         case let .number(value):
             try container.encode(value)
@@ -288,36 +313,15 @@ public enum RouterRuleDocument: Equatable, Sendable, Codable {
         }
 
         let conditionKeys: Set<String>
-        let condition: RouterRuleCondition
         switch conditionName {
         case "input_power":
             conditionKeys = ["state"]
-            guard let rawState = object.string("state"),
-                  let state = RouterRuleInputState(rawValue: rawState)
-            else { throw RouterRuleValidationError.invalidRule }
-            condition = .inputPower(state: state)
         case "battery_level":
             conditionKeys = ["op", "percent"]
-            guard let rawOp = object.string("op"),
-                  let op = RouterRuleComparison(rawValue: rawOp),
-                  let percent = object.integer("percent")
-            else { throw RouterRuleValidationError.invalidRule }
-            condition = .batteryLevel(op: op, percent: percent)
         case "port_power":
             conditionKeys = ["port", "op", "watts"]
-            guard let rawPort = object.string("port"),
-                  let port = RouterRulePort(rawValue: rawPort),
-                  let rawOp = object.string("op"),
-                  let op = RouterRuleComparison(rawValue: rawOp),
-                  let watts = object.number("watts")
-            else { throw RouterRuleValidationError.invalidRule }
-            condition = .portPower(port: port, op: op, watts: watts)
         case "schedule":
             conditionKeys = ["cron"]
-            guard let cron = object.string("cron") else {
-                throw RouterRuleValidationError.invalidRule
-            }
-            condition = .schedule(cron: cron)
         default:
             self = .unknown(raw)
             return
@@ -334,6 +338,52 @@ public enum RouterRuleDocument: Equatable, Sendable, Codable {
         guard Set(object.keys).isSubset(of: allowed) else {
             self = .unknown(raw)
             return
+        }
+
+        let condition: RouterRuleCondition
+        switch conditionName {
+        case "input_power":
+            guard let rawState = object.string("state") else {
+                throw RouterRuleValidationError.invalidRule
+            }
+            guard let state = RouterRuleInputState(rawValue: rawState) else {
+                self = .unknown(raw)
+                return
+            }
+            condition = .inputPower(state: state)
+        case "battery_level":
+            guard let rawOp = object.string("op") else {
+                throw RouterRuleValidationError.invalidRule
+            }
+            guard let op = RouterRuleComparison(rawValue: rawOp) else {
+                self = .unknown(raw)
+                return
+            }
+            guard let percent = object.integer("percent") else {
+                throw RouterRuleValidationError.invalidRule
+            }
+            condition = .batteryLevel(op: op, percent: percent)
+        case "port_power":
+            guard let rawPort = object.string("port"),
+                  let rawOp = object.string("op")
+            else { throw RouterRuleValidationError.invalidRule }
+            guard let port = RouterRulePort(rawValue: rawPort),
+                  let op = RouterRuleComparison(rawValue: rawOp)
+            else {
+                self = .unknown(raw)
+                return
+            }
+            guard let watts = object.number("watts") else {
+                throw RouterRuleValidationError.invalidRule
+            }
+            condition = .portPower(port: port, op: op, watts: watts)
+        case "schedule":
+            guard let cron = object.string("cron") else {
+                throw RouterRuleValidationError.invalidRule
+            }
+            condition = .schedule(cron: cron)
+        default:
+            throw RouterRuleValidationError.invalidRule
         }
         guard let name = object.string("name"),
               let enabled = object.bool("enabled"),
@@ -434,17 +484,36 @@ private extension Dictionary where Key == String, Value == RouterJSONValue {
     }
 
     func number(_ key: String) -> Double? {
-        guard case let .number(value)? = self[key] else { return nil }
-        return value
+        switch self[key] {
+        case let .integer(value):
+            let converted = Double(value)
+            guard Int64(exactly: converted) == value else { return nil }
+            return converted
+        case let .decimal(value):
+            return exactDouble(value)
+        case let .number(value):
+            return value.isFinite ? value : nil
+        default:
+            return nil
+        }
     }
 
     func int64(_ key: String) -> Int64? {
-        guard let value = number(key), value.isFinite else { return nil }
-        return Int64(exactly: value)
+        switch self[key] {
+        case let .integer(value):
+            return value
+        case var .decimal(value):
+            return Int64(NSDecimalString(&value, Locale(identifier: "en_US_POSIX")))
+        case let .number(value):
+            guard value.isFinite else { return nil }
+            return Int64(exactly: value)
+        default:
+            return nil
+        }
     }
 
     func integer(_ key: String) -> Int? {
-        guard let value = number(key), value.isFinite else { return nil }
+        guard let value = int64(key) else { return nil }
         return Int(exactly: value)
     }
 }

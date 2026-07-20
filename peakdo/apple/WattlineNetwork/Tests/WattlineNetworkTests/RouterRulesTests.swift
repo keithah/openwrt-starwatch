@@ -82,6 +82,124 @@ final class RouterRulesTests: XCTestCase {
         }
     }
 
+    func testFutureVariantsWithinKnownConditionFamiliesRemainLosslessUnknowns() throws {
+        let fixtures: [(label: String, json: String, additive: String?)] = [
+            (
+                "input state",
+                #"{"name":"future","enabled":true,"condition":"input_power","state":"unstable","hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                nil
+            ),
+            (
+                "input state plus additive",
+                #"{"name":"future","enabled":true,"condition":"input_power","state":"unstable","future_window":3,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                #""future_window":3"#
+            ),
+            (
+                "battery op",
+                #"{"name":"future","enabled":true,"condition":"battery_level","op":"at_most","percent":15,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                nil
+            ),
+            (
+                "battery op plus additive",
+                #"{"name":"future","enabled":true,"condition":"battery_level","op":"at_most","percent":15,"future_window":3,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                #""future_window":3"#
+            ),
+            (
+                "port op",
+                #"{"name":"future","enabled":true,"condition":"port_power","port":"dc","op":"at_least","watts":5,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                nil
+            ),
+            (
+                "port op plus additive",
+                #"{"name":"future","enabled":true,"condition":"port_power","port":"dc","op":"at_least","watts":5,"future_window":3,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                #""future_window":3"#
+            ),
+            (
+                "port value",
+                #"{"name":"future","enabled":true,"condition":"port_power","port":"wireless","op":"above","watts":5,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                nil
+            ),
+            (
+                "port value plus additive",
+                #"{"name":"future","enabled":true,"condition":"port_power","port":"wireless","op":"above","watts":5,"future_window":3,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+                #""future_window":3"#
+            ),
+        ]
+
+        for fixture in fixtures {
+            let data = Data(fixture.json.utf8)
+            let original = try JSONDecoder().decode(RouterJSONValue.self, from: data)
+            let document = try JSONDecoder().decode(RouterRuleDocument.self, from: data)
+            guard case let .unknown(raw) = document else {
+                return XCTFail("expected unknown for \(fixture.label)")
+            }
+            XCTAssertEqual(raw.json, original, fixture.label)
+            XCTAssertEqual(
+                try JSONDecoder().decode(
+                    RouterJSONValue.self,
+                    from: Data(raw.canonicalJSON.utf8)
+                ),
+                original,
+                fixture.label
+            )
+            if let additive = fixture.additive {
+                XCTAssertTrue(raw.canonicalJSON.contains(additive), fixture.label)
+            }
+        }
+    }
+
+    func testUnknownLargeIntegerAndDecimalRemainExactInCanonicalJSON() throws {
+        let fixture = #"{"name":"future","enabled":true,"condition":"input_power","state":"absent","future_integer":9007199254740993,"future_decimal":0.1234567890123456789012345678,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#
+        let document = try JSONDecoder().decode(
+            RouterRuleDocument.self,
+            from: Data(fixture.utf8)
+        )
+        guard case let .unknown(raw) = document else {
+            return XCTFail("expected lossless fallback")
+        }
+        XCTAssertTrue(raw.canonicalJSON.contains(#""future_integer":9007199254740993"#))
+        XCTAssertTrue(
+            raw.canonicalJSON.contains(
+                #""future_decimal":0.1234567890123456789012345678"#
+            )
+        )
+    }
+
+    func testExactlyRepresentableNumbersRetainNumberCaseCompatibility() throws {
+        let value = try JSONDecoder().decode(
+            RouterJSONValue.self,
+            from: Data(#"{"whole":3,"fraction":45.5}"#.utf8)
+        )
+        guard case let .object(object) = value else {
+            return XCTFail("expected object")
+        }
+        XCTAssertEqual(object["whole"], .number(3))
+        XCTAssertEqual(object["fraction"], .number(45.5))
+    }
+
+    func testInt64MaximumDurationDecodesAndRoundTripsExactly() throws {
+        let fixture = #"{"name":"maximum_hold","enabled":true,"condition":"input_power","state":"absent","hold":9223372036854775807,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#
+        let document = try JSONDecoder().decode(
+            RouterRuleDocument.self,
+            from: Data(fixture.utf8)
+        )
+        guard case let .known(rule) = document else {
+            return XCTFail("expected known rule")
+        }
+        XCTAssertEqual(try rule.hold.nanoseconds(), Int64.max)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let encoded = try encoder.encode(rule)
+        XCTAssertTrue(
+            String(decoding: encoded, as: UTF8.self)
+                .contains(#""hold":9223372036854775807"#)
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(RouterRuleDocument.self, from: encoded),
+            document
+        )
+    }
+
     func testUnknownRulesRemainReadableButInvalidKnownValuesAreRejected() async throws {
         let future = #"{"name":"future","enabled":true,"condition":"input_power","state":"absent","future_window":3,"hold":0,"hysteresis_margin":5,"actions":["shutdown","future:opaque"],"confirm_shutdown":true}"#
         let f = try await fixture([ScriptedRouterHTTPClient.ok("[\(future)]")])
@@ -96,6 +214,10 @@ final class RouterRulesTests: XCTestCase {
             #"{"name":"bad","enabled":true,"condition":"port_power","port":"dc","op":"above","watts":-1,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
             #"{"name":"bad","enabled":true,"condition":"schedule","cron":"0 2 * *","hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
             #"{"name":"bad","enabled":true,"condition":"input_power","state":"absent","hold":0,"hysteresis_margin":5,"actions":["shutdown"],"confirm_shutdown":false}"#,
+            #"{"name":"bad","enabled":true,"condition":"input_power","state":3,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+            #"{"name":"bad","enabled":true,"condition":"battery_level","op":3,"percent":15,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+            #"{"name":"bad","enabled":true,"condition":"port_power","port":3,"op":"above","watts":5,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
+            #"{"name":"bad","enabled":true,"condition":"port_power","port":"dc","op":3,"watts":5,"hold":0,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}"#,
         ] {
             XCTAssertThrowsError(
                 try JSONDecoder().decode(RouterRuleDocument.self, from: Data(malformed.utf8))
