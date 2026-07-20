@@ -124,6 +124,41 @@ final class RouterSettingsTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await task.value) { XCTAssertTrue($0 is CancellationError) }
     }
 
+    func testSettingsGETWaitsBehindEarlierPrivilegedPUTAndReadsAfterIt() async throws {
+        let advancedJSON = completeSettingsJSON.replacingOccurrences(
+            of: "\"advanced\":false",
+            with: "\"advanced\":true"
+        )
+        let updatedJSON = advancedJSON.dropLast() + ",\"restart_required\":false}"
+        let http = ScriptedRouterHTTPClient(
+            results: [
+                ScriptedRouterHTTPClient.ok(String(updatedJSON)),
+                ScriptedRouterHTTPClient.ok(advancedJSON),
+            ],
+            gateRequests: true
+        )
+        let endpoint = endpoint(host: "router.local")
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken("admin-token", for: endpoint, role: .administrator)
+        let client = RouterAdministrationClient(credentials: credentials) { _ in http }
+        try await client.attach(endpoint: endpoint)
+
+        let update = Task { try await client.updateSettings(.init(advanced: true)) }
+        await http.waitForGateRegistration()
+        let read = Task { try await client.settings() }
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(http.calls.map(\.method), ["PUT"])
+        http.releaseNextGate()
+        let updateValue = try await update.value
+        XCTAssertTrue(updateValue.settings.advanced)
+        await http.waitForCallCount(2)
+        http.releaseNextGate()
+        let readValue = try await read.value
+        XCTAssertTrue(readValue.advanced)
+        XCTAssertEqual(http.calls.map(\.method), ["PUT", "GET"])
+    }
+
     private func attachedClient(
         results: [Result<(Data, HTTPURLResponse), Error>]
     ) async throws -> (RouterAdministrationClient, ScriptedRouterHTTPClient) {
@@ -151,6 +186,23 @@ final class RouterSettingsTests: XCTestCase {
     private func assertDoesNotExposeBLEPIN<T>(_ value: T, named name: String) {
         XCTAssertFalse(String(describing: value).contains("020555"), "\(name) description leaked BLE PIN")
         XCTAssertFalse(String(reflecting: value).contains("020555"), "\(name) debug description leaked BLE PIN")
+        XCTAssertFalse(
+            recursivelyReflectedStrings(value).contains("020555"),
+            "\(name) Mirror leaked BLE PIN"
+        )
+        var dumped = ""
+        dump(value, to: &dumped)
+        XCTAssertFalse(dumped.contains("020555"), "\(name) dump leaked BLE PIN")
+    }
+
+    private func recursivelyReflectedStrings(_ value: Any) -> [String] {
+        let mirror = Mirror(reflecting: value)
+        return mirror.children.flatMap { child -> [String] in
+            if let string = child.value as? String {
+                return [string]
+            }
+            return recursivelyReflectedStrings(child.value)
+        }
     }
 }
 

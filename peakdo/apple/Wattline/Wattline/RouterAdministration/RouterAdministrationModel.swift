@@ -34,6 +34,13 @@ final class RouterAdministrationModel {
         var canRefresh: Bool { self == .unknown || self == .expired || self == .failed }
     }
 
+    enum SettingsSaveOutcome: Equatable {
+        case accepted
+        case rejected
+        case failed
+        case stale
+    }
+
     private(set) var host: RouterHostMetadata?
     private(set) var access: AdminAccess = .locked
     private(set) var adminError: String?
@@ -60,6 +67,7 @@ final class RouterAdministrationModel {
     private(set) var tlsRestartRequired = false
     private(set) var isTLSRotationRunning = false
     private(set) var isTLSPromotionRunning = false
+    private(set) var tlsPromotionRecoveryAvailable = false
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
@@ -74,21 +82,26 @@ final class RouterAdministrationModel {
     private var pairingStatusRequestGeneration: UInt64 = 0
     private var pairingQRRequestGeneration: UInt64 = 0
     private var tokenRequestGeneration: UInt64 = 0
-    private var settingsRequestGeneration: UInt64 = 0
+    private var settingsLoadGeneration: UInt64 = 0
+    private var settingsSaveGeneration: UInt64 = 0
     private var replacementRequestGeneration: UInt64 = 0
     private var tlsRequestGeneration: UInt64 = 0
     private var pairingExpiryTask: Task<Void, Never>?
+    private var settingsRestartRequiredHosts: Set<UUID> = []
+    private var validatedReplacementLease: ValidatedReplacementLease?
+
+    private struct ValidatedReplacementLease {
+        let proof: ValidatedRouterReplacement
+        let source: RouterHostMetadata
+        let candidate: RouterHostMetadata
+        let draft: RouterSettingsDraft
+        let draftPatch: RouterSettingsDraftPatch
+        let networkPatch: RouterSettingsPatch
+    }
 
     var replacementCandidates: [RouterHostMetadata] {
-        var candidates = connections.savedHosts
-        for router in connections.discoveredRouters {
-            guard !candidates.contains(where: { $0.endpoint == router.endpoint }),
-                  let host = Self.hostMetadata(for: router)
-            else { continue }
-            candidates.append(host)
-        }
-        return candidates
-            .filter { $0.endpoint != host?.endpoint }
+        connections.savedHosts
+            .filter { $0.id != host?.id }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
@@ -131,7 +144,10 @@ final class RouterAdministrationModel {
                     endpoint: endpoint
                 )
             },
-            endpointMigrationValidator: .production(credentials: credentials)
+            endpointMigrationValidator: .production(
+                hostStore: connections.hostStore,
+                credentials: credentials
+            )
         )
     }
 
@@ -182,6 +198,8 @@ final class RouterAdministrationModel {
                   adminOperationGeneration == adminOperation
             else { return session }
             access = .unlocked
+            settingsRestartRequiredHosts.remove(host.id)
+            settingsRestartRequired = false
         } catch {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation
@@ -286,21 +304,22 @@ final class RouterAdministrationModel {
     }
 
     func reloadSettings() async {
-        settingsRequestGeneration &+= 1
-        let request = settingsRequestGeneration
+        settingsLoadGeneration &+= 1
+        let request = settingsLoadGeneration
         isSettingsLoading = true
         settingsError = nil
         let result = await performAdmin({ client in
             try await client.settings()
         }, isCurrent: { [weak self] in
-            self?.settingsRequestGeneration == request
+            self?.settingsLoadGeneration == request
         })
-        guard settingsRequestGeneration == request else { return }
+        guard settingsLoadGeneration == request else { return }
         isSettingsLoading = false
         switch result {
         case let .success(value):
             settings = value
             settingsError = nil
+            invalidateReplacementValidation()
         case let .failure(message):
             settingsError = message
         case .stale:
@@ -308,26 +327,101 @@ final class RouterAdministrationModel {
         }
     }
 
-    func saveSettings(_ patch: RouterSettingsPatch) async {
-        settingsRequestGeneration &+= 1
-        let request = settingsRequestGeneration
+    @discardableResult
+    func saveSettings(
+        _ patch: RouterSettingsPatch,
+        draft: RouterSettingsDraft? = nil,
+        draftPatch: RouterSettingsDraftPatch? = nil,
+        replacement: RouterHostMetadata? = nil,
+        requiresValidatedReplacement: Bool = false
+    ) async -> SettingsSaveOutcome {
+        guard let source = host,
+              access == .unlocked,
+              !isSettingsSaving
+        else { return .stale }
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
+        settingsSaveGeneration &+= 1
+        let request = settingsSaveGeneration
+        settingsLoadGeneration &+= 1
+        isSettingsLoading = false
         isSettingsSaving = true
         settingsError = nil
+        defer {
+            if settingsSaveGeneration == request {
+                isSettingsSaving = false
+            }
+        }
+
+        if requiresValidatedReplacement {
+            guard let draft,
+                  let draftPatch,
+                  let replacement,
+                  let lease = validatedReplacementLease,
+                  lease.source == source,
+                  lease.candidate == replacement,
+                  lease.draft == draft,
+                  lease.draftPatch == draftPatch,
+                  lease.networkPatch == patch,
+                  connections.savedHosts.contains(replacement)
+            else {
+                isSettingsSaving = false
+                settingsError = "Verify this exact replacement endpoint and configuration again."
+                invalidateReplacementValidation()
+                return .rejected
+            }
+            let replacementRequest = replacementRequestGeneration
+            do {
+                let isValid = try await endpointMigrationValidator.revalidate(
+                    lease.proof,
+                    candidate: replacement,
+                    expectedDeviceID: source.deviceID ?? ""
+                )
+                guard sessionGeneration == session,
+                      adminOperationGeneration == adminOperation,
+                      host == source,
+                      access == .unlocked,
+                      replacementRequestGeneration == replacementRequest
+                else { return .stale }
+                guard isValid else {
+                    isSettingsSaving = false
+                    settingsError = "Verify this exact replacement endpoint and configuration again."
+                    invalidateReplacementValidation()
+                    return .rejected
+                }
+            } catch {
+                guard sessionGeneration == session,
+                      adminOperationGeneration == adminOperation,
+                      host == source,
+                      access == .unlocked
+                else { return .stale }
+                isSettingsSaving = false
+                settingsError = "Verify this exact replacement endpoint and configuration again."
+                invalidateReplacementValidation()
+                return .rejected
+            }
+        }
+
+        invalidateReplacementValidation()
         let result = await performAdmin({ client in
             try await client.updateSettings(patch)
         }, isCurrent: { [weak self] in
-            self?.settingsRequestGeneration == request
+            self?.settingsSaveGeneration == request
         })
-        guard settingsRequestGeneration == request else { return }
-        isSettingsSaving = false
+        guard settingsSaveGeneration == request else { return .stale }
         switch result {
         case let .success(value):
             settings = value.settings
-            settingsRestartRequired = value.restartRequired
+            if value.restartRequired {
+                settingsRestartRequiredHosts.insert(source.id)
+            }
+            settingsRestartRequired = settingsRestartRequiredHosts.contains(source.id)
+            return .accepted
         case let .failure(message):
             settingsError = message
+            return .failed
         case .stale:
-            break
+            return .stale
         }
     }
 
@@ -347,12 +441,6 @@ final class RouterAdministrationModel {
         tlsError = nil
         do {
             let response = try await adminClient.rotateTLS()
-            guard isCurrentTLSOperation(
-                source: source,
-                session: session,
-                adminOperation: adminOperation,
-                request: request
-            ) else { return }
             let staged = try await connections.stageTLSCertificateFingerprint(
                 response.sha256,
                 for: source
@@ -390,7 +478,7 @@ final class RouterAdministrationModel {
         }
     }
 
-    func promoteStagedTLSPin() async {
+    func promoteStagedTLSPin(administratorToken: String? = nil) async {
         guard let source = host,
               source.scheme == "https",
               source.stagedCertificateFingerprint != nil,
@@ -405,8 +493,17 @@ final class RouterAdministrationModel {
         let adminOperation = adminOperationGeneration
         isTLSPromotionRunning = true
         tlsError = nil
+        tlsPromotionRecoveryAvailable = false
         do {
-            let promoted = try await connections.promoteStagedTLSPin(for: source.id)
+            let promoted: RouterHostMetadata
+            if let administratorToken {
+                promoted = try await connections.promoteStagedTLSPin(
+                    for: source.id,
+                    administratorToken: administratorToken
+                )
+            } else {
+                promoted = try await connections.promoteStagedTLSPin(for: source.id)
+            }
             guard isCurrentTLSOperation(
                 source: source,
                 session: session,
@@ -428,6 +525,9 @@ final class RouterAdministrationModel {
                 access = .locked
                 tlsRestartRequired = false
                 isTLSPromotionRunning = false
+                tlsPromotionRecoveryAvailable = false
+                settingsRestartRequiredHosts.remove(source.id)
+                settingsRestartRequired = false
                 tlsError = "The pin was promoted, but administration must be reopened."
                 return
             }
@@ -441,6 +541,9 @@ final class RouterAdministrationModel {
             host = promoted
             tlsRestartRequired = false
             isTLSPromotionRunning = false
+            tlsPromotionRecoveryAvailable = false
+            settingsRestartRequiredHosts.remove(source.id)
+            settingsRestartRequired = false
         } catch {
             guard isCurrentTLSOperation(
                 source: source,
@@ -450,17 +553,31 @@ final class RouterAdministrationModel {
                 expectedAccess: operationAccess
             ) else { return }
             isTLSPromotionRunning = false
-            tlsError = "The new certificate could not be verified."
+            if administratorToken != nil {
+                tlsPromotionRecoveryAvailable = true
+                tlsError = "The administrator token could not verify the new certificate."
+            } else if (error as? RouterTLSPromotionError) == .missingCredential {
+                tlsPromotionRecoveryAvailable = true
+                tlsError = "Enter an administrator token to verify the new certificate."
+            } else {
+                tlsError = "The new certificate could not be verified."
+            }
         }
     }
 
-    func validateReplacement(_ candidate: RouterHostMetadata) async {
+    func validateReplacement(
+        _ candidate: RouterHostMetadata,
+        draft: RouterSettingsDraft,
+        draftPatch: RouterSettingsDraftPatch,
+        patch: RouterSettingsPatch
+    ) async {
         guard let source = host,
               access == .unlocked,
               let expectedDeviceID = source.deviceID,
-              replacementCandidates.contains(where: { $0.endpoint == candidate.endpoint })
+              connections.savedHosts.contains(candidate),
+              replacementCandidates.contains(candidate)
         else {
-            validatedReplacement = nil
+            invalidateReplacementValidation()
             replacementValidationError = "Select a known router endpoint."
             return
         }
@@ -468,37 +585,66 @@ final class RouterAdministrationModel {
         let request = replacementRequestGeneration
         let session = sessionGeneration
         validatedReplacement = nil
+        validatedReplacementLease = nil
         replacementValidationError = nil
         isReplacementValidationRunning = true
         do {
             let validated = try await endpointMigrationValidator.validate(
-                sourceEndpoint: source.endpoint,
-                candidate: candidate.endpoint,
+                candidate: candidate,
                 expectedDeviceID: expectedDeviceID
             )
             guard sessionGeneration == session,
                   replacementRequestGeneration == request,
-                  host?.endpoint == source.endpoint,
+                  host == source,
                   access == .unlocked
             else { return }
+            guard connections.savedHosts.contains(candidate) else {
+                validatedReplacement = nil
+                validatedReplacementLease = nil
+                replacementValidationError = "Save and verify this replacement endpoint again."
+                isReplacementValidationRunning = false
+                return
+            }
             validatedReplacement = RouterReplacementCandidate(
                 scheme: validated.endpoint.scheme,
                 host: validated.endpoint.host,
                 port: validated.endpoint.port,
-                validation: .verified(deviceID: validated.deviceID)
+                certificateFingerprint: validated.endpoint.certificateFingerprint,
+                reachability: Self.routeReachability(candidate.reachability),
+                isSaved: true,
+                hasClientCredential: true,
+                validation: .verified(deviceID: validated.deviceID),
+                validatedPatch: draftPatch
+            )
+            validatedReplacementLease = ValidatedReplacementLease(
+                proof: validated,
+                source: source,
+                candidate: candidate,
+                draft: draft,
+                draftPatch: draftPatch,
+                networkPatch: patch
             )
             replacementValidationError = nil
             isReplacementValidationRunning = false
         } catch {
             guard sessionGeneration == session,
                   replacementRequestGeneration == request,
-                  host?.endpoint == source.endpoint,
+                  host == source,
                   access == .unlocked
             else { return }
             validatedReplacement = nil
+            validatedReplacementLease = nil
             replacementValidationError = "Could not verify this replacement endpoint."
             isReplacementValidationRunning = false
         }
+    }
+
+    func invalidateReplacementValidation() {
+        replacementRequestGeneration &+= 1
+        validatedReplacement = nil
+        validatedReplacementLease = nil
+        replacementValidationError = nil
+        isReplacementValidationRunning = false
     }
 
     func reloadTokens() async {
@@ -907,21 +1053,20 @@ final class RouterAdministrationModel {
     }
 
     private func clearSettingsState() {
-        settingsRequestGeneration &+= 1
-        replacementRequestGeneration &+= 1
+        settingsLoadGeneration &+= 1
+        settingsSaveGeneration &+= 1
         settings = nil
         settingsError = nil
-        settingsRestartRequired = false
+        settingsRestartRequired = host.map { settingsRestartRequiredHosts.contains($0.id) } ?? false
         isSettingsLoading = false
         isSettingsSaving = false
-        validatedReplacement = nil
-        replacementValidationError = nil
-        isReplacementValidationRunning = false
+        invalidateReplacementValidation()
         tlsRequestGeneration &+= 1
         tlsError = nil
         tlsRestartRequired = false
         isTLSRotationRunning = false
         isTLSPromotionRunning = false
+        tlsPromotionRecoveryAvailable = false
     }
 
     private static func unlockMessage(for error: Error) -> String {
@@ -935,20 +1080,14 @@ final class RouterAdministrationModel {
         }
     }
 
-    private static func hostMetadata(for router: DiscoveredRouter) -> RouterHostMetadata? {
-        var components = URLComponents()
-        components.scheme = router.endpoint.scheme
-        components.host = router.endpoint.host
-        components.port = router.endpoint.port
-        guard let address = components.string else { return nil }
-        return try? RouterHostValidator.validate(
-            address,
-            displayName: router.serviceName,
-            reachability: .lan,
-            allowsInsecureWAN: false,
-            deviceID: router.deviceID,
-            certificateFingerprint: router.endpoint.certificateFingerprint
-        )
+    private static func routeReachability(
+        _ reachability: RouterHostReachability
+    ) -> RouterSettingsRouteReachability {
+        switch reachability {
+        case .lan: .lan
+        case .vpn: .vpn
+        case .wan: .wan
+        }
     }
 }
 

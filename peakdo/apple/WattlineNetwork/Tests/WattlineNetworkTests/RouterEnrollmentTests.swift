@@ -24,6 +24,9 @@ final class RouterPairingPayloadTests: XCTestCase {
         XCTAssertEqual(payload.enrollmentEndpoint.scheme, "https")
         XCTAssertEqual(payload.enrollmentEndpoint.port, 8378)
         XCTAssertFalse(String(describing: payload).contains("123456"))
+        var payloadDump = ""
+        dump(payload, to: &payloadDump)
+        XCTAssertFalse(payloadDump.contains("123456"))
     }
 
     func testRejectsMalformedOrAmbiguousPayloads() throws {
@@ -77,6 +80,9 @@ final class RouterEnrollmentClientTests: XCTestCase {
         XCTAssertFalse(String(describing: result).contains("wlt_secret-token"))
         XCTAssertFalse(String(describing: result).contains("7dd64d22b0c14e7b"))
         XCTAssertFalse(String(describing: result).contains("123456"))
+        var resultDump = ""
+        dump(result, to: &resultDump)
+        XCTAssertFalse(resultDump.contains("wlt_secret-token"))
     }
 
     func testEnrollmentCapturesTokenMetadataIDAdditively() async throws {

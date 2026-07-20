@@ -4,40 +4,42 @@ import XCTest
 @testable import WattlineNetwork
 
 final class RouterEndpointMigrationTests: XCTestCase {
-    func testCandidateProbeUsesSelectedEndpointAndSourceAdministratorCredential() async throws {
+    func testCandidateProbeUsesSelectedEndpointsOwnClientCredentialNeverSourceAdministrator() async throws {
         let source = endpoint(scheme: "https", host: "router.local", port: 8378, pin: activePin)
-        let candidate = endpoint(scheme: "http", host: "router.local", port: 8377, pin: nil)
+        let candidate = try host(scheme: "http", host: "router.local", port: 8377, pin: nil)
         let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
-        try await credentials.saveToken("admin-token", for: source, role: .administrator)
+        try await credentials.saveToken("source-admin", for: source, role: .administrator)
+        try await credentials.saveToken("candidate-client", for: candidate.endpoint, role: .client)
+        let hostStore = RouterHostStore(backend: MigrationHostBackend())
+        try await hostStore.save(candidate)
         let http = ScriptedRouterHTTPClient(results: [
             ScriptedRouterHTTPClient.ok(deviceJSON(id: "DC:04:5A:EB:72:2B")),
         ])
         let factory = RecordingHTTPFactory(client: http)
         let validator = RouterEndpointMigrationValidator(
+            hostStore: hostStore,
             credentials: credentials,
             httpFactory: factory.make
         )
 
         let value = try await validator.validate(
-            sourceEndpoint: source,
             candidate: candidate,
             expectedDeviceID: "dc045aeb722b"
         )
 
-        XCTAssertEqual(value.endpoint, candidate)
+        XCTAssertEqual(value.endpoint, candidate.endpoint)
         XCTAssertEqual(value.deviceID, "DC:04:5A:EB:72:2B")
-        XCTAssertEqual(factory.endpoints, [candidate])
+        XCTAssertEqual(factory.endpoints, [candidate.endpoint])
         XCTAssertEqual(http.calls.map(\.path), ["/api/v1/device"])
-        XCTAssertEqual(http.calls.map(\.token), ["admin-token"])
+        XCTAssertEqual(http.calls.map(\.token), ["candidate-client"])
     }
 
-    func testCandidateProbeRejectsDeviceMismatchAndMissingAdminCredential() async throws {
+    func testCandidateProbeRejectsDeviceMismatchAndMissingCandidateCredential() async throws {
         let mismatch = try await migrationHarness(
             deviceID: "AA:BB:CC:DD:EE:FF",
             storesToken: true
         )
         await XCTAssertThrowsMigrationError(try await mismatch.validator.validate(
-            sourceEndpoint: mismatch.source,
             candidate: mismatch.candidate,
             expectedDeviceID: "DC:04:5A:EB:72:2B"
         )) {
@@ -49,7 +51,6 @@ final class RouterEndpointMigrationTests: XCTestCase {
             storesToken: false
         )
         await XCTAssertThrowsMigrationError(try await missing.validator.validate(
-            sourceEndpoint: missing.source,
             candidate: missing.candidate,
             expectedDeviceID: "DC:04:5A:EB:72:2B"
         )) {
@@ -63,7 +64,6 @@ final class RouterEndpointMigrationTests: XCTestCase {
             result: .failure(RouterHostValidationError.certificateFingerprintMismatch)
         )
         await XCTAssertThrowsMigrationError(try await harness.validator.validate(
-            sourceEndpoint: harness.source,
             candidate: harness.candidate,
             expectedDeviceID: "DC:04:5A:EB:72:2B"
         )) {
@@ -72,7 +72,34 @@ final class RouterEndpointMigrationTests: XCTestCase {
                 .certificateFingerprintMismatch
             )
         }
-        XCTAssertEqual(harness.factory.endpoints, [harness.candidate])
+        XCTAssertEqual(harness.factory.endpoints, [harness.candidate.endpoint])
+    }
+
+    func testHTTPSCandidateWithoutIndependentActivePinIsRejectedBeforeCredentialOrRequest() async throws {
+        let source = endpoint(scheme: "https", host: "router.local", port: 8378, pin: activePin)
+        let candidate = try host(scheme: "https", host: "attacker.local", port: 8378, pin: nil)
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken("source-admin", for: source, role: .administrator)
+        try await credentials.saveToken("candidate-client", for: candidate.endpoint, role: .client)
+        let hostStore = RouterHostStore(backend: MigrationHostBackend())
+        try await hostStore.save(candidate)
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(deviceJSON(id: "DC:04:5A:EB:72:2B")),
+        ])
+        let factory = RecordingHTTPFactory(client: http)
+        let validator = RouterEndpointMigrationValidator(
+            hostStore: hostStore,
+            credentials: credentials,
+            httpFactory: factory.make
+        )
+
+        await XCTAssertThrowsMigrationError(try await validator.validate(
+            candidate: candidate,
+            expectedDeviceID: "DC:04:5A:EB:72:2B"
+        )) { _ in }
+
+        XCTAssertTrue(factory.endpoints.isEmpty)
+        XCTAssertTrue(http.calls.isEmpty)
     }
 
     func testProductionProbeRejectsRedirectBeforeCredentialCanReachAnotherEndpoint() async throws {
@@ -84,31 +111,100 @@ final class RouterEndpointMigrationTests: XCTestCase {
             "http://127.0.0.1:\(target.port)/api/v1/device"
         ))
         defer { redirect.stop() }
-        let endpoint = RouterEndpoint(
+        let candidate = try host(
             scheme: "http",
             host: "127.0.0.1",
             port: redirect.port,
-            certificateFingerprint: nil,
-            allowsInsecureWAN: false
+            pin: nil
         )
         let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
-        try await credentials.saveToken("admin-token", for: endpoint, role: .administrator)
+        try await credentials.saveToken("candidate-client", for: candidate.endpoint, role: .client)
+        let hostStore = RouterHostStore(backend: MigrationHostBackend())
+        try await hostStore.save(candidate)
         let configuration = URLSessionConfiguration.ephemeral
         let validator = RouterEndpointMigrationValidator.production(
+            hostStore: hostStore,
             credentials: credentials,
             configuration: configuration
         )
 
         await XCTAssertThrowsMigrationError(try await validator.validate(
-            sourceEndpoint: endpoint,
-            candidate: endpoint,
+            candidate: candidate,
             expectedDeviceID: "DC:04:5A:EB:72:2B"
         )) { _ in }
 
         XCTAssertEqual(redirect.requests.count, 1)
-        XCTAssertTrue(redirect.requests[0].contains("Authorization: Bearer admin-token"))
+        XCTAssertTrue(
+            redirect.requests.first?.contains("Authorization: Bearer candidate-client") == true
+        )
         XCTAssertTrue(target.requests.isEmpty)
-        XCTAssertFalse(target.requests.contains { $0.contains("Bearer admin-token") })
+        XCTAssertFalse(target.requests.contains { $0.contains("Bearer candidate-client") })
+    }
+
+    func testUnsavedCandidateIsIneligibleAndReceivesNoCredentialOrRequest() async throws {
+        let candidate = try host(
+            scheme: "https",
+            host: "attacker.local",
+            port: 8378,
+            pin: String(repeating: "aa", count: 32)
+        )
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken("candidate-client", for: candidate.endpoint, role: .client)
+        let hostStore = RouterHostStore(backend: MigrationHostBackend())
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(deviceJSON(id: "DC:04:5A:EB:72:2B")),
+        ])
+        let factory = RecordingHTTPFactory(client: http)
+        let validator = RouterEndpointMigrationValidator(
+            hostStore: hostStore,
+            credentials: credentials,
+            httpFactory: factory.make
+        )
+
+        await XCTAssertThrowsMigrationError(try await validator.validate(
+            candidate: candidate,
+            expectedDeviceID: "DC:04:5A:EB:72:2B"
+        )) { _ in }
+
+        XCTAssertTrue(factory.endpoints.isEmpty)
+        XCTAssertTrue(http.calls.isEmpty)
+    }
+
+    func testValidationLeaseRequiresExactSavedEndpointAndCurrentCredential() async throws {
+        let harness = try await migrationHarness()
+        let lease = try await harness.validator.validate(
+            candidate: harness.candidate,
+            expectedDeviceID: "DC:04:5A:EB:72:2B"
+        )
+
+        let initiallyCurrent = try await harness.validator.revalidate(
+            lease,
+            candidate: harness.candidate,
+            expectedDeviceID: "DC:04:5A:EB:72:2B"
+        )
+        XCTAssertTrue(initiallyCurrent)
+
+        let changedPin = RouterHostMetadata(
+            id: harness.candidate.id,
+            displayName: harness.candidate.displayName,
+            scheme: harness.candidate.scheme,
+            host: harness.candidate.host,
+            port: harness.candidate.port,
+            reachability: harness.candidate.reachability,
+            allowsInsecureWAN: harness.candidate.allowsInsecureWAN,
+            deviceID: harness.candidate.deviceID,
+            certificateFingerprint: String(repeating: "bb", count: 32).uppercased(),
+            stagedCertificateFingerprint: nil,
+            tokenID: harness.candidate.tokenID
+        )
+        try await harness.hostStore.save(changedPin)
+
+        let stillCurrent = try await harness.validator.revalidate(
+            lease,
+            candidate: harness.candidate,
+            expectedDeviceID: "DC:04:5A:EB:72:2B"
+        )
+        XCTAssertFalse(stillCurrent)
     }
 }
 
@@ -218,8 +314,8 @@ private final class ResumeFlag: @unchecked Sendable {
 }
 
 private struct MigrationHarness {
-    let source: RouterEndpoint
-    let candidate: RouterEndpoint
+    let candidate: RouterHostMetadata
+    let hostStore: RouterHostStore
     let validator: RouterEndpointMigrationValidator
     let factory: RecordingHTTPFactory
 }
@@ -230,8 +326,7 @@ private func migrationHarness(
     candidateScheme: String = "http",
     result: Result<(Data, HTTPURLResponse), Error>? = nil
 ) async throws -> MigrationHarness {
-    let source = endpoint(scheme: "https", host: "router.local", port: 8378, pin: activePin)
-    let candidate = endpoint(
+    let candidate = try host(
         scheme: candidateScheme,
         host: "router.local",
         port: candidateScheme == "https" ? 8378 : 8377,
@@ -239,16 +334,19 @@ private func migrationHarness(
     )
     let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
     if storesToken {
-        try await credentials.saveToken("admin-token", for: source, role: .administrator)
+        try await credentials.saveToken("candidate-client", for: candidate.endpoint, role: .client)
     }
+    let hostStore = RouterHostStore(backend: MigrationHostBackend())
+    try await hostStore.save(candidate)
     let http = ScriptedRouterHTTPClient(results: [
         result ?? ScriptedRouterHTTPClient.ok(deviceJSON(id: deviceID)),
     ])
     let factory = RecordingHTTPFactory(client: http)
     return MigrationHarness(
-        source: source,
         candidate: candidate,
+        hostStore: hostStore,
         validator: RouterEndpointMigrationValidator(
+            hostStore: hostStore,
             credentials: credentials,
             httpFactory: factory.make
         ),
@@ -285,6 +383,22 @@ private func endpoint(
     )
 }
 
+private func host(
+    scheme: String,
+    host: String,
+    port: Int,
+    pin: String?
+) throws -> RouterHostMetadata {
+    try RouterHostValidator.validate(
+        "\(scheme)://\(host):\(port)",
+        displayName: "Candidate",
+        reachability: .lan,
+        allowsInsecureWAN: false,
+        deviceID: "DC:04:5A:EB:72:2B",
+        certificateFingerprint: pin
+    )
+}
+
 private func deviceJSON(id: String) -> String {
     #"{"id":"\#(id)","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":773,"features_raw":32767,"features":{},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"ota","connection":{"connected":true,"phase":"bootloader","reconnect":"bootloader"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}"#
 }
@@ -304,4 +418,13 @@ private final class RecordingHTTPFactory: @unchecked Sendable {
         lock.withLock { recorded.append(endpoint) }
         return client
     }
+}
+
+private final class MigrationHostBackend: RouterHostKeyValueStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: Data?
+
+    func data(forKey key: String) -> Data? { lock.withLock { data } }
+    func set(_ data: Data, forKey key: String) { lock.withLock { self.data = data } }
+    func removeValue(forKey key: String) { lock.withLock { data = nil } }
 }

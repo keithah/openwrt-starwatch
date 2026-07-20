@@ -70,7 +70,9 @@ public struct RouterEndpoint: Equatable, Sendable, CustomStringConvertible, Cust
 
 /// An in-memory bearer credential whose textual representations never reveal its value.
 /// Persistence is deliberately left to the credential provider implementation added in Task 7.
-public struct RouterCredential: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+public struct RouterCredential: Sendable, CustomStringConvertible, CustomDebugStringConvertible,
+    CustomReflectable
+{
     let token: String
 
     public init(token: String) {
@@ -79,6 +81,9 @@ public struct RouterCredential: Sendable, CustomStringConvertible, CustomDebugSt
 
     public var description: String { "RouterCredential([REDACTED])" }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["credential": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public protocol RouterCredentialProvider: Sendable {
@@ -88,7 +93,7 @@ public protocol RouterCredentialProvider: Sendable {
 /// A transient provider for callers that already hold a token in memory.
 /// It performs no persistence and can be replaced by Task 7's Keychain-backed provider.
 public struct TransientRouterCredentialProvider: RouterCredentialProvider,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     private let credential: RouterCredential
 
@@ -102,6 +107,9 @@ public struct TransientRouterCredentialProvider: RouterCredentialProvider,
 
     public var description: String { "TransientRouterCredentialProvider([REDACTED])" }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["credential": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public protocol RouterConnectionClock: Sendable {

@@ -125,6 +125,35 @@ public actor RouterCredentialStore: RouterCredentialProvider,
         }
     }
 
+    /// Returns whether an opaque credential lease still names the exact
+    /// role-scoped account version and that account still contains a usable
+    /// credential. Account locking makes concurrent save/delete complete
+    /// before the comparison.
+    public func isCurrent(
+        _ lease: RouterCredentialLease,
+        for endpoint: RouterEndpoint,
+        role: RouterCredentialRole = .client
+    ) async throws -> Bool {
+        let account = account(for: endpoint, role: role)
+        let accountLock = accountLock(for: account)
+        await accountLock.acquire()
+        defer { accountLock.release() }
+        do {
+            try Task.checkCancellation()
+            guard lease.account == account,
+                  lease.version == versions[account, default: 0],
+                  let data = try await backend.read(account: account),
+                  let token = String(data: data, encoding: .utf8),
+                  !token.isEmpty
+            else { return false }
+            return true
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NetworkError.unauthorized
+        }
+    }
+
     @discardableResult
     public func deleteToken(
         for endpoint: RouterEndpoint,

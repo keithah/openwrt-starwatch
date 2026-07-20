@@ -50,6 +50,9 @@ final class RouterPairingAdministrationTests: XCTestCase {
         XCTAssertEqual(opened.pin, "123456")
         XCTAssertFalse(String(describing: opened).contains("123456"))
         XCTAssertFalse(String(reflecting: opened).contains("123456"))
+        var dumped = ""
+        dump(opened, to: &dumped)
+        XCTAssertFalse(dumped.contains("123456"))
 
         try await client.closePairingMode()
 

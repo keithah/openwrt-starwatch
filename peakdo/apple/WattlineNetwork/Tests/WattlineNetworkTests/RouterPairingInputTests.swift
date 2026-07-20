@@ -12,6 +12,9 @@ final class RouterPairingInputTests: XCTestCase {
         XCTAssertEqual(input.payload.host, "router.local")
         XCTAssertFalse(String(describing: input).contains("123456"))
         XCTAssertFalse(String(reflecting: input).contains("123456"))
+        var dumped = ""
+        dump(input, to: &dumped)
+        XCTAssertFalse(dumped.contains("123456"))
     }
 
     func testInputRejectsUnknownQueryFieldsAndNonPairingText() throws {

@@ -6,7 +6,7 @@ public enum RouterPairingPayloadError: Error, Equatable, Sendable {
 }
 
 public struct RouterPairingPayload: Equatable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public let deviceID: String
     public let host: String
@@ -39,6 +39,9 @@ public struct RouterPairingPayload: Equatable, Sendable,
     }
 
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["payload": "[REDACTED]"], displayStyle: .struct)
+    }
 
     public static func parse(_ url: URL) throws -> RouterPairingPayload {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),

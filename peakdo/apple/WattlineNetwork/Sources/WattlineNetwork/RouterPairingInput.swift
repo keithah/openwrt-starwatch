@@ -1,12 +1,15 @@
 import Foundation
 
 public struct RouterPairingInput: Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public let payload: RouterPairingPayload
 
     public var description: String { "RouterPairingInput([REDACTED])" }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["input": "[REDACTED]"], displayStyle: .struct)
+    }
 
     public init(payload: RouterPairingPayload) {
         self.payload = payload

@@ -8,11 +8,13 @@ struct RouterSettingsView: View {
     @State private var original: RouterSettingsValue?
     @State private var draft: RouterSettingsDraft?
     @State private var selectedReplacementID: UUID?
-    @State private var confirmations: Set<RouterSettingsConfirmation> = []
+    @State private var confirmationApproval: RouterSettingsConfirmationApproval?
     @State private var confirmsListenerMigration = false
     @State private var confirmsInsecureWANHTTP = false
     @State private var confirmsTokenStoreCutover = false
+    @State private var confirmsBLEPINChange = false
     @State private var confirmsTLSRotation = false
+    @State private var tlsRecoveryToken = ""
 
     var body: some View {
         Group {
@@ -55,6 +57,25 @@ struct RouterSettingsView: View {
                                 Task { await model.promoteStagedTLSPin() }
                             }
                             .disabled(model.isTLSRotationRunning || model.isTLSPromotionRunning)
+                            if model.tlsPromotionRecoveryAvailable {
+                                SecureField("Administrator token", text: $tlsRecoveryToken)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                Button("Verify with administrator token") {
+                                    let token = tlsRecoveryToken
+                                    tlsRecoveryToken = ""
+                                    Task {
+                                        await model.promoteStagedTLSPin(
+                                            administratorToken: token
+                                        )
+                                    }
+                                }
+                                .disabled(
+                                    tlsRecoveryToken.isEmpty
+                                        || model.isTLSRotationRunning
+                                        || model.isTLSPromotionRunning
+                                )
+                            }
                         }
                         if model.tlsRestartRequired {
                             Text("Restart wattlined on the router, then verify the new certificate.")
@@ -130,8 +151,13 @@ struct RouterSettingsView: View {
         .onDisappear {
             draft = nil
             original = nil
-            confirmations = []
+            confirmationApproval = nil
             selectedReplacementID = nil
+            tlsRecoveryToken = ""
+            model.invalidateReplacementValidation()
+        }
+        .onChange(of: selectedReplacementID) { _, _ in
+            invalidateEditAuthorization()
         }
         .confirmationDialog(
             "Rotate the router certificate?",
@@ -151,7 +177,7 @@ struct RouterSettingsView: View {
             titleVisibility: .visible
         ) {
             Button("Confirm listener migration") { confirm(.listenerMigration) }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
         } message: {
             Text("Listener changes can interrupt access. Keep a verified endpoint available for reconnection.")
         }
@@ -163,7 +189,7 @@ struct RouterSettingsView: View {
             Button("Allow insecure WAN HTTP", role: .destructive) {
                 confirm(.insecureWANHTTP)
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
         } message: {
             Text("HTTP traffic on WAN links is not encrypted.")
         }
@@ -175,9 +201,21 @@ struct RouterSettingsView: View {
             Button("Confirm token-store cutover", role: .destructive) {
                 confirm(.tokenStoreCutover)
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
         } message: {
             Text(RouterSettingsCopy.tokenStoreCutover)
+        }
+        .confirmationDialog(
+            "Change the Bluetooth pairing PIN?",
+            isPresented: $confirmsBLEPINChange,
+            titleVisibility: .visible
+        ) {
+            Button("Confirm Bluetooth PIN change", role: .destructive) {
+                confirm(.blePINChange)
+            }
+            Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
+        } message: {
+            Text("Existing Bluetooth pairing credentials may need to be updated.")
         }
     }
 
@@ -224,7 +262,15 @@ struct RouterSettingsView: View {
                 }
                 if let candidate = selectedReplacement {
                     Button(model.isReplacementValidationRunning ? "Verifying…" : "Verify endpoint") {
-                        Task { await model.validateReplacement(candidate) }
+                        guard let draftPatch = decision.patch else { return }
+                        Task {
+                            await model.validateReplacement(
+                                candidate,
+                                draft: draft,
+                                draftPatch: draftPatch,
+                                patch: settingsPatch(draftPatch)
+                            )
+                        }
                     }
                     .disabled(model.isReplacementValidationRunning)
                 }
@@ -269,7 +315,9 @@ struct RouterSettingsView: View {
            let validated = model.validatedReplacement,
            selectedReplacement.scheme == validated.scheme,
            selectedReplacement.host == validated.host,
-           selectedReplacement.port == validated.port
+           selectedReplacement.port == validated.port,
+           selectedReplacement.certificateFingerprint == validated.certificateFingerprint,
+           routeReachability(selectedReplacement.reachability) == validated.reachability
         {
             correlatedReplacement = validated
         } else {
@@ -277,10 +325,13 @@ struct RouterSettingsView: View {
         }
         return RouterSettingsSaveContext(
             currentScheme: model.host?.scheme ?? "",
+            currentHost: model.host?.host ?? "",
             currentPort: model.host?.port ?? 0,
+            currentCertificateFingerprint: model.host?.certificateFingerprint,
+            currentReachability: routeReachability(model.host?.reachability ?? .lan),
             expectedDeviceID: model.host?.deviceID,
             replacement: correlatedReplacement,
-            confirmations: confirmations
+            confirmationApproval: confirmationApproval
         )
     }
 
@@ -290,7 +341,10 @@ struct RouterSettingsView: View {
     ) -> Binding<Value> {
         Binding(
             get: { draft?[keyPath: keyPath] ?? fallback },
-            set: { draft?[keyPath: keyPath] = $0 }
+            set: {
+                draft?[keyPath: keyPath] = $0
+                invalidateEditAuthorization()
+            }
         )
     }
 
@@ -302,12 +356,27 @@ struct RouterSettingsView: View {
                     .split(separator: ",", omittingEmptySubsequences: true)
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
+                invalidateEditAuthorization()
             }
         )
     }
 
     private func confirm(_ confirmation: RouterSettingsConfirmation) {
+        guard let original,
+              let draft,
+              let patch = try? draft.patch(from: original)
+        else {
+            invalidateEditAuthorization()
+            return
+        }
+        var confirmations = confirmationApproval?.patch == patch
+            ? confirmationApproval?.confirmations ?? []
+            : []
         confirmations.insert(confirmation)
+        confirmationApproval = RouterSettingsConfirmationApproval(
+            patch: patch,
+            confirmations: confirmations
+        )
         saveOrConfirm()
     }
 
@@ -324,11 +393,21 @@ struct RouterSettingsView: View {
             confirmsInsecureWANHTTP = true
         } else if decision.requiredConfirmations.contains(.tokenStoreCutover) {
             confirmsTokenStoreCutover = true
+        } else if decision.requiredConfirmations.contains(.blePINChange) {
+            confirmsBLEPINChange = true
         } else if let patch = decision.patch, decision.blocker == nil {
             Task {
-                await model.saveSettings(settingsPatch(patch))
-                if model.settingsError == nil {
+                let outcome = await model.saveSettings(
+                    settingsPatch(patch),
+                    draft: draft,
+                    draftPatch: patch,
+                    replacement: selectedReplacement,
+                    requiresValidatedReplacement: decision.requiresValidatedReplacement
+                )
+                if outcome == .accepted {
                     publishAuthoritativeDraft()
+                } else {
+                    invalidateEditAuthorization()
                 }
             }
         }
@@ -339,7 +418,27 @@ struct RouterSettingsView: View {
         let value = settingsValue(settings)
         original = value
         draft = RouterSettingsDraft(value)
-        confirmations = []
+        confirmationApproval = nil
+        model.invalidateReplacementValidation()
+    }
+
+    private func invalidateEditAuthorization() {
+        confirmationApproval = nil
+        confirmsListenerMigration = false
+        confirmsInsecureWANHTTP = false
+        confirmsTokenStoreCutover = false
+        confirmsBLEPINChange = false
+        model.invalidateReplacementValidation()
+    }
+}
+
+private func routeReachability(
+    _ reachability: RouterHostReachability
+) -> RouterSettingsRouteReachability {
+    switch reachability {
+    case .lan: .lan
+    case .vpn: .vpn
+    case .wan: .wan
     }
 }
 

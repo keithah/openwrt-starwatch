@@ -96,6 +96,7 @@ final class RouterTransportConnectionTests: XCTestCase {
         server.setResponse(data: statusData(), for: "/api/v1/device")
         let provider = RecordingCredentialProvider(token: "test-token")
         let credential = RouterCredential(token: "test-token")
+        let transient = TransientRouterCredentialProvider(token: "test-token")
         let transport = RouterTransport(
             endpoint: endpoint,
             credentials: provider,
@@ -117,6 +118,12 @@ final class RouterTransportConnectionTests: XCTestCase {
         XCTAssertFalse(String(reflecting: endpoint).contains("test-token"))
         XCTAssertFalse(String(describing: credential).contains("test-token"))
         XCTAssertFalse(String(reflecting: credential).contains("test-token"))
+        for value: Any in [credential, transient] {
+            var dumped = ""
+            dump(value, to: &dumped)
+            XCTAssertFalse(dumped.contains("test-token"))
+            XCTAssertFalse(recursiveCredentialMirror(value).contains("test-token"))
+        }
     }
 
     func testConnectAuthenticatesCanonicalDeviceThenEmitsHandshakeAndConnected() async throws {
@@ -967,6 +974,12 @@ final class RouterTransportConnectionTests: XCTestCase {
         }
         return false
     }
+}
+
+private func recursiveCredentialMirror(_ value: Any) -> String {
+    Mirror(reflecting: value).children.map { child in
+        String(describing: child.value) + recursiveCredentialMirror(child.value)
+    }.joined(separator: " ")
 }
 
 final class FakeRouterServerContractTests: XCTestCase {

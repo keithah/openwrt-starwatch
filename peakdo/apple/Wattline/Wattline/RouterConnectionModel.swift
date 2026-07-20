@@ -81,7 +81,7 @@ final class RouterConnectionModel {
     private var discoveryGeneration: UInt64 = 0
     private var discoveryTask: Task<Void, Never>?
 
-    private let hostStore: RouterHostStore
+    let hostStore: RouterHostStore
     let credentialStore: RouterCredentialStore
     private let discovery: RouterDiscovery?
     private let tlsPinPromoter: RouterTLSPinPromoter
@@ -314,6 +314,18 @@ final class RouterConnectionModel {
 
     func promoteStagedTLSPin(for hostID: UUID) async throws -> RouterHostMetadata {
         let promoted = try await tlsPinPromoter.promote(hostID: hostID)
+        await reloadSavedHosts()
+        return promoted
+    }
+
+    func promoteStagedTLSPin(
+        for hostID: UUID,
+        administratorToken: String
+    ) async throws -> RouterHostMetadata {
+        let promoted = try await tlsPinPromoter.promote(
+            hostID: hostID,
+            administratorToken: administratorToken
+        )
         await reloadSavedHosts()
         return promoted
     }

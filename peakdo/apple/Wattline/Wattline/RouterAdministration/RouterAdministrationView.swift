@@ -47,14 +47,27 @@ struct RouterAdministrationView: View {
                             Button(
                                 admin.isTLSPromotionRunning
                                     ? "Verifying new certificate…"
-                                    : "Verify new certificate"
+                                    : admin.tlsPromotionRecoveryAvailable
+                                        ? "Verify with administrator token"
+                                        : "Verify new certificate"
                             ) {
-                                Task { await admin.promoteStagedTLSPin() }
+                                if admin.tlsPromotionRecoveryAvailable {
+                                    let token = adminToken
+                                    adminToken = ""
+                                    Task {
+                                        await admin.promoteStagedTLSPin(
+                                            administratorToken: token
+                                        )
+                                    }
+                                } else {
+                                    Task { await admin.promoteStagedTLSPin() }
+                                }
                             }
                             .disabled(
                                 admin.access == .verifying
                                     || admin.isTLSRotationRunning
                                     || admin.isTLSPromotionRunning
+                                    || (admin.tlsPromotionRecoveryAvailable && adminToken.isEmpty)
                             )
                             Text("Use this after wattlined restarts to verify and promote the staged certificate pin.")
                                 .foregroundStyle(.secondary)

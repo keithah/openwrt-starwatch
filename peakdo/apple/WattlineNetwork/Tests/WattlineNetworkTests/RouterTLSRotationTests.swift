@@ -50,6 +50,42 @@ final class RouterTLSRotationTests: XCTestCase {
         }
     }
 
+    func testCommittedRotationResponseSurvivesAttachmentReplacement() async throws {
+        let oldHTTP = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(rotateJSON)],
+            gateRequests: true
+        )
+        let replacementHTTP = ScriptedRouterHTTPClient(results: [])
+        let oldEndpoint = makeHost(active: activePin).endpoint
+        let replacementEndpoint = RouterEndpoint(
+            scheme: "https",
+            host: "replacement.local",
+            port: 8378,
+            certificateFingerprint: activePin,
+            allowsInsecureWAN: false
+        )
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken("old-admin", for: oldEndpoint, role: .administrator)
+        let client = RouterAdministrationClient(credentials: credentials) { endpoint in
+            endpoint == oldEndpoint ? oldHTTP : replacementHTTP
+        }
+        try await client.attach(endpoint: oldEndpoint)
+        let rotation = Task { try await client.rotateTLS() }
+        await oldHTTP.waitForGateRegistration()
+
+        try await client.attach(endpoint: replacementEndpoint)
+        oldHTTP.releaseGates()
+
+        let response = try await rotation.value
+        XCTAssertEqual(
+            response.sha256,
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        XCTAssertTrue(response.restartRequired)
+        XCTAssertEqual(oldHTTP.calls.map(\.token), ["old-admin"])
+        XCTAssertTrue(replacementHTTP.calls.isEmpty)
+    }
+
     func testLegacyHostDecodesNilStagedPinAndOrdinaryEndpointUsesOnlyActivePin() throws {
         let legacy = try JSONDecoder().decode(
             RouterHostMetadata.self,
@@ -136,6 +172,130 @@ final class RouterTLSRotationTests: XCTestCase {
         XCTAssertNil(promoted.stagedCertificateFingerprint)
         XCTAssertEqual(http.calls.map(\.path), ["/api/v1/device"])
         XCTAssertEqual(http.calls.map(\.token), ["client-token"])
+    }
+
+    func testPromotionDeterministicallyPrefersStoredAdministratorCredential() async throws {
+        let fixture = try hostStoreFixture(
+            active: activePin,
+            staged: stagedPin,
+            deviceID: deviceID
+        )
+        let http = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(deviceJSON(id: deviceID))]
+        )
+        let factory = TLSRecordingHTTPFactory(client: http)
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken("client-token", for: fixture.host.endpoint, role: .client)
+        try await credentials.saveToken(
+            "administrator-token",
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        let promoter = RouterTLSPinPromoter(
+            hostStore: fixture.store,
+            credentials: credentials,
+            httpFactory: factory.make
+        )
+
+        _ = try await promoter.promote(hostID: fixture.host.id)
+
+        XCTAssertEqual(http.calls.map(\.token), ["administrator-token"])
+    }
+
+    func testRejectedStoredAdministratorCredentialNeverFallsBackToClient() async throws {
+        let fixture = try hostStoreFixture(
+            active: activePin,
+            staged: stagedPin,
+            deviceID: deviceID
+        )
+        let http = ScriptedRouterHTTPClient(results: [.failure(NetworkError.unauthorized)])
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken("client-token", for: fixture.host.endpoint, role: .client)
+        try await credentials.saveToken(
+            "administrator-token",
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        let promoter = RouterTLSPinPromoter(
+            hostStore: fixture.store,
+            credentials: credentials,
+            httpFactory: TLSRecordingHTTPFactory(client: http).make
+        )
+
+        await XCTAssertThrowsTLSRotationError(
+            try await promoter.promote(hostID: fixture.host.id)
+        ) {
+            XCTAssertEqual($0 as? NetworkError, .unauthorized)
+        }
+
+        XCTAssertEqual(http.calls.map(\.token), ["administrator-token"])
+    }
+
+    func testAdministratorCredentialReadFailureNeverReadsClientOrConstructsHTTP() async throws {
+        let fixture = try hostStoreFixture(
+            active: activePin,
+            staged: stagedPin,
+            deviceID: deviceID
+        )
+        let backend = TLSAdministratorReadFailingCredentialBackend()
+        let credentials = RouterCredentialStore(backend: backend)
+        try await credentials.saveToken("client-token", for: fixture.host.endpoint, role: .client)
+        let http = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(deviceJSON(id: deviceID))]
+        )
+        let factory = TLSRecordingHTTPFactory(client: http)
+        let promoter = RouterTLSPinPromoter(
+            hostStore: fixture.store,
+            credentials: credentials,
+            httpFactory: factory.make
+        )
+
+        await XCTAssertThrowsTLSRotationError(
+            try await promoter.promote(hostID: fixture.host.id)
+        ) {
+            XCTAssertEqual($0 as? NetworkError, .unauthorized)
+        }
+
+        let readAccounts = await backend.readAccounts()
+        XCTAssertEqual(readAccounts.count, 1)
+        XCTAssertTrue(readAccounts[0].hasSuffix(".administrator"))
+        XCTAssertTrue(factory.endpoints.isEmpty)
+        XCTAssertTrue(http.calls.isEmpty)
+    }
+
+    func testExplicitTransientAdministratorRecoveryNeverPersistsCredential() async throws {
+        let fixture = try hostStoreFixture(
+            active: activePin,
+            staged: stagedPin,
+            deviceID: deviceID
+        )
+        let http = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(deviceJSON(id: deviceID))]
+        )
+        let factory = TLSRecordingHTTPFactory(client: http)
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        let promoter = RouterTLSPinPromoter(
+            hostStore: fixture.store,
+            credentials: credentials,
+            httpFactory: factory.make
+        )
+
+        _ = try await promoter.promote(
+            hostID: fixture.host.id,
+            administratorToken: "transient-recovery-admin"
+        )
+
+        XCTAssertEqual(http.calls.map(\.token), ["transient-recovery-admin"])
+        let storedAdministrator = try await credentials.readToken(
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+        let storedClient = try await credentials.readToken(
+            for: fixture.host.endpoint,
+            role: .client
+        )
+        XCTAssertNil(storedAdministrator)
+        XCTAssertNil(storedClient)
     }
 
     func testDeviceMismatchAbortsPromotionAndKeepsBothPins() async throws {
@@ -444,6 +604,28 @@ private struct TLSPromotionHarness {
     let promoter: RouterTLSPinPromoter
     let http: ScriptedRouterHTTPClient
     let factory: TLSRecordingHTTPFactory
+}
+
+private actor TLSAdministratorReadFailingCredentialBackend: RouterCredentialBackend {
+    private enum ReadFailure: Error { case denied }
+    private var values: [String: Data] = [:]
+    private var reads: [String] = []
+
+    func read(account: String) async throws -> Data? {
+        reads.append(account)
+        if account.hasSuffix(".administrator") { throw ReadFailure.denied }
+        return values[account]
+    }
+
+    func save(_ data: Data, account: String) async throws {
+        values[account] = data
+    }
+
+    func delete(account: String) async throws {
+        values[account] = nil
+    }
+
+    func readAccounts() -> [String] { reads }
 }
 
 private final class TLSHostBackend: RouterHostKeyValueStore, @unchecked Sendable {

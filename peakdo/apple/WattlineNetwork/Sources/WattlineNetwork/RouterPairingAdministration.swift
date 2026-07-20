@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 public struct RouterPairingMode: Equatable, Sendable, Decodable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public let open: Bool
     public let expiresAt: Date
@@ -27,6 +27,9 @@ public struct RouterPairingMode: Equatable, Sendable, Decodable,
     }
 
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["pairingMode": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public struct RouterTokenMetadata: Equatable, Sendable, Identifiable, Decodable {

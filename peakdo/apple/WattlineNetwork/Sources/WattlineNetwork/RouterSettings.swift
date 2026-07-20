@@ -37,7 +37,7 @@ public struct RouterMDNSSettings: Codable, Equatable, Sendable {
 }
 
 public struct RouterSettings: Codable, Equatable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public let http: RouterListenerSettings
     public let https: RouterListenerSettings
@@ -61,6 +61,9 @@ public struct RouterSettings: Codable, Equatable, Sendable,
 
     public var description: String { "RouterSettings(blePIN: [REDACTED])" }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["blePIN": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public struct RouterListenerSettingsPatch: Encodable, Equatable, Sendable {
@@ -103,7 +106,7 @@ public struct RouterMDNSSettingsPatch: Encodable, Equatable, Sendable {
 }
 
 public struct RouterSettingsPatch: Encodable, Equatable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public let http: RouterListenerSettingsPatch?
     public let https: RouterListenerSettingsPatch?
@@ -151,10 +154,13 @@ public struct RouterSettingsPatch: Encodable, Equatable, Sendable,
 
     public var description: String { "RouterSettingsPatch(blePIN: [REDACTED])" }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["blePIN": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public struct RouterSettingsUpdateResult: Equatable, Sendable, Decodable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public let settings: RouterSettings
     public let restartRequired: Bool
@@ -174,11 +180,20 @@ public struct RouterSettingsUpdateResult: Equatable, Sendable, Decodable,
     }
 
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["settings": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 extension RouterAdministrationClient {
     public func settings() async throws -> RouterSettings {
+        let attachment = try attachmentLease()
+        await acquirePrivilegedMutation()
+        defer { releasePrivilegedMutation() }
+        try Task.checkCancellation()
+        try validate(attachment: attachment)
         let (data, _) = try await send("GET", "/api/v1/settings")
+        try validate(attachment: attachment)
         guard let value = try? JSONDecoder().decode(RouterSettings.self, from: data) else {
             throw RouterAdministrationError.invalidResponse
         }

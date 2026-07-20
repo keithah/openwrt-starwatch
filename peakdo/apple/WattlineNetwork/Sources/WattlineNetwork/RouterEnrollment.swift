@@ -19,7 +19,7 @@ public enum RouterEnrollmentError: Error, Equatable, Sendable {
 }
 
 public struct RouterEnrollmentResult: Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public let token: String
     public let deviceID: String
@@ -32,6 +32,9 @@ public struct RouterEnrollmentResult: Sendable,
     }
 
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["result": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public struct RouterEnrollmentClient: Sendable {

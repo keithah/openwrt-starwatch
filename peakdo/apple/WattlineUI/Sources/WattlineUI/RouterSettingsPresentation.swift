@@ -191,6 +191,28 @@ public enum RouterSettingsConfirmation: Hashable, Sendable {
     case insecureWANHTTP
     case listenerMigration
     case tokenStoreCutover
+    case blePINChange
+}
+
+public struct RouterSettingsConfirmationApproval: Equatable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
+{
+    public let patch: RouterSettingsDraftPatch
+    public let confirmations: Set<RouterSettingsConfirmation>
+
+    public init(
+        patch: RouterSettingsDraftPatch,
+        confirmations: Set<RouterSettingsConfirmation>
+    ) {
+        self.patch = patch
+        self.confirmations = confirmations
+    }
+
+    public var description: String { "RouterSettingsConfirmationApproval([REDACTED])" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["approval": "[REDACTED]"], displayStyle: .struct)
+    }
 }
 
 public enum RouterReplacementValidation: Equatable, Sendable {
@@ -199,44 +221,74 @@ public enum RouterReplacementValidation: Equatable, Sendable {
     case verified(deviceID: String)
 }
 
+public enum RouterSettingsRouteReachability: Equatable, Sendable {
+    case lan
+    case vpn
+    case wan
+}
+
 public struct RouterReplacementCandidate: Equatable, Sendable {
     public let scheme: String
     public let host: String
     public let port: Int
+    public let certificateFingerprint: String?
+    public let reachability: RouterSettingsRouteReachability
+    public let isSaved: Bool
+    public let hasClientCredential: Bool
     public let validation: RouterReplacementValidation
+    public let validatedPatch: RouterSettingsDraftPatch?
 
     public init(
         scheme: String,
         host: String,
         port: Int,
-        validation: RouterReplacementValidation
+        certificateFingerprint: String? = nil,
+        reachability: RouterSettingsRouteReachability = .lan,
+        isSaved: Bool = true,
+        hasClientCredential: Bool = true,
+        validation: RouterReplacementValidation,
+        validatedPatch: RouterSettingsDraftPatch? = nil
     ) {
         self.scheme = scheme
         self.host = host
         self.port = port
+        self.certificateFingerprint = certificateFingerprint
+        self.reachability = reachability
+        self.isSaved = isSaved
+        self.hasClientCredential = hasClientCredential
         self.validation = validation
+        self.validatedPatch = validatedPatch
     }
 }
 
 public struct RouterSettingsSaveContext: Equatable, Sendable {
     public let currentScheme: String
+    public let currentHost: String
     public let currentPort: Int
+    public let currentCertificateFingerprint: String?
+    public let currentReachability: RouterSettingsRouteReachability
     public let expectedDeviceID: String?
     public let replacement: RouterReplacementCandidate?
-    public let confirmations: Set<RouterSettingsConfirmation>
+    public let confirmationApproval: RouterSettingsConfirmationApproval?
 
     public init(
         currentScheme: String,
+        currentHost: String = "router.local",
         currentPort: Int,
+        currentCertificateFingerprint: String? = nil,
+        currentReachability: RouterSettingsRouteReachability = .lan,
         expectedDeviceID: String? = nil,
         replacement: RouterReplacementCandidate? = nil,
-        confirmations: Set<RouterSettingsConfirmation> = []
+        confirmationApproval: RouterSettingsConfirmationApproval? = nil
     ) {
         self.currentScheme = currentScheme
+        self.currentHost = currentHost
         self.currentPort = currentPort
+        self.currentCertificateFingerprint = currentCertificateFingerprint
+        self.currentReachability = currentReachability
         self.expectedDeviceID = expectedDeviceID
         self.replacement = replacement
-        self.confirmations = confirmations
+        self.confirmationApproval = confirmationApproval
     }
 }
 
@@ -244,6 +296,7 @@ public struct RouterSettingsSaveDecision: Equatable, Sendable {
     public let patch: RouterSettingsDraftPatch?
     public let blocker: RouterSettingsSaveBlocker?
     public let requiredConfirmations: Set<RouterSettingsConfirmation>
+    public let requiresValidatedReplacement: Bool
 
     public var canSave: Bool {
         blocker == nil && requiredConfirmations.isEmpty && patch != nil
@@ -263,24 +316,39 @@ public enum RouterSettingsSavePolicy {
             return RouterSettingsSaveDecision(
                 patch: nil,
                 blocker: .invalidDraft,
-                requiredConfirmations: []
+                requiredConfirmations: [],
+                requiresValidatedReplacement: false
             )
         }
         guard draft.http.enabled || draft.https.enabled else {
             return RouterSettingsSaveDecision(
                 patch: patch,
                 blocker: .noEnabledListener,
-                requiredConfirmations: []
+                requiredConfirmations: [],
+                requiresValidatedReplacement: false
             )
         }
-        let currentRemains = context.currentScheme.lowercased() == "https"
-            ? draft.https.enabled && Int(draft.https.port) == context.currentPort
-            : draft.http.enabled && Int(draft.http.port) == context.currentPort
-        if !currentRemains && !replacementIsCorrelated(context, draft: draft) {
+        let currentRemains = routeSurvives(
+            scheme: context.currentScheme,
+            host: context.currentHost,
+            port: context.currentPort,
+            reachability: context.currentReachability,
+            original: original,
+            draft: draft,
+            patch: patch
+        )
+        let usesReplacement = !currentRemains
+        if usesReplacement && !replacementIsCorrelated(
+            context,
+            original: original,
+            draft: draft,
+            patch: patch
+        ) {
             return RouterSettingsSaveDecision(
                 patch: patch,
                 blocker: .validatedReplacementRequired,
-                requiredConfirmations: []
+                requiredConfirmations: [],
+                requiresValidatedReplacement: true
             )
         }
         var required: Set<RouterSettingsConfirmation> = []
@@ -295,28 +363,101 @@ public enum RouterSettingsSavePolicy {
         if patch.tokenStore != nil {
             required.insert(.tokenStoreCutover)
         }
-        required.subtract(context.confirmations)
+        if patch.blePIN != nil {
+            required.insert(.blePINChange)
+        }
+        if let approval = context.confirmationApproval,
+           approval.patch == patch
+        {
+            required.subtract(approval.confirmations)
+        }
         return RouterSettingsSaveDecision(
             patch: patch.isEmpty ? nil : patch,
             blocker: nil,
-            requiredConfirmations: required
+            requiredConfirmations: required,
+            requiresValidatedReplacement: usesReplacement
         )
     }
 
     private static func replacementIsCorrelated(
         _ context: RouterSettingsSaveContext,
-        draft: RouterSettingsDraft
+        original: RouterSettingsValue,
+        draft: RouterSettingsDraft,
+        patch: RouterSettingsDraftPatch
     ) -> Bool {
         guard let expected = normalizedMAC(context.expectedDeviceID),
               let candidate = context.replacement,
+              candidate.isSaved,
+              candidate.hasClientCredential,
               (1...65_535).contains(candidate.port),
               candidate.scheme == "http" || candidate.scheme == "https",
-              case let .verified(deviceID) = candidate.validation
+              case let .verified(deviceID) = candidate.validation,
+              candidate.validatedPatch == patch,
+              endpointDiffers(candidate, from: context),
+              candidate.scheme != "https" || validFingerprint(candidate.certificateFingerprint)
         else { return false }
-        let listenerSurvives = candidate.scheme == "https"
-            ? draft.https.enabled && Int(draft.https.port) == candidate.port
-            : draft.http.enabled && Int(draft.http.port) == candidate.port
-        return listenerSurvives && normalizedMAC(deviceID) == expected
+        return normalizedMAC(deviceID) == expected
+            && routeSurvives(
+                scheme: candidate.scheme,
+                host: candidate.host,
+                port: candidate.port,
+                reachability: candidate.reachability,
+                original: original,
+                draft: draft,
+                patch: patch
+            )
+    }
+
+    private static func routeSurvives(
+        scheme: String,
+        host: String,
+        port: Int,
+        reachability: RouterSettingsRouteReachability,
+        original: RouterSettingsValue,
+        draft: RouterSettingsDraft,
+        patch: RouterSettingsDraftPatch
+    ) -> Bool {
+        let normalizedScheme = scheme.lowercased()
+        guard normalizedScheme == "http" || normalizedScheme == "https" else { return false }
+        let originalListener = normalizedScheme == "https" ? original.https : original.http
+        let draftListener = normalizedScheme == "https" ? draft.https : draft.http
+        guard draftListener.enabled,
+              Int(draftListener.port) == port,
+              draftListener.addr4 == originalListener.addr4,
+              draftListener.addr6 == originalListener.addr6
+        else { return false }
+        if reachability != .lan, !draft.wanAccess { return false }
+        if normalizedHost(host).hasSuffix(".local") {
+            guard draft.mdns.enabled, draft.mdns == RouterMDNSDraft(
+                enabled: original.mdns.enabled,
+                interfaces: original.mdns.interfaces
+            ) else { return false }
+        }
+        if normalizedScheme == "https", patch.tls != nil { return false }
+        return true
+    }
+
+    private static func endpointDiffers(
+        _ candidate: RouterReplacementCandidate,
+        from context: RouterSettingsSaveContext
+    ) -> Bool {
+        candidate.scheme.lowercased() != context.currentScheme.lowercased()
+            || normalizedHost(candidate.host) != normalizedHost(context.currentHost)
+            || candidate.port != context.currentPort
+            || candidate.certificateFingerprint != context.currentCertificateFingerprint
+    }
+
+    private static func validFingerprint(_ value: String?) -> Bool {
+        guard let value else { return false }
+        let bytes = value.utf8.filter { byte in byte != 58 && byte != 45 && byte != 32 }
+        return bytes.count == 64 && bytes.allSatisfy { byte in
+            (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte)
+        }
+    }
+
+    private static func normalizedHost(_ value: String) -> String {
+        let lowercase = value.lowercased()
+        return lowercase.last == "." ? String(lowercase.dropLast()) : lowercase
     }
 
     private static func normalizedMAC(_ value: String?) -> String? {
