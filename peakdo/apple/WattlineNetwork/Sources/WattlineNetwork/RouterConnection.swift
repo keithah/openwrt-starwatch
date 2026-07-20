@@ -35,16 +35,6 @@ actor RouterConnection {
         let watts: Int?
     }
 
-    private struct ClockResponse: Decodable {
-        let available: Bool
-        let deviceTime: String?
-
-        private enum CodingKeys: String, CodingKey {
-            case available
-            case deviceTime = "device_time"
-        }
-    }
-
     private let endpoint: RouterEndpoint
     private let credentials: any RouterCredentialProvider
     private let client: any RouterHTTPClient
@@ -366,7 +356,7 @@ actor RouterConnection {
             generation: context.generation,
             scope: context.scope
         )
-        let response = try Self.decode(ClockResponse.self, from: data, token: "")
+        let response = try Self.decode(RouterDeviceClockStatus.self, from: data, token: "")
         guard response.available else { return nil }
         guard let value = response.deviceTime, let date = Self.date(from: value) else {
             throw NetworkError.decode("Router clock response has no valid device_time")
