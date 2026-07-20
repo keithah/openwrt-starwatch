@@ -98,7 +98,8 @@ final class RouterAdministrationModel {
     private var replacementRequestGeneration: UInt64 = 0
     private var tlsRequestGeneration: UInt64 = 0
     private var devicePairingGeneration: UInt64 = 0
-    private var advancedRequestGeneration: UInt64 = 0
+    private var advancedLoadGeneration: UInt64 = 0
+    private var advancedMutationGeneration: UInt64 = 0
     private var unsupportedAdvancedSurfaces: Set<RouterAdvancedSurface> = []
     private var advancedServerGate: RouterAdvancedServerGate = .allowed
     private var devicePairingClient: RouterDevicePairingClient?
@@ -325,8 +326,8 @@ final class RouterAdministrationModel {
 
     func reloadAdvanced() async {
         guard host != nil, access == .unlocked else { return }
-        advancedRequestGeneration &+= 1
-        let request = advancedRequestGeneration
+        advancedLoadGeneration &+= 1
+        let request = advancedLoadGeneration
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
         isAdvancedLoading = true
@@ -336,7 +337,7 @@ final class RouterAdministrationModel {
             let identity = try await $0.advancedIdentity()
             return (settings, identity)
         }
-        guard isCurrentAdvancedOperation(
+        guard isCurrentAdvancedLoad(
             session: session,
             adminOperation: adminOperation,
             request: request
@@ -349,8 +350,7 @@ final class RouterAdministrationModel {
             if authoritativeSettings.advanced {
                 advancedIdentity = identity
             } else {
-                advancedIdentity = nil
-                clearAdvancedValues()
+                clearAdvancedState()
             }
         case .advancedDisabled:
             advancedServerGate = .advancedDisabled
@@ -529,8 +529,7 @@ final class RouterAdministrationModel {
             settings = value
             settingsError = nil
             if !value.advanced {
-                advancedIdentity = nil
-                clearAdvancedValues()
+                clearAdvancedState()
             }
             invalidateReplacementValidation()
         case let .failure(message):
@@ -1310,7 +1309,8 @@ final class RouterAdministrationModel {
         let adminOperation = adminOperationGeneration
         do {
             let value = try await operation(adminClient)
-            guard sessionGeneration == session,
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
                   access == .unlocked
             else { return .stale }
@@ -1318,19 +1318,22 @@ final class RouterAdministrationModel {
         } catch is CancellationError {
             return .stale
         } catch NetworkError.api(403, .advancedDisabled, _) {
-            guard sessionGeneration == session,
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
                   access == .unlocked
             else { return .stale }
             return .advancedDisabled
         } catch NetworkError.api(409, .capabilityUnsupported, _) {
-            guard sessionGeneration == session,
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
                   access == .unlocked
             else { return .stale }
             return .capabilityUnsupported
         } catch {
-            guard sessionGeneration == session,
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
                   adminOperationGeneration == adminOperation,
                   access == .unlocked
             else { return .stale }
@@ -1350,14 +1353,14 @@ final class RouterAdministrationModel {
         guard advancedVisibility.surfaces.contains(surface),
               !isAdvancedMutationRunning
         else { return }
-        advancedRequestGeneration &+= 1
-        let request = advancedRequestGeneration
+        advancedMutationGeneration &+= 1
+        let request = advancedMutationGeneration
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
         isAdvancedMutationRunning = true
         advancedError = nil
         let result = await performAdvanced(operation)
-        guard isCurrentAdvancedOperation(
+        guard isCurrentAdvancedMutation(
             session: session,
             adminOperation: adminOperation,
             request: request
@@ -1369,6 +1372,7 @@ final class RouterAdministrationModel {
         case .advancedDisabled:
             advancedServerGate = .advancedDisabled
             clearAdvancedValues()
+            await reloadSettings()
         case .capabilityUnsupported:
             unsupportedAdvancedSurfaces.insert(surface)
             await reloadAdvanced()
@@ -1379,14 +1383,25 @@ final class RouterAdministrationModel {
         }
     }
 
-    private func isCurrentAdvancedOperation(
+    private func isCurrentAdvancedLoad(
         session: UInt64,
         adminOperation: UInt64,
         request: UInt64
     ) -> Bool {
         sessionGeneration == session
             && adminOperationGeneration == adminOperation
-            && advancedRequestGeneration == request
+            && advancedLoadGeneration == request
+            && access == .unlocked
+    }
+
+    private func isCurrentAdvancedMutation(
+        session: UInt64,
+        adminOperation: UInt64,
+        request: UInt64
+    ) -> Bool {
+        sessionGeneration == session
+            && adminOperationGeneration == adminOperation
+            && advancedMutationGeneration == request
             && access == .unlocked
     }
 
@@ -1463,7 +1478,8 @@ final class RouterAdministrationModel {
     }
 
     private func clearAdvancedState() {
-        advancedRequestGeneration &+= 1
+        advancedLoadGeneration &+= 1
+        advancedMutationGeneration &+= 1
         advancedIdentity = nil
         clearAdvancedValues()
         advancedError = nil
@@ -1567,8 +1583,7 @@ final class RouterAdministrationModel {
     ) {
         settings = value.settings
         if !value.settings.advanced {
-            clearAdvancedValues()
-            advancedIdentity = nil
+            clearAdvancedState()
         }
         if value.restartRequired {
             settingsRestartRequiredHosts.insert(source.id)

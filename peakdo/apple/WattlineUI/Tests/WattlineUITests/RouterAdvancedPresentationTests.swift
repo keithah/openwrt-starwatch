@@ -67,6 +67,21 @@ final class RouterAdvancedPresentationTests: XCTestCase {
         XCTAssertFalse(String(reflecting: values).contains("020555"))
     }
 
+    func testBLEPINSecretClearsWhenItsSurfaceBecomesAbsent() {
+        XCTAssertFalse(RouterAdvancedSecretPolicy.shouldClearBLEPIN(
+            wasVisible: true,
+            isVisible: true
+        ))
+        XCTAssertTrue(RouterAdvancedSecretPolicy.shouldClearBLEPIN(
+            wasVisible: true,
+            isVisible: false
+        ))
+        XCTAssertFalse(RouterAdvancedSecretPolicy.shouldClearBLEPIN(
+            wasVisible: false,
+            isVisible: false
+        ))
+    }
+
     private func input(
         adminVerified: Bool = true,
         advanced: Bool = true,

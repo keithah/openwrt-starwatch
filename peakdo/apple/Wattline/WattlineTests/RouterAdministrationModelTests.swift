@@ -49,12 +49,15 @@ final class RouterAdministrationModelTests: XCTestCase {
                 code: .advancedDisabled,
                 message: "Advanced API access is disabled"
             )),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: false, httpPort: 8377)),
         ])
 
         await fixture.model.setAdvancedBypassThreshold(volts: 19.6)
 
         XCTAssertTrue(fixture.model.advancedVisibility.surfaces.isEmpty)
         XCTAssertTrue(fixture.model.advancedVisibility.showsEnableAdvancedAffordance)
+        XCTAssertEqual(fixture.model.settings?.advanced, false)
+        XCTAssertEqual(fixture.http.calls.last?.path, "/api/v1/settings")
     }
 
     func testCapabilityUnsupportedRemovesOnlyAffectedSurfaceAfterRefresh() async throws {
@@ -103,6 +106,83 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertTrue(fixture.model.advancedVisibility.surfaces.isEmpty)
     }
 
+    func testAdvancedReloadOverlappingMutationDoesNotStrandMutationGate() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            AdminScriptedHTTP.ok(#"{"volts":19.5}"#),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
+            AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
+            AdminScriptedHTTP.ok(#"{"volts":19.4}"#),
+        ])
+        fixture.http.gateNextRequest()
+        let mutation = Task {
+            await fixture.model.setAdvancedBypassThreshold(volts: 19.6)
+        }
+        await fixture.http.waitForGateRegistration()
+
+        let reload = Task { await fixture.model.reloadAdvanced() }
+        let reloadStarted = await waitUntilAdministrationTest {
+            await MainActor.run { fixture.model.isAdvancedLoading }
+        }
+        XCTAssertTrue(reloadStarted)
+        fixture.http.releaseGates()
+        await mutation.value
+        await reload.value
+
+        XCTAssertFalse(fixture.model.isAdvancedMutationRunning)
+        await fixture.model.setAdvancedBypassThreshold(volts: 19.6)
+        XCTAssertEqual(fixture.model.advancedValues.bypassThresholdVolts, 19.4)
+        XCTAssertEqual(
+            fixture.http.calls.filter { $0.path == "/api/v1/device/dc/bypass/threshold" }.count,
+            2
+        )
+    }
+
+    func testCancelledAdvancedMutationCannotPublishInsensitiveCompletion() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            AdminScriptedHTTP.ok(#"{"volts":19.5}"#),
+        ])
+        fixture.http.gateNextRequest()
+        let mutation = Task {
+            await fixture.model.setAdvancedBypassThreshold(volts: 19.6)
+        }
+        await fixture.http.waitForGateRegistration()
+
+        mutation.cancel()
+        fixture.http.releaseGates()
+        await mutation.value
+
+        XCTAssertNil(fixture.model.advancedValues.bypassThresholdVolts)
+        XCTAssertFalse(fixture.model.isAdvancedMutationRunning)
+    }
+
+    func testSavingAdvancedOffClearsPerSurfaceCapabilityQuarantine() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            .failure(NetworkError.api(
+                status: 409,
+                code: .capabilityUnsupported,
+                message: "Barrier-free is unsupported"
+            )),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
+            AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
+            AdminScriptedHTTP.ok(
+                administrationSettingsJSON(advanced: false, httpPort: 8377, restartRequired: false)
+            ),
+            AdminScriptedHTTP.ok(
+                administrationSettingsJSON(advanced: true, httpPort: 8377, restartRequired: false)
+            ),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
+            AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
+        ])
+        await fixture.model.setAdvancedBarrierFree(true)
+        XCTAssertFalse(fixture.model.advancedVisibility.surfaces.contains(.barrierFree))
+
+        _ = await fixture.model.saveSettings(.init(advanced: false))
+        _ = await fixture.model.saveSettings(.init(advanced: true))
+        await fixture.model.reloadAdvanced()
+
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.contains(.barrierFree))
+    }
+
     func testBLEPINClearsBeforeAwaitAndIsNotRetainedOrReflected() async throws {
         let fixture = try await makeAdvancedFixture(extraResults: [
             AdminScriptedHTTP.ok(#"{"updated":true}"#),
@@ -117,12 +197,12 @@ final class RouterAdministrationModelTests: XCTestCase {
             await fixture.model.setAdvancedBLEPIN("020555", confirmation: .blePIN)
         }
         await fixture.http.waitForGateRegistration()
-        XCTAssertFalse(String(reflecting: fixture.model).contains("020555"))
+        XCTAssertFalse(recursiveAdministrationMirror(fixture.model).contains("020555"))
         fixture.http.releaseGates()
         await update.value
 
         XCTAssertTrue(fixture.model.advancedValues.blePINUpdated == true)
-        XCTAssertFalse(String(reflecting: fixture.model).contains("020555"))
+        XCTAssertFalse(recursiveAdministrationMirror(fixture.model).contains("020555"))
     }
 
     func testRunningModeDoesNotDispatchBeforePurposeSpecificConfirmation() async throws {
@@ -3644,6 +3724,37 @@ private func makeAdvancedFixture(
     await fixture.model.unlock(token: "boot-admin")
     await fixture.model.reloadAdvanced()
     return fixture
+}
+
+private func waitUntilAdministrationTest(
+    timeout: Duration = .seconds(2),
+    condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+    return await condition()
+}
+
+private func recursiveAdministrationMirror(_ value: Any, depth: Int = 0) -> String {
+    guard depth < 8 else { return "" }
+    let mirror = Mirror(reflecting: value)
+    return mirror.children.map { child in
+        let label = child.label ?? ""
+        let scalar = mirrorDisplayScalar(child.value)
+        return label + scalar + recursiveAdministrationMirror(child.value, depth: depth + 1)
+    }.joined(separator: "|")
+}
+
+private func mirrorDisplayScalar(_ value: Any) -> String {
+    switch value {
+    case let value as String: value
+    case let value as NSString: value as String
+    default: ""
+    }
 }
 
 private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {

@@ -104,6 +104,15 @@ public enum RouterAdvancedConfirmation: Equatable, Sendable {
     }
 }
 
+public enum RouterAdvancedSecretPolicy {
+    public static func shouldClearBLEPIN(
+        wasVisible: Bool,
+        isVisible: Bool
+    ) -> Bool {
+        wasVisible && !isVisible
+    }
+}
+
 public struct RouterAdvancedClockValue: Equatable, Sendable {
     public let available: Bool
     public let deviceTime: String?

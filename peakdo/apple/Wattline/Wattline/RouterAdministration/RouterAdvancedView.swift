@@ -46,6 +46,16 @@ struct RouterAdvancedView: View {
         .onChange(of: confirmsBLEPIN) { wasPresented, isPresented in
             if wasPresented, !isPresented { blePIN = "" }
         }
+        .onChange(of: model.advancedVisibility.surfaces.contains(.blePIN)) {
+            wasVisible, isVisible in
+            if RouterAdvancedSecretPolicy.shouldClearBLEPIN(
+                wasVisible: wasVisible,
+                isVisible: isVisible
+            ) {
+                blePIN = ""
+                confirmsBLEPIN = false
+            }
+        }
         .onChange(of: model.settings?.advanced) { wasEnabled, isEnabled in
             if wasEnabled == false, isEnabled == true {
                 Task { await model.reloadAdvanced() }
