@@ -64,7 +64,9 @@ Results:
 - WattlineWidgets scheme: the reviewed exact all-in-one final-source run executed **293/293** with 0 failed/skipped/expected.
 - Generic iOS Simulator build from final source: `** BUILD SUCCEEDED **` (`/tmp/wattline-m4-build-final.log`).
 
-Earlier environmental attempts included a 19-minute `DebuggerLLDB.DebuggerVersionStore.StoreError` hang and UI-event scheduling timeouts. The interim decomposed evidence of 277 non-UI plus 16 UI tests was not the final scheme result; the reviewed clean combined result is 293/293 for both Wattline and WattlineWidgets. The failed environmental attempts remain retained in `/tmp/wattline-m4-widgets.log`, `/tmp/wattline-m4-widgets-combined-final.log`, and their xcresults; no assertion failure originated in Milestone 4 production code.
+The clean combined **293/293** results are user-authoritative and were confirmed by an independent review/owner rerun after this original report was written. Those post-review artifacts are not retained at the old Milestone 4 paths or in the current evidence set. In particular, the retained `/tmp/Wattline-M4-App-Final.xcresult`, app summary, split widget bundles, and split widget summaries support only the earlier undercount/decomposed runs and are not cited as evidence for the corrected clean combined counts.
+
+Earlier environmental attempts included a 19-minute `DebuggerLLDB.DebuggerVersionStore.StoreError` hang and UI-event scheduling timeouts. The interim decomposed evidence of 277 non-UI plus 16 UI tests was not the final scheme result; it was superseded by the independently reviewed owner rerun described above. The failed environmental attempts remain retained in `/tmp/wattline-m4-widgets.log`, `/tmp/wattline-m4-widgets-combined-final.log`, and their xcresults; no assertion failure originated in Milestone 4 production code.
 
 ## Audit transcript
 
@@ -90,7 +92,7 @@ Final commands, output, and exit codes are in `/tmp/wattline-m4-audits-final.log
 - Task 17 added strict BLE-PIN response/error reflection redaction and rejected unsupported running mode 2 before HTTP dispatch.
 - Task 18 split load and mutation generations, refreshed authoritative settings after `advanced_disabled`, and added a pure visibility-transition secret policy after independent review exposed lifecycle races not anticipated by the initial plan.
 - Task 18 replaced factory-mode proxy gates with exact, independently decoded router feature fields. Capability quarantine is now committed only after a successful authoritative settings/identity refresh and a post-refresh cancellation check.
-- Simulator-runner investigation temporarily decomposed the widget targets and included failed environmental attempts, but those were superseded by reviewed clean exact combined Wattline and WattlineWidgets gates at **293/293** each. The previous app count and split-widget wording were report undercounts, not final product gaps.
+- Simulator-runner investigation temporarily decomposed the widget targets and included failed environmental attempts. An independent review/owner rerun after the original report confirmed clean exact combined Wattline and WattlineWidgets gates at **293/293** each. Its artifacts are not retained at the old Milestone 4 paths/current evidence set, so the retained earlier app and split-widget artifacts must not be treated as provenance for the corrected counts.
 
 ## External live-router/hardware checks
 

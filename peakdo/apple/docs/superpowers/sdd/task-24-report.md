@@ -9,10 +9,12 @@ Milestone 5 verification is complete at source HEAD `c8406363b24f77909fcf1d81561
 - Both generic platform builds passed.
 - `WattlineCore` remains exactly 156 tests.
 - The architecture, dependency, endpoint, ownership, webhook, scope, secret/logging, forbidden-file, frozen-interface, and ABI audits passed.
-- This task changes documentation only: this report and the planned Task 19 correction from the `292/292` app count and `277 + 16` widget split wording to reviewed clean combined `293/293` results for both schemes.
+- This task changes documentation only: this report and the planned Task 19 correction to owner-authoritative clean combined `293/293` results for both schemes.
 - No production source, router repository, OTA, or Timers work was changed or started.
 
 The Milestone 5 implementation started from `35d8b321c005c64d20b4c1978415c192114cce41`. The plan-specified cross-milestone audit base is `845d8529`. The verified pre-report source HEAD is `c8406363b24f77909fcf1d81561b75b84b1f967f`.
+
+Task 19 correction provenance: the clean combined `293/293` Wattline and WattlineWidgets results were confirmed by an independent review/owner rerun after the original Task 19 report. Those post-review artifacts are not retained at the old Milestone 4 paths or in the current evidence set. The retained old app and split-widget artifacts show only the earlier undercount/decomposed runs and are not cited as evidence for the corrected counts.
 
 ## Milestone 5 commits
 
@@ -403,7 +405,7 @@ The exact six-argument allocating initializer is present. The corrected symbol t
 
 1. The planned `DeviceCommand.swift` audit path is stale. The real tracked owner is `Device/DeviceController.swift`; both its base/HEAD blob identity and clean diff were recorded instead of treating an absent path as proof.
 2. The planned ABI regex uses stale `RouterSSEClient` and `RouterConnectionTiming` names. The frozen source and binary use `RouterEventStream` and `RouterReconnectBackoff`; the corrected exact six-argument symbol matched with exit 0.
-3. The planned Task 19 destination under `peakdo/apple/docs/superpowers/sdd` did not exist. The already tracked Task 19 report is `.superpowers/sdd/task-19-report.md`; its Results and deviation text now replace the `292/292` app count and interim `277 + 16` widget split with the reviewed clean combined `293/293` result for both schemes. This Task 24 report is created at the plan's requested durable documentation path.
+3. The planned Task 19 destination under `peakdo/apple/docs/superpowers/sdd` did not exist. The already tracked Task 19 report is `.superpowers/sdd/task-19-report.md`; its Results and deviation text record the owner-authoritative clean combined `293/293` result for both schemes, confirmed by an independent review/owner rerun after the original report. Those post-review artifacts are not retained at the old Milestone 4 paths/current evidence set, and the retained earlier undercount/split artifacts are not presented as provenance. This Task 24 report remains at the plan's requested durable documentation path.
 4. The first and rerun iOS app invocations, plus the widget invocation, each logged an environmental denial for one cloned UI runner. Xcode recovered internally and the final commands exited 0 with complete 324/324 passing bundles. The requested one rerun was performed; no unbounded retry loop was used.
 5. The Task 22 report's `/tmp/WattlineWidgets-M5.xcresult` path was overwritten intentionally by Task 24's fresh required bundle. The new bundle is authoritative for final-source 324/324; historical Task 22 counts remain documented in its report/logs.
 
@@ -424,6 +426,11 @@ Unit tests, simulators, unsigned generic builds, and static audits cannot prove 
 - Verify background wake/reconnect and telemetry refresh on physical devices.
 - Exercise a locked-device discharge cycle and Live Activity lifecycle.
 - Confirm real widget timeline reload behavior and authoritative BLE telemetry on hardware.
+- Verify manual and stored administrator credentials against a live `wattlined` exact-200 `/api/v1/settings`, including rejection of client credentials without promotion.
+- Submit two near-simultaneous live token revocations and confirm FIFO authoritative relists converge on the daemon's final token list.
+- Revoke a client token and confirm its live SSE stream closes and cannot reconnect with that revoked credential.
+- Revoke this device's own token and confirm only its client credential is removed, saved host and administrator state persist, and the saved row returns to PIN/manual enrollment.
+- Confirm aggregate, DC, and Type-C chart series and visible gaps using real bounded-history payloads.
 
 ### Carried from Milestone 3
 
