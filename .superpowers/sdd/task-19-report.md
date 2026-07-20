@@ -1,6 +1,6 @@
 # Router Administration Milestone 4 — Task 19 verification
 
-Verified from `d983528a` through `093f414d` on 2026-07-20. Milestone 5 was not started.
+Verified from `d983528a` through `9607b434` on 2026-07-20. Milestone 5 was not started.
 
 ## Commits
 
@@ -13,8 +13,11 @@ Verified from `d983528a` through `093f414d` on 2026-07-20. Milestone 5 was not s
 - `ecca11d5` `fix: validate router running modes`
 - `653ff6c4` `feat: present router device administration`
 - `093f414d` `fix: harden advanced administration lifecycle`
+- `b171db30` `docs: verify router administration milestone 4`
+- `b45ea494` `fix: gate advanced controls from router features`
+- `9607b434` `fix: quarantine cancelled capability refresh`
 
-The milestone diff contains 18 files, 3,706 insertions, and 24 deletions.
+Before this report's finalization commit, the milestone diff contains 21 files, 3,981 insertions, and 27 deletions.
 
 ## TDD evidence
 
@@ -40,7 +43,8 @@ The milestone diff contains 18 files, 3,706 insertions, and 24 deletions.
 - Initial app RED: advanced model members absent (`/tmp/wattline-m4-task18-app-red.log`).
 - Initial GREEN: UI 57/57; Network 217/217; app 288/288.
 - Review REDs proved the overlapping reload gate strand, cancelled-completion publication, stale capability quarantine after Advanced-off, ineffective stale-settings 403 affordance, and BLE-PIN visibility lifecycle gap (`/tmp/wattline-m4-task18-review-*.log`).
-- Corrected focused GREEN: advanced UI 7/7 and `RouterAdministrationModelTests` 114/114. Independent re-review approved `093f414d` with no P0–P3 findings.
+- Whole-milestone review then proved that factory-mode proxies incorrectly exposed independent router features, that a 409 quarantined a control before authoritative refresh succeeded, and that cancellation could land between refresh and quarantine commit. RED logs: `/tmp/wattline-m4-finalfix-network-red.log`, `/tmp/wattline-m4-finalfix-ui-red.log`, `/tmp/wattline-m4-finalfix-app-red.log`, and `/tmp/wattline-m4-finalcancel-red.log`.
+- Corrected GREEN: feature decode 6/6, advanced UI 7/7, and the full `RouterAdministrationModelTests` suite green after both correction waves (`/tmp/wattline-m4-finalfix-network-green.log`, `/tmp/wattline-m4-finalfix-ui-green.log`, `/tmp/wattline-m4-finalfix-app-green.log`, `/tmp/wattline-m4-finalcancel-green.log`). Independent re-review approved `9607b434` with no new findings.
 - Full detail: `.superpowers/sdd/task-18-review-fixes.md`.
 
 ## Final executed suites
@@ -53,21 +57,21 @@ Simulator for all Xcode runs:
 
 Results:
 
-- WattlineCore: **156/156**, 0 failures (`/tmp/wattline-m4-core.log`).
-- WattlineUI: **58/58**, 0 failures (`/tmp/wattline-m4-ui.log`).
-- WattlineNetwork: **217/217**, 0 failures (`/tmp/wattline-m4-network.log`).
-- Wattline app scheme: **291/291**, 0 failed/skipped/expected (`/tmp/Wattline-M4-App.xcresult`, `/tmp/wattline-m4-ios-xcresult-summary.json`).
-- WattlineWidgets scheme, deterministic split after XCTest runner instability:
-  - app/widget tests **275/275**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-Unit.xcresult`);
-  - UI tests **16/16**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-UI.xcresult`);
-  - combined: **291/291 executed green** under the WattlineWidgets scheme.
-- Generic iOS Simulator build: `** BUILD SUCCEEDED **` (`/tmp/wattline-m4-build.log`).
+- WattlineCore: **156/156**, 0 failures (`/tmp/wattline-m4-final-core.log`).
+- WattlineUI: **58/58**, 0 failures (`/tmp/wattline-m4-final-ui.log`).
+- WattlineNetwork: **217/217**, 0 failures (`/tmp/wattline-m4-final-network.log`).
+- Wattline app scheme: the exact all-in-one run after the feature-gating correction executed **292/292** with 0 failed/skipped/expected (`/tmp/Wattline-M4-App-Final.xcresult`, `/tmp/wattline-m4-app-final-summary.json`). The final cancellation regression then passed in the focused model suite. A final exact all-in-one rerun entered and passed the unit/model tests but the UI runner timed out loading Accessibility before UI-test initialization (`/tmp/Wattline-M4-App-Final-2.xcresult`); therefore an exact combined final-source pass is an environmental outstanding gate, not claimed as green.
+- WattlineWidgets scheme, split after XCTest runner instability:
+  - final-source app/widget unit tests **277/277**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-Unit-Final-2.xcresult`, `/tmp/wattline-m4-widgets-unit-final-summary.json`);
+  - UI tests **16/16**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-UI.xcresult`, `/tmp/wattline-m4-widgets-ui-xcresult-summary.json`);
+  - the two targets total **293/293 executed green**, but the requested unfiltered combined invocation did not complete successfully and remains an environmental outstanding gate.
+- Generic iOS Simulator build from final source: `** BUILD SUCCEEDED **` (`/tmp/wattline-m4-build-final.log`).
 
-The unfiltered combined widget invocation was also attempted. Xcode first hung for 19 minutes repeatedly reporting `DebuggerLLDB.DebuggerVersionStore.StoreError`; after terminating that orphan and erasing the dedicated simulator, two combined serial attempts each suffered a different UI-event scheduling timeout. The exact same 16 UI cases subsequently passed 16/16 under the same `WattlineWidgets` scheme when run as their own test target, and all 275 non-UI cases passed as their own target. The failed environmental attempts are retained in `/tmp/wattline-m4-widgets.log`, `/tmp/wattline-m4-widgets-combined-final.log`, and their xcresults; no failure originated in Milestone 4 code.
+The unfiltered combined widget invocation was attempted. Xcode first hung for 19 minutes repeatedly reporting `DebuggerLLDB.DebuggerVersionStore.StoreError`; after terminating that orphan and erasing the dedicated simulator, combined serial attempts suffered UI-event scheduling timeouts. The same 16 UI cases subsequently passed 16/16 under the requested scheme as their own target, and all 277 final-source non-UI cases passed as their own target. The failed environmental attempts are retained in `/tmp/wattline-m4-widgets.log`, `/tmp/wattline-m4-widgets-combined-final.log`, and their xcresults; no assertion failure originated in Milestone 4 production code.
 
 ## Audit transcript
 
-Commands and raw output are in `/tmp/wattline-m4-audits.log` and `/tmp/wattline-m4-extra-audits.log`.
+Final commands, output, and exit codes are in `/tmp/wattline-m4-audits-final.log`; the broad identifier audit is retained in `/tmp/wattline-m4-extra-audits.log`.
 
 - Core/UI `URLSession|NWBrowser|NWConnection|import Network|import Security`: no matches, exit 1.
 - WattlineUI source `import WattlineNetwork`: no matches, exit 1.
@@ -80,7 +84,7 @@ Commands and raw output are in `/tmp/wattline-m4-audits.log` and `/tmp/wattline-
 - Forbidden contract/OEM diff: empty, exit 0.
 - `DeviceCommand.swift` and `RouterTransport.swift` diff from base: empty, exit 0; the six-argument initializer is unchanged.
 - `git diff --check d983528a..HEAD`: clean, exit 0.
-- Final status before this report: clean.
+- Final status before editing this report: clean.
 
 ## Deviations from the Step 0 plan
 
@@ -88,7 +92,8 @@ Commands and raw output are in `/tmp/wattline-m4-audits.log` and `/tmp/wattline-
 - A daemon-owned 409 operation is adopted and polled to terminal state; DELETE is never retried. UI action composition uses both local and authoritative busy state.
 - Task 17 added strict BLE-PIN response/error reflection redaction and rejected unsupported running mode 2 before HTTP dispatch.
 - Task 18 split load and mutation generations, refreshed authoritative settings after `advanced_disabled`, and added a pure visibility-transition secret policy after independent review exposed lifecycle races not anticipated by the initial plan.
-- The final WattlineWidgets verification was decomposed into its two test targets because Xcode’s combined runner repeatedly hung or timed out in event synthesis. Both components executed green under the requested scheme; the app scheme also executed all 291 tests green in a single run.
+- Task 18 replaced factory-mode proxy gates with exact, independently decoded router feature fields. Capability quarantine is now committed only after a successful authoritative settings/identity refresh and a post-refresh cancellation check.
+- Final Xcode verification was decomposed where the simulator runner repeatedly hung or timed out. Both WattlineWidgets test targets executed green under the requested scheme. The app scheme executed 292/292 green after the feature correction; after the final deterministic cancellation regression, its focused suite passed but the exact combined rerun timed out before UI initialization. These two combined-run gaps remain explicitly environmental rather than being reported as completed.
 
 ## External live-router/hardware checks
 
