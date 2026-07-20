@@ -149,6 +149,70 @@ public struct RouterEndpointMigrationValidator: Sendable {
         )
     }
 
+    /// Consumes a replacement proof inside the administration client's
+    /// privileged FIFO. Exact source/candidate metadata and the candidate's
+    /// client-credential lease remain locked until the PUT response completes.
+    public func updateSettings(
+        _ patch: RouterSettingsPatch,
+        using client: RouterAdministrationClient,
+        validation: ValidatedRouterReplacement,
+        source: RouterHostMetadata,
+        candidate: RouterHostMetadata,
+        expectedDeviceID: String,
+        isCurrent: @escaping @MainActor @Sendable () -> Bool
+    ) async throws -> RouterSettingsUpdateResult {
+        try await client.updateSettings(
+            patch,
+            sourceEndpoint: source.endpoint,
+            isCurrent: { await isCurrent() },
+            authorizingDispatch: { dispatch in
+                try await performWhileCurrent(
+                    validation,
+                    source: source,
+                    candidate: candidate,
+                    expectedDeviceID: expectedDeviceID,
+                    operation: dispatch
+                )
+            }
+        )
+    }
+
+    private func performWhileCurrent<Result: Sendable>(
+        _ validation: ValidatedRouterReplacement,
+        source: RouterHostMetadata,
+        candidate: RouterHostMetadata,
+        expectedDeviceID: String,
+        operation: @Sendable () async throws -> Result
+    ) async throws -> Result {
+        guard source.id != candidate.id,
+              let expected = DeviceIdentityDeduplicator.normalizedMAC(expectedDeviceID),
+              let sourceDeviceID = DeviceIdentityDeduplicator.normalizedMAC(source.deviceID),
+              let observed = DeviceIdentityDeduplicator.normalizedMAC(validation.deviceID),
+              let saved = DeviceIdentityDeduplicator.normalizedMAC(candidate.deviceID),
+              expected == sourceDeviceID,
+              expected == observed,
+              expected == saved,
+              validation.candidate == candidate,
+              validation.endpoint == candidate.endpoint,
+              Self.hasIndependentTrust(candidate)
+        else { throw RouterEndpointMigrationError.candidateChanged }
+
+        guard let credentialGuard = try await hostStore.withExactHosts(
+            [source, candidate],
+            operation: {
+                try await credentials.withCurrent(
+                    validation.credentialLease,
+                    for: candidate.endpoint,
+                    role: .client,
+                    operation: operation
+                )
+            }
+        ), let result = credentialGuard else {
+            throw RouterEndpointMigrationError.candidateChanged
+        }
+        return result
+    }
+
     private static func hasIndependentTrust(_ candidate: RouterHostMetadata) -> Bool {
         guard candidate.scheme.lowercased() == "https" else { return true }
         guard let fingerprint = candidate.certificateFingerprint else { return false }

@@ -45,7 +45,7 @@ public struct RouterAdministrationAttachmentLease: Sendable,
     CustomStringConvertible, CustomDebugStringConvertible
 {
     fileprivate let generation: UInt64
-    fileprivate let endpoint: RouterEndpoint
+    let endpoint: RouterEndpoint
 
     public var description: String { "RouterAdministrationAttachmentLease([REDACTED])" }
     public var debugDescription: String { description }

@@ -159,6 +159,122 @@ final class RouterSettingsTests: XCTestCase {
         XCTAssertEqual(http.calls.map(\.method), ["PUT", "GET"])
     }
 
+    func testValidatedReplacementPUTBlocksHostAndCredentialInvalidationUntilResponse() async throws {
+        let source = try RouterHostValidator.validate(
+            "https://router.local:8378",
+            displayName: "HTTPS route",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: String(repeating: "01", count: 32)
+        )
+        let candidate = try RouterHostValidator.validate(
+            "http://router.local:8377",
+            displayName: "HTTP route",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil
+        )
+        let hostStore = RouterHostStore(backend: SettingsHostBackend())
+        try await hostStore.save(source)
+        try await hostStore.save(candidate)
+        let credentials = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await credentials.saveToken(
+            "source-admin",
+            for: source.endpoint,
+            role: .administrator
+        )
+        try await credentials.saveToken(
+            "candidate-client",
+            for: candidate.endpoint,
+            role: .client
+        )
+        let migrationHTTP = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(settingsDeviceJSON),
+        ])
+        let validator = RouterEndpointMigrationValidator(
+            hostStore: hostStore,
+            credentials: credentials,
+            httpFactory: { _ in migrationHTTP }
+        )
+        let proof = try await validator.validate(
+            candidate: candidate,
+            expectedDeviceID: "DC:04:5A:EB:72:2B"
+        )
+        let updateHTTP = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(
+                completeSettingsJSON.dropLast() + ",\"restart_required\":true}"
+            )],
+            gateRequests: true
+        )
+        let client = RouterAdministrationClient(credentials: credentials) { _ in updateHTTP }
+        try await client.attach(endpoint: source.endpoint)
+        let update = Task {
+            try await validator.updateSettings(
+                .init(https: .init(enabled: false)),
+                using: client,
+                validation: proof,
+                source: source,
+                candidate: candidate,
+                expectedDeviceID: "DC:04:5A:EB:72:2B",
+                isCurrent: { true }
+            )
+        }
+        await updateHTTP.waitForGateRegistration()
+
+        let starts = AsyncStream<String>.makeStream()
+        var startsIterator = starts.stream.makeAsyncIterator()
+        let completions = SettingsMutationCompletions()
+        let changedCandidate = try RouterHostValidator.validate(
+            "http://router.local:8377",
+            displayName: "Changed HTTP route",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil
+        )
+        let hostMutation = Task {
+            starts.continuation.yield("host")
+            try await hostStore.save(changedCandidate)
+            await completions.completeHost()
+        }
+        let credentialMutation = Task {
+            starts.continuation.yield("credential")
+            try await credentials.saveToken(
+                "replacement-client",
+                for: candidate.endpoint,
+                role: .client
+            )
+            await completions.completeCredential()
+        }
+        _ = await startsIterator.next()
+        _ = await startsIterator.next()
+        for _ in 0..<100 { await Task.yield() }
+        let blockedCompletions = await completions.snapshot()
+
+        XCTAssertFalse(blockedCompletions.host)
+        XCTAssertFalse(blockedCompletions.credential)
+
+        updateHTTP.releaseGates()
+        let result = try await update.value
+        try await hostMutation.value
+        try await credentialMutation.value
+        let finalCompletions = await completions.snapshot()
+        let savedHosts = await hostStore.hosts()
+        let savedCandidate = savedHosts.first(where: { $0.id == candidate.id })
+        let savedCredential = try await credentials.readToken(
+            for: candidate.endpoint,
+            role: .client
+        )
+
+        XCTAssertTrue(result.restartRequired)
+        XCTAssertTrue(finalCompletions.host)
+        XCTAssertTrue(finalCompletions.credential)
+        XCTAssertEqual(savedCandidate, changedCandidate)
+        XCTAssertEqual(savedCredential, "replacement-client")
+    }
+
     private func attachedClient(
         results: [Result<(Data, HTTPURLResponse), Error>]
     ) async throws -> (RouterAdministrationClient, ScriptedRouterHTTPClient) {
@@ -206,7 +322,37 @@ final class RouterSettingsTests: XCTestCase {
     }
 }
 
+private actor SettingsMutationCompletions {
+    private(set) var hostCompleted = false
+    private(set) var credentialCompleted = false
+
+    func completeHost() { hostCompleted = true }
+    func completeCredential() { credentialCompleted = true }
+    func snapshot() -> (host: Bool, credential: Bool) {
+        (hostCompleted, credentialCompleted)
+    }
+}
+
+private final class SettingsHostBackend: RouterHostKeyValueStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+
+    func data(forKey key: String) -> Data? {
+        lock.withLock { values[key] }
+    }
+
+    func set(_ data: Data, forKey key: String) {
+        lock.withLock { values[key] = data }
+    }
+
+    func removeValue(forKey key: String) {
+        lock.withLock { values[key] = nil }
+    }
+}
+
 private let completeSettingsJSON = #"{"http":{"enabled":true,"addr4":"0.0.0.0","addr6":"::","port":8377},"https":{"enabled":true,"addr4":"0.0.0.0","addr6":"::","port":8378},"tls":{"cert":"/etc/wattline/tls/server.crt","key":"/etc/wattline/tls/server.key","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"token_store":"/etc/wattline/tokens.json","pairing_ttl":"5m0s","pairing_always_on":false,"advanced":false,"mdns":{"enabled":true,"interfaces":["br-lan"]},"wan_access":false,"ble_pin":"020555"}"#
+
+private let settingsDeviceJSON = #"{"id":"DC:04:5A:EB:72:2B","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":773,"features_raw":32767,"features":{},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"ota","connection":{"connected":true,"phase":"bootloader","reconnect":"bootloader"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}"#
 
 private func XCTAssertThrowsErrorAsync<T>(
     _ expression: @autoclosure () async throws -> T,

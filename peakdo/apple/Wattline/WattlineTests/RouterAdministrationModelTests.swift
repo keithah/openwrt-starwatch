@@ -151,6 +151,63 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(storedClient)
     }
 
+    func testRejectedStoredAdministratorPromotionOffersAndPreservesTransientRecovery() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            tlsPromotionResults: [
+                .failure(NetworkError.unauthorized),
+                .failure(NetworkError.unauthorized),
+            ]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        try await fixture.credentialStore.saveToken(
+            "stale-stored-admin",
+            for: fixture.host.endpoint,
+            role: .administrator
+        )
+
+        await fixture.model.promoteStagedTLSPin()
+
+        XCTAssertTrue(fixture.model.tlsPromotionRecoveryAvailable)
+        XCTAssertEqual(fixture.tlsPromotionHTTP.calls.map(\.token), ["stale-stored-admin"])
+
+        await fixture.model.promoteStagedTLSPin(
+            administratorToken: "rejected-transient-admin"
+        )
+
+        XCTAssertTrue(fixture.model.tlsPromotionRecoveryAvailable)
+        XCTAssertEqual(
+            fixture.tlsPromotionHTTP.calls.map(\.token),
+            ["stale-stored-admin", "rejected-transient-admin"]
+        )
+    }
+
+    func testStoredAdministratorBackendFailureOffersTransientRecoveryWithoutClientFallback() async throws {
+        let backend = ToggleAdministratorReadFailureBackend()
+        let fixture = try await makeFixture(
+            results: [],
+            credentialBackend: backend,
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        await backend.failAdministratorReads()
+
+        await fixture.model.promoteStagedTLSPin()
+
+        XCTAssertTrue(fixture.model.tlsPromotionRecoveryAvailable)
+        XCTAssertTrue(fixture.tlsPromotionHTTP.calls.isEmpty)
+    }
+
     func testUnlockCannotInvalidateLockedStagedPromotionInFlight() async throws {
         let fixture = try await makeFixture(
             results: [AdminScriptedHTTP.ok("{}")],
@@ -386,6 +443,30 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertTrue(fixture.model.settingsRestartRequired)
     }
 
+    func testManualVerifiedReconnectClearsRestartRequiredLatch() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(
+                administrationSettingsJSON(advanced: true, httpPort: 9000, restartRequired: true)
+            ),
+            AdminScriptedHTTP.ok("{}"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        _ = await fixture.model.saveSettings(.init(http: .init(port: 9000)))
+        XCTAssertTrue(fixture.model.settingsRestartRequired)
+
+        await fixture.model.lock()
+        await fixture.model.begin(host: fixture.host)
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertTrue(fixture.model.settingsRestartRequired)
+
+        await fixture.model.unlock(token: "replacement-admin")
+
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertFalse(fixture.model.settingsRestartRequired)
+    }
+
     func testGatedPUTThenGETIsOrderedAndBothLifecycleFlagsClear() async throws {
         let updated = administrationSettingsJSON(
             advanced: true,
@@ -545,6 +626,52 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.migrationHTTP.calls.map(\.path), ["/api/v1/device"])
     }
 
+    func testTLSRotationDuringReplacementValidationClearsValidationActivityAndProof() async throws {
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(administrationRotateJSON(pin: appStagedPin)),
+            ],
+            migrationResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let candidate = try await fixture.connections.saveManualHost(
+            address: "http://router.local:8377",
+            displayName: "Saved HTTP route",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil,
+            token: "candidate-client"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        let original = try administrationSettingsValue(advanced: false, httpPort: 8377)
+        var draft = RouterSettingsDraft(original)
+        draft.https.enabled = false
+        let draftPatch = try draft.patch(from: original)
+        let patch = RouterSettingsPatch(https: .init(enabled: false))
+        fixture.migrationHTTP.gateNextRequest()
+
+        let validation = Task {
+            await fixture.model.validateReplacement(
+                candidate,
+                draft: draft,
+                draftPatch: draftPatch,
+                patch: patch
+            )
+        }
+        await fixture.migrationHTTP.waitForGateRegistration()
+
+        await fixture.model.rotateTLS()
+        fixture.migrationHTTP.releaseGates()
+        await validation.value
+
+        XCTAssertFalse(fixture.model.isReplacementValidationRunning)
+        XCTAssertNil(fixture.model.validatedReplacement)
+    }
+
     func testValidatedReplacementLeaseIsExactToSavedEndpointDraftAndNetworkPatch() async throws {
         let fixture = try await makeFixture(
             results: [
@@ -611,6 +738,143 @@ final class RouterAdministrationModelTests: XCTestCase {
             "/api/v1/settings",
             "/api/v1/settings",
         ])
+    }
+
+    func testReplacementSaveRevalidatesDurableRouteAndCredentialInsidePrivilegedFIFO() async throws {
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(administrationSettingsJSON(
+                    advanced: false,
+                    httpPort: 8377
+                )),
+                AdminScriptedHTTP.ok(administrationSettingsJSON(
+                    advanced: false,
+                    httpPort: 8377,
+                    restartRequired: true
+                )),
+            ],
+            migrationResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let candidate = try await fixture.connections.saveManualHost(
+            address: "http://router.local:8377",
+            displayName: "Saved HTTP route",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil,
+            token: "candidate-client"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        let original = try administrationSettingsValue(advanced: false, httpPort: 8377)
+        var draft = RouterSettingsDraft(original)
+        draft.https.enabled = false
+        let draftPatch = try draft.patch(from: original)
+        let patch = RouterSettingsPatch(https: .init(enabled: false))
+        await fixture.model.validateReplacement(
+            candidate,
+            draft: draft,
+            draftPatch: draftPatch,
+            patch: patch
+        )
+        fixture.http.gateNextRequest()
+        let load = Task { await fixture.model.reloadSettings() }
+        await fixture.http.waitForGateRegistration()
+
+        let save = Task {
+            await fixture.model.saveSettings(
+                patch,
+                draft: draft,
+                draftPatch: draftPatch,
+                replacement: candidate,
+                requiresValidatedReplacement: true
+            )
+        }
+        while !fixture.model.isSettingsSaving { await Task.yield() }
+        let changedCandidate = try RouterHostValidator.validate(
+            "\(candidate.scheme)://\(candidate.host):\(candidate.port)",
+            displayName: "Changed route",
+            reachability: candidate.reachability,
+            allowsInsecureWAN: candidate.allowsInsecureWAN,
+            deviceID: candidate.deviceID,
+            certificateFingerprint: candidate.certificateFingerprint,
+            tokenID: candidate.tokenID
+        )
+        try await fixture.hostStore.save(changedCandidate)
+        try await fixture.credentialStore.saveToken(
+            "replacement-candidate-client",
+            for: candidate.endpoint,
+            role: .client
+        )
+
+        fixture.http.releaseGates()
+        await load.value
+        let outcome = await save.value
+
+        XCTAssertEqual(outcome, .rejected)
+        XCTAssertEqual(fixture.http.calls.map(\.method), ["GET", "GET"])
+    }
+
+    func testReplacementSaveRejectsChangedDurableSourceSnapshot() async throws {
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(administrationSettingsJSON(
+                    advanced: false,
+                    httpPort: 8377,
+                    restartRequired: true
+                )),
+            ],
+            migrationResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let candidate = try await fixture.connections.saveManualHost(
+            address: "http://router.local:8377",
+            displayName: "Saved HTTP route",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil,
+            token: "candidate-client"
+        )
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        let original = try administrationSettingsValue(advanced: false, httpPort: 8377)
+        var draft = RouterSettingsDraft(original)
+        draft.https.enabled = false
+        let draftPatch = try draft.patch(from: original)
+        let patch = RouterSettingsPatch(https: .init(enabled: false))
+        await fixture.model.validateReplacement(
+            candidate,
+            draft: draft,
+            draftPatch: draftPatch,
+            patch: patch
+        )
+        let changedSource = try RouterHostValidator.validate(
+            "\(fixture.host.scheme)://\(fixture.host.host):\(fixture.host.port)",
+            displayName: "Changed source",
+            reachability: fixture.host.reachability,
+            allowsInsecureWAN: fixture.host.allowsInsecureWAN,
+            deviceID: fixture.host.deviceID,
+            certificateFingerprint: fixture.host.certificateFingerprint,
+            tokenID: fixture.host.tokenID
+        )
+        try await fixture.hostStore.save(changedSource)
+
+        let outcome = await fixture.model.saveSettings(
+            patch,
+            draft: draft,
+            draftPatch: draftPatch,
+            replacement: candidate,
+            requiresValidatedReplacement: true
+        )
+
+        XCTAssertEqual(outcome, .rejected)
+        XCTAssertEqual(fixture.http.calls.map(\.method), ["GET"])
     }
 
     func testRawBonjourCandidateIsIneligibleAndReceivesNoAuthorizationOrRequest() async throws {
@@ -3176,6 +3440,27 @@ private actor AdministrationMemoryBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { values[account] }
     func save(_ data: Data, account: String) async throws { values[account] = data }
     func delete(account: String) async throws { values[account] = nil }
+}
+
+private actor ToggleAdministratorReadFailureBackend: RouterCredentialBackend {
+    private enum ReadFailure: Error { case denied }
+
+    private var values: [String: Data] = [:]
+    private var rejectsAdministratorReads = false
+
+    func read(account: String) async throws -> Data? {
+        if rejectsAdministratorReads, account.hasSuffix(".administrator") {
+            throw ReadFailure.denied
+        }
+        return values[account]
+    }
+
+    func save(_ data: Data, account: String) async throws { values[account] = data }
+    func delete(account: String) async throws { values[account] = nil }
+
+    func failAdministratorReads() {
+        rejectsAdministratorReads = true
+    }
 }
 
 private func administrationSettings(

@@ -201,14 +201,66 @@ extension RouterAdministrationClient {
     }
 
     public func updateSettings(_ patch: RouterSettingsPatch) async throws -> RouterSettingsUpdateResult {
+        try await updateSettings(
+            patch,
+            sourceEndpoint: nil,
+            isCurrent: { true },
+            authorizingDispatch: { dispatch in try await dispatch() }
+        )
+    }
+
+    func updateSettings(
+        _ patch: RouterSettingsPatch,
+        sourceEndpoint: RouterEndpoint,
+        isCurrent: @escaping @Sendable () async -> Bool,
+        authorizingDispatch: @Sendable (
+            _ dispatch: @Sendable () async throws -> RouterSettingsUpdateResult
+        ) async throws -> RouterSettingsUpdateResult
+    ) async throws -> RouterSettingsUpdateResult {
+        try await updateSettings(
+            patch,
+            sourceEndpoint: Optional(sourceEndpoint),
+            isCurrent: isCurrent,
+            authorizingDispatch: authorizingDispatch
+        )
+    }
+
+    private func updateSettings(
+        _ patch: RouterSettingsPatch,
+        sourceEndpoint: RouterEndpoint?,
+        isCurrent: @escaping @Sendable () async -> Bool,
+        authorizingDispatch: @Sendable (
+            _ dispatch: @Sendable () async throws -> RouterSettingsUpdateResult
+        ) async throws -> RouterSettingsUpdateResult
+    ) async throws -> RouterSettingsUpdateResult {
         let attachment = try attachmentLease()
+        if let sourceEndpoint, attachment.endpoint != sourceEndpoint {
+            throw CancellationError()
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let body = try encoder.encode(patch)
         await acquirePrivilegedMutation()
         defer { releasePrivilegedMutation() }
         try Task.checkCancellation()
         try validate(attachment: attachment)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let body = try encoder.encode(patch)
+        if let sourceEndpoint, attachment.endpoint != sourceEndpoint {
+            throw CancellationError()
+        }
+        guard await isCurrent() else { throw CancellationError() }
+        try Task.checkCancellation()
+        try validate(attachment: attachment)
+        return try await authorizingDispatch { [self] in
+            try await dispatchSettingsUpdate(body: body, attachment: attachment)
+        }
+    }
+
+    private func dispatchSettingsUpdate(
+        body: Data,
+        attachment: RouterAdministrationAttachmentLease
+    ) async throws -> RouterSettingsUpdateResult {
+        try Task.checkCancellation()
+        try validate(attachment: attachment)
         let (data, _) = try await send("PUT", "/api/v1/settings", body: body)
         try validate(attachment: attachment)
         guard let value = try? JSONDecoder().decode(RouterSettingsUpdateResult.self, from: data) else {

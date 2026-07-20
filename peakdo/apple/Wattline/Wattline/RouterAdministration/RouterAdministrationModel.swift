@@ -197,9 +197,7 @@ final class RouterAdministrationModel {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation
             else { return session }
-            access = .unlocked
-            settingsRestartRequiredHosts.remove(host.id)
-            settingsRestartRequired = false
+            publishVerifiedAdministrationBoundary(for: host)
         } catch {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation
@@ -255,7 +253,7 @@ final class RouterAdministrationModel {
     }
 
     func unlock(token: String) async {
-        guard host != nil,
+        guard let host,
               access != .verifying,
               !isTLSRotationRunning,
               !isTLSPromotionRunning
@@ -271,7 +269,7 @@ final class RouterAdministrationModel {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation
             else { return }
-            access = .unlocked
+            publishVerifiedAdministrationBoundary(for: host)
         } catch is CancellationError {
             guard sessionGeneration == session,
                   adminOperationGeneration == adminOperation
@@ -353,6 +351,7 @@ final class RouterAdministrationModel {
             }
         }
 
+        let replacementLease: ValidatedReplacementLease?
         if requiresValidatedReplacement {
             guard let draft,
                   let draftPatch,
@@ -370,39 +369,72 @@ final class RouterAdministrationModel {
                 invalidateReplacementValidation()
                 return .rejected
             }
-            let replacementRequest = replacementRequestGeneration
-            do {
-                let isValid = try await endpointMigrationValidator.revalidate(
-                    lease.proof,
-                    candidate: replacement,
-                    expectedDeviceID: source.deviceID ?? ""
-                )
-                guard sessionGeneration == session,
-                      adminOperationGeneration == adminOperation,
-                      host == source,
-                      access == .unlocked,
-                      replacementRequestGeneration == replacementRequest
-                else { return .stale }
-                guard isValid else {
-                    isSettingsSaving = false
-                    settingsError = "Verify this exact replacement endpoint and configuration again."
-                    invalidateReplacementValidation()
-                    return .rejected
-                }
-            } catch {
-                guard sessionGeneration == session,
-                      adminOperationGeneration == adminOperation,
-                      host == source,
-                      access == .unlocked
-                else { return .stale }
-                isSettingsSaving = false
-                settingsError = "Verify this exact replacement endpoint and configuration again."
-                invalidateReplacementValidation()
-                return .rejected
-            }
+            replacementLease = lease
+        } else {
+            replacementLease = nil
         }
 
         invalidateReplacementValidation()
+        let replacementConsumptionGeneration = replacementRequestGeneration
+        if let replacementLease {
+            do {
+                let value = try await endpointMigrationValidator.updateSettings(
+                    patch,
+                    using: adminClient,
+                    validation: replacementLease.proof,
+                    source: source,
+                    candidate: replacementLease.candidate,
+                    expectedDeviceID: source.deviceID ?? "",
+                    isCurrent: { [weak self] in
+                        guard let self else { return false }
+                        return self.sessionGeneration == session
+                            && self.adminOperationGeneration == adminOperation
+                            && self.settingsSaveGeneration == request
+                            && self.replacementRequestGeneration
+                                == replacementConsumptionGeneration
+                            && self.host == source
+                            && self.access == .unlocked
+                    }
+                )
+                guard sessionGeneration == session,
+                      adminOperationGeneration == adminOperation,
+                      settingsSaveGeneration == request,
+                      replacementRequestGeneration == replacementConsumptionGeneration,
+                      host == source,
+                      access == .unlocked
+                else { return .stale }
+                publishSettingsSave(value, source: source)
+                return .accepted
+            } catch is CancellationError {
+                return .stale
+            } catch RouterEndpointMigrationError.candidateChanged {
+                guard sessionGeneration == session,
+                      adminOperationGeneration == adminOperation,
+                      settingsSaveGeneration == request,
+                      replacementRequestGeneration == replacementConsumptionGeneration,
+                      host == source,
+                      access == .unlocked
+                else { return .stale }
+                settingsError = "Verify this exact replacement endpoint and configuration again."
+                invalidateReplacementValidation()
+                return .rejected
+            } catch {
+                guard sessionGeneration == session,
+                      adminOperationGeneration == adminOperation,
+                      settingsSaveGeneration == request,
+                      replacementRequestGeneration == replacementConsumptionGeneration,
+                      host == source,
+                      access == .unlocked
+                else { return .stale }
+                if handleAdminFailure(error) {
+                    try? await adminClient.clearAdministratorCredential()
+                    return .stale
+                }
+                settingsError = "The request failed. Try again."
+                return .failed
+            }
+        }
+
         let result = await performAdmin({ client in
             try await client.updateSettings(patch)
         }, isCurrent: { [weak self] in
@@ -411,11 +443,7 @@ final class RouterAdministrationModel {
         guard settingsSaveGeneration == request else { return .stale }
         switch result {
         case let .success(value):
-            settings = value.settings
-            if value.restartRequired {
-                settingsRestartRequiredHosts.insert(source.id)
-            }
-            settingsRestartRequired = settingsRestartRequiredHosts.contains(source.id)
+            publishSettingsSave(value, source: source)
             return .accepted
         case let .failure(message):
             settingsError = message
@@ -452,6 +480,7 @@ final class RouterAdministrationModel {
                 request: request
             ) else { return }
             host = staged
+            invalidateReplacementValidation()
             tlsRestartRequired = response.restartRequired
             isTLSRotationRunning = false
         } catch is CancellationError {
@@ -522,6 +551,7 @@ final class RouterAdministrationModel {
                     expectedAccess: operationAccess
                 ) else { return }
                 host = promoted
+                invalidateReplacementValidation()
                 access = .locked
                 tlsRestartRequired = false
                 isTLSPromotionRunning = false
@@ -539,6 +569,7 @@ final class RouterAdministrationModel {
                 expectedAccess: operationAccess
             ) else { return }
             host = promoted
+            invalidateReplacementValidation()
             tlsRestartRequired = false
             isTLSPromotionRunning = false
             tlsPromotionRecoveryAvailable = false
@@ -556,7 +587,7 @@ final class RouterAdministrationModel {
             if administratorToken != nil {
                 tlsPromotionRecoveryAvailable = true
                 tlsError = "The administrator token could not verify the new certificate."
-            } else if (error as? RouterTLSPromotionError) == .missingCredential {
+            } else if Self.offersTransientTLSRecovery(error) {
                 tlsPromotionRecoveryAvailable = true
                 tlsError = "Enter an administrator token to verify the new certificate."
             } else {
@@ -588,6 +619,11 @@ final class RouterAdministrationModel {
         validatedReplacementLease = nil
         replacementValidationError = nil
         isReplacementValidationRunning = true
+        defer {
+            if replacementRequestGeneration == request {
+                isReplacementValidationRunning = false
+            }
+        }
         do {
             let validated = try await endpointMigrationValidator.validate(
                 candidate: candidate,
@@ -602,7 +638,6 @@ final class RouterAdministrationModel {
                 validatedReplacement = nil
                 validatedReplacementLease = nil
                 replacementValidationError = "Save and verify this replacement endpoint again."
-                isReplacementValidationRunning = false
                 return
             }
             validatedReplacement = RouterReplacementCandidate(
@@ -625,7 +660,6 @@ final class RouterAdministrationModel {
                 networkPatch: patch
             )
             replacementValidationError = nil
-            isReplacementValidationRunning = false
         } catch {
             guard sessionGeneration == session,
                   replacementRequestGeneration == request,
@@ -635,7 +669,6 @@ final class RouterAdministrationModel {
             validatedReplacement = nil
             validatedReplacementLease = nil
             replacementValidationError = "Could not verify this replacement endpoint."
-            isReplacementValidationRunning = false
         }
     }
 
@@ -1050,6 +1083,44 @@ final class RouterAdministrationModel {
         clearSettingsState()
         adminError = "The administrator session is no longer valid."
         return true
+    }
+
+    private func publishVerifiedAdministrationBoundary(for host: RouterHostMetadata) {
+        access = .unlocked
+        settingsRestartRequiredHosts.remove(host.id)
+        settingsRestartRequired = false
+    }
+
+    private func publishSettingsSave(
+        _ value: RouterSettingsUpdateResult,
+        source: RouterHostMetadata
+    ) {
+        settings = value.settings
+        if value.restartRequired {
+            settingsRestartRequiredHosts.insert(source.id)
+        }
+        settingsRestartRequired = settingsRestartRequiredHosts.contains(source.id)
+    }
+
+    private static func offersTransientTLSRecovery(_ error: Error) -> Bool {
+        if (error as? RouterTLSPromotionError) == .missingCredential {
+            return true
+        }
+        if let administration = error as? RouterAdministrationError {
+            return administration == .invalidAdministratorToken
+                || administration == .clientTokenRejected
+        }
+        guard let network = error as? NetworkError else { return false }
+        switch network {
+        case .unauthorized:
+            return true
+        case let .api(status, code, _):
+            return status == 401 || (status == 403 && code == .adminRequired)
+        case let .httpStatus(status, _):
+            return status == 401 || status == 403
+        default:
+            return false
+        }
     }
 
     private func clearSettingsState() {

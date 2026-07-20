@@ -154,6 +154,36 @@ public actor RouterCredentialStore: RouterCredentialProvider,
         }
     }
 
+    /// Holds the exact role-scoped credential version while an authorized
+    /// operation consumes its proof. Same-account save/delete calls wait until
+    /// the operation completes, so the lease cannot change between validation
+    /// and dispatch.
+    func withCurrent<Result: Sendable>(
+        _ lease: RouterCredentialLease,
+        for endpoint: RouterEndpoint,
+        role: RouterCredentialRole = .client,
+        operation: @Sendable () async throws -> Result
+    ) async throws -> Result? {
+        let account = account(for: endpoint, role: role)
+        let accountLock = accountLock(for: account)
+        await accountLock.acquire()
+        defer { accountLock.release() }
+        let leaseIsCurrent: Bool
+        do {
+            try Task.checkCancellation()
+            let data = try await backend.read(account: account)
+            leaseIsCurrent = lease.account == account
+                && lease.version == versions[account, default: 0]
+                && data.flatMap { String(data: $0, encoding: .utf8) }?.isEmpty == false
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return nil
+        }
+        guard leaseIsCurrent else { return nil }
+        return try await operation()
+    }
+
     @discardableResult
     public func deleteToken(
         for endpoint: RouterEndpoint,

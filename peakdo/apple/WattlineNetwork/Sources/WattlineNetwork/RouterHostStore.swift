@@ -200,6 +200,7 @@ public actor RouterHostStore {
     public static let defaultKey = "wattline.routerHosts"
     private let backend: any RouterHostKeyValueStore
     private let key: String
+    private let mutationLock = RouterHostMutationLock()
 
     public init(
         backend: any RouterHostKeyValueStore,
@@ -216,7 +217,14 @@ public actor RouterHostStore {
         return hosts
     }
 
-    public func save(_ host: RouterHostMetadata) throws {
+    public func save(_ host: RouterHostMetadata) async throws {
+        await mutationLock.acquire()
+        defer { mutationLock.release() }
+        try Task.checkCancellation()
+        try saveUnserialized(host)
+    }
+
+    private func saveUnserialized(_ host: RouterHostMetadata) throws {
         var current = hosts()
         current.removeAll { $0.id == host.id }
         current.append(host)
@@ -227,16 +235,26 @@ public actor RouterHostStore {
     public func stageCertificateFingerprint(
         _ fingerprint: String,
         for id: UUID
-    ) throws -> RouterHostMetadata {
-        try stageCertificateFingerprint(fingerprint, for: id, expectedHost: nil)
+    ) async throws -> RouterHostMetadata {
+        await mutationLock.acquire()
+        defer { mutationLock.release() }
+        try Task.checkCancellation()
+        return try stageCertificateFingerprint(fingerprint, for: id, expectedHost: nil)
     }
 
     public func stageCertificateFingerprint(
         _ fingerprint: String,
         for id: UUID,
         ifCurrent expectedHost: RouterHostMetadata
-    ) throws -> RouterHostMetadata {
-        try stageCertificateFingerprint(fingerprint, for: id, expectedHost: expectedHost)
+    ) async throws -> RouterHostMetadata {
+        await mutationLock.acquire()
+        defer { mutationLock.release() }
+        try Task.checkCancellation()
+        return try stageCertificateFingerprint(
+            fingerprint,
+            for: id,
+            expectedHost: expectedHost
+        )
     }
 
     private func stageCertificateFingerprint(
@@ -253,7 +271,7 @@ public actor RouterHostStore {
             throw RouterTLSPromotionError.hostChanged
         }
         host = host.stagingCertificateFingerprint(normalized)
-        try save(host)
+        try saveUnserialized(host)
         return host
     }
 
@@ -263,7 +281,10 @@ public actor RouterHostStore {
         expectedActive: String,
         expectedStaged: String,
         expectedDeviceID: String
-    ) throws -> RouterHostMetadata {
+    ) async throws -> RouterHostMetadata {
+        await mutationLock.acquire()
+        defer { mutationLock.release() }
+        try Task.checkCancellation()
         guard let host = hosts().first(where: { $0.id == id }),
               Self.matchesLocation(host, expected: expectedEndpoint),
               host.certificateFingerprint == expectedActive,
@@ -272,8 +293,23 @@ public actor RouterHostStore {
               currentDeviceID == expectedDeviceID
         else { throw RouterTLSPromotionError.hostChanged }
         let promoted = host.promotingStagedCertificateFingerprint(expectedStaged)
-        try save(promoted)
+        try saveUnserialized(promoted)
         return promoted
+    }
+
+    /// Holds the host mutation boundary while an exact saved-route proof is
+    /// consumed. Reads remain available, while saves/removals wait until the
+    /// authorized router request completes.
+    func withExactHosts<Result: Sendable>(
+        _ expected: [RouterHostMetadata],
+        operation: @Sendable () async throws -> Result
+    ) async throws -> Result? {
+        await mutationLock.acquire()
+        defer { mutationLock.release() }
+        try Task.checkCancellation()
+        let current = hosts()
+        guard expected.allSatisfy(current.contains) else { return nil }
+        return try await operation()
     }
 
     private static func matchesLocation(
@@ -291,12 +327,46 @@ public actor RouterHostStore {
         return String(lowercase.dropLast())
     }
 
-    public func remove(id: UUID) throws {
+    public func remove(id: UUID) async throws {
+        await mutationLock.acquire()
+        defer { mutationLock.release() }
+        try Task.checkCancellation()
         let remaining = hosts().filter { $0.id != id }
         if remaining.isEmpty {
             try backend.removeValue(forKey: key)
         } else {
             try backend.set(try JSONEncoder().encode(remaining), forKey: key)
         }
+    }
+}
+
+private final class RouterHostMutationLock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isAcquired = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        await withCheckedContinuation { continuation in
+            let acquiredImmediately = lock.withLock {
+                guard isAcquired else {
+                    isAcquired = true
+                    return true
+                }
+                waiters.append(continuation)
+                return false
+            }
+            if acquiredImmediately { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let next: CheckedContinuation<Void, Never>? = lock.withLock {
+            guard !waiters.isEmpty else {
+                isAcquired = false
+                return nil
+            }
+            return waiters.removeFirst()
+        }
+        next?.resume()
     }
 }
