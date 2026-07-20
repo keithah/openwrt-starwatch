@@ -183,7 +183,7 @@ final class RouterAdministrationModelTests: XCTestCase {
 
     func testRuleViewOffersCompleteCreateAndEditFormWithoutRawNanoseconds() throws {
         let source = try String(
-            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            contentsOf: TestProjectFiles.url("../WattlineShared/RouterAdministration/RouterRulesView.swift"),
             encoding: .utf8
         )
 
@@ -220,7 +220,7 @@ final class RouterAdministrationModelTests: XCTestCase {
         let priorRules = fixture.model.rules
         let callCount = fixture.http.calls.count
         let source = try String(
-            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            contentsOf: TestProjectFiles.url("../WattlineShared/RouterAdministration/RouterRulesView.swift"),
             encoding: .utf8
         )
 
@@ -608,7 +608,7 @@ final class RouterAdministrationModelTests: XCTestCase {
 
         XCTAssertEqual(fixture.http.calls.map(\.method), ["GET", "POST", "GET"])
         let source = try String(
-            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            contentsOf: TestProjectFiles.url("../WattlineShared/RouterAdministration/RouterRulesView.swift"),
             encoding: .utf8
         )
         XCTAssertEqual(
@@ -621,7 +621,7 @@ final class RouterAdministrationModelTests: XCTestCase {
 
     func testShutdownAndResetButtonsAreDestructiveAndConfirmed() throws {
         let source = try String(
-            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            contentsOf: TestProjectFiles.url("../WattlineShared/RouterAdministration/RouterRulesView.swift"),
             encoding: .utf8
         )
 
@@ -633,7 +633,7 @@ final class RouterAdministrationModelTests: XCTestCase {
 
     func testUnknownRuleViewHasJSONSummaryAndNoEditControl() throws {
         let rulesSource = try String(
-            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            contentsOf: TestProjectFiles.url("../WattlineShared/RouterAdministration/RouterRulesView.swift"),
             encoding: .utf8
         )
         let administrationSource = try String(

@@ -128,4 +128,39 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         XCTAssertEqual(plist["NSBonjourServices"] as? [String], ["_wattline._tcp"])
         XCTAssertNil(plist["NSCameraUsageDescription"])
     }
+
+    func testWidgetSharedSchemeKeepsOnlyTheIOSHostTestSurface() throws {
+        let scheme = try String(
+            contentsOf: TestProjectFiles.url(
+                "Wattline.xcodeproj/xcshareddata/xcschemes/WattlineWidgets.xcscheme"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(scheme.contains("BlueprintIdentifier = \"A10000000000000000000078\""))
+        XCTAssertTrue(scheme.contains("BlueprintIdentifier = \"A10000000000000000000066\""))
+        XCTAssertTrue(scheme.contains("BlueprintIdentifier = \"A10000000000000000000023\""))
+        XCTAssertFalse(scheme.contains("BlueprintIdentifier = \"A100000000000000000000A1\""))
+    }
+
+    func testSharedAppSchemesPreserveTheirPlatformSpecificTestHosts() throws {
+        let iOS = try String(
+            contentsOf: TestProjectFiles.url(
+                "Wattline.xcodeproj/xcshareddata/xcschemes/Wattline.xcscheme"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(iOS.contains("BlueprintIdentifier = \"A10000000000000000000066\""))
+        XCTAssertTrue(iOS.contains("BlueprintIdentifier = \"A10000000000000000000023\""))
+        XCTAssertFalse(iOS.contains("BlueprintIdentifier = \"A100000000000000000000A1\""))
+
+        let mac = try String(
+            contentsOf: TestProjectFiles.url(
+                "Wattline.xcodeproj/xcshareddata/xcschemes/WattlineMac.xcscheme"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(mac.contains("BlueprintIdentifier = \"A100000000000000000000A1\""))
+        XCTAssertFalse(mac.contains("BlueprintIdentifier = \"A10000000000000000000066\""))
+        XCTAssertFalse(mac.contains("BlueprintIdentifier = \"A10000000000000000000023\""))
+    }
 }

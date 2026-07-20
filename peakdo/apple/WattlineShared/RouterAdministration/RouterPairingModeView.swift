@@ -1,5 +1,9 @@
 import SwiftUI
+#if os(iOS)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 import WattlineNetwork
 
 struct RouterPairingModeView: View {
@@ -24,22 +28,8 @@ struct RouterPairingModeView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
-                    if let png = model.pairingQRPNG,
-                       let image = UIImage(data: png)
-                    {
-                        Image(uiImage: image)
-                            .resizable()
-                            .interpolation(.none)
-                            .scaledToFit()
-                            .frame(maxWidth: 240)
-                            .accessibilityLabel("Router pairing QR code")
-                        ShareLink(
-                            item: Image(uiImage: image),
-                            preview: SharePreview(
-                                "Wattline pairing QR",
-                                image: Image(uiImage: image)
-                            )
-                        )
+                    if let png = model.pairingQRPNG {
+                        RouterPairingQRCodeImage(data: png)
                     } else if model.isPairingQRLoading {
                         ProgressView("Loading pairing QR…")
                     } else {
@@ -96,5 +86,39 @@ struct RouterPairingModeView: View {
                 model.pairingDidEnterBackground()
             }
         }
+    }
+}
+
+private struct RouterPairingQRCodeImage: View {
+    let data: Data
+
+    @ViewBuilder
+    var body: some View {
+        #if os(iOS)
+        if let image = UIImage(data: data) {
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.none)
+                .scaledToFit()
+                .frame(maxWidth: 240)
+                .accessibilityLabel("Router pairing QR code")
+            ShareLink(
+                item: Image(uiImage: image),
+                preview: SharePreview(
+                    "Wattline pairing QR",
+                    image: Image(uiImage: image)
+                )
+            )
+        }
+        #elseif os(macOS)
+        if let image = NSImage(data: data) {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.none)
+                .scaledToFit()
+                .frame(maxWidth: 240)
+                .accessibilityLabel("Router pairing QR code")
+        }
+        #endif
     }
 }

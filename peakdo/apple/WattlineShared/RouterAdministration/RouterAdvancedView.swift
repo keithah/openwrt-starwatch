@@ -100,7 +100,7 @@ struct RouterAdvancedView: View {
                         .fontDesign(.monospaced)
                 }
                 TextField("Volts", text: $thresholdText)
-                    .keyboardType(.decimalPad)
+                    .routerDecimalInput()
                 Button("Apply and read back") {
                     guard let volts = Double(thresholdText) else { return }
                     Task { await model.setAdvancedBypassThreshold(volts: volts) }
@@ -153,8 +153,7 @@ struct RouterAdvancedView: View {
         case .blePIN:
             Section("Link-Power BLE PIN") {
                 SecureField("Six-digit PIN", text: $blePIN)
-                    .keyboardType(.numberPad)
-                    .textContentType(.password)
+                    .routerPINInput()
                 Button("Change BLE PIN", role: .destructive) {
                     confirmsBLEPIN = true
                 }

@@ -42,4 +42,60 @@ final class MacRouterAdministrationTests: XCTestCase {
         XCTAssertFalse(administration.contains("DeviceSession("))
         XCTAssertFalse(administration.contains("DeviceOperationBroker"))
     }
+
+    func testMacAdministrationUsesSharedFunctionalControls() throws {
+        let administration = try source("WattlineMac/RouterAdministration/MacRouterAdministrationView.swift")
+        let sharedPaths = [
+            "../WattlineShared/RouterAdministration/RouterHistoryView.swift",
+            "../WattlineShared/RouterAdministration/RouterDevicePairingView.swift",
+            "../WattlineShared/RouterAdministration/RouterPairingModeView.swift",
+            "../WattlineShared/RouterAdministration/RouterTokensView.swift",
+            "../WattlineShared/RouterAdministration/RouterSettingsView.swift",
+            "../WattlineShared/RouterAdministration/RouterAdvancedView.swift",
+            "../WattlineShared/RouterAdministration/RouterRulesView.swift",
+        ]
+        let shared = try sharedPaths.map(source).joined(separator: "\n")
+
+        for viewName in [
+            "RouterHistoryView", "RouterDevicePairingView", "RouterPairingModeView",
+            "RouterTokensView", "RouterSettingsView", "RouterAdvancedView", "RouterRulesView",
+        ] {
+            XCTAssertTrue(administration.contains("\(viewName)(model: model)"), "missing \(viewName)")
+        }
+        XCTAssertTrue(shared.contains("import WattlineUI"))
+        XCTAssertTrue(shared.contains("openPairing()"))
+        XCTAssertTrue(shared.contains("revoke(token)"))
+        XCTAssertTrue(shared.contains("saveSettings("))
+        XCTAssertTrue(shared.contains("pairLinkPower("))
+        XCTAssertTrue(shared.contains("setAdvancedRunningMode("))
+        XCTAssertTrue(shared.contains("createRule("))
+        XCTAssertTrue(shared.contains("savePowerLossPreset("))
+    }
+
+    func testNearbyRouterEnrollmentRequiresPINAndUsesCoordinatorConnection() throws {
+        let administration = try source("WattlineMac/RouterAdministration/MacRouterAdministrationView.swift")
+
+        XCTAssertTrue(administration.contains("Button(router.serviceName)"))
+        XCTAssertTrue(administration.contains("SecureField(\"6-digit PIN\""))
+        XCTAssertTrue(administration.contains("TextField(\"Client label\""))
+        XCTAssertTrue(administration.contains("RouterEnrollmentCoordinator("))
+        XCTAssertTrue(administration.contains("coordinator.submit("))
+        XCTAssertTrue(administration.contains("let submittedPIN = pin"))
+        XCTAssertTrue(administration.contains("pin: submittedPIN"))
+        XCTAssertTrue(administration.contains("router: router"))
+        XCTAssertTrue(administration.contains("connect: { host in selectSavedHost(host.id) }"))
+        XCTAssertTrue(administration.contains("List(selection: savedHostSelection)"))
+        XCTAssertTrue(administration.contains("pin = \"\""))
+        XCTAssertTrue(administration.contains(".onDisappear { clearEnrollmentSecrets() }"))
+    }
+
+    func testPairingURLNavigatesToAdministrationAndEnrollmentPrecedesSavedHost() throws {
+        let root = try source("WattlineMac/MacRootView.swift")
+        let administration = try source("WattlineMac/RouterAdministration/MacRouterAdministrationView.swift")
+
+        XCTAssertTrue(root.contains(".onChange(of: model.routerEnrollmentRoute.payload?.deviceID)"))
+        XCTAssertTrue(root.contains("selection = .routerAdministration"))
+        XCTAssertTrue(administration.contains("if let enrollmentSource"))
+        XCTAssertTrue(administration.contains("guard enrollmentSource == nil"))
+    }
 }

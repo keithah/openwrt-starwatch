@@ -36,11 +36,9 @@ struct RouterSettingsView: View {
 
                 Section("TLS") {
                     TextField("Certificate path", text: binding(\.tls.cert, fallback: current.tls.cert))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                        .routerLiteralInput()
                     TextField("Private key path", text: binding(\.tls.key, fallback: current.tls.key))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                        .routerLiteralInput()
                     LabeledContent("SHA-256", value: original.tls.sha256)
                         .fontDesign(.monospaced)
                     if model.host?.scheme == "https" {
@@ -59,8 +57,7 @@ struct RouterSettingsView: View {
                             .disabled(model.isTLSRotationRunning || model.isTLSPromotionRunning)
                             if model.tlsPromotionRecoveryAvailable {
                                 SecureField("Administrator token", text: $tlsRecoveryToken)
-                                    .textInputAutocapitalization(.never)
-                                    .autocorrectionDisabled()
+                                    .routerLiteralInput()
                                 Button("Verify with administrator token") {
                                     let token = tlsRecoveryToken
                                     tlsRecoveryToken = ""
@@ -92,14 +89,12 @@ struct RouterSettingsView: View {
                         "Token store",
                         text: binding(\.tokenStore, fallback: current.tokenStore)
                     )
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .routerLiteralInput()
                     TextField(
                         "Pairing TTL",
                         text: binding(\.pairingTTL, fallback: current.pairingTTL)
                     )
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .routerLiteralInput()
                     Toggle(
                         "Pairing always on",
                         isOn: binding(\.pairingAlwaysOn, fallback: current.pairingAlwaysOn)
@@ -117,15 +112,13 @@ struct RouterSettingsView: View {
                         "Interfaces (comma separated)",
                         text: interfacesBinding(fallback: current.mdns.interfaces)
                     )
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .routerLiteralInput()
                     Toggle("WAN access", isOn: binding(\.wanAccess, fallback: current.wanAccess))
                 }
 
                 Section("Bluetooth pairing") {
                     SecureField("BLE PIN", text: binding(\.blePIN, fallback: current.blePIN))
-                        .textContentType(.oneTimeCode)
-                        .keyboardType(.numberPad)
+                        .routerOneTimeCodeInput()
                         .monospacedDigit()
                 }
 
@@ -230,13 +223,11 @@ struct RouterSettingsView: View {
         Section(title) {
             Toggle("Enabled", isOn: enabled)
             TextField("IPv4 address", text: addr4)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+                .routerLiteralInput()
             TextField("IPv6 address", text: addr6)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+                .routerLiteralInput()
             TextField("Port", text: port)
-                .keyboardType(.numberPad)
+                .routerNumberInput()
                 .monospacedDigit()
         }
     }

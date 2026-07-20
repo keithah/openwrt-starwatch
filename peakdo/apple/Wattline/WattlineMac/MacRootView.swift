@@ -58,7 +58,15 @@ struct MacRootView: View {
                 )
             }
         }
-        .task { model.start() }
+        .task {
+            model.start()
+            if model.routerEnrollmentRoute.payload != nil {
+                selection = .routerAdministration
+            }
+        }
+        .onChange(of: model.routerEnrollmentRoute.payload?.deviceID) { _, deviceID in
+            if deviceID != nil { selection = .routerAdministration }
+        }
     }
 }
 

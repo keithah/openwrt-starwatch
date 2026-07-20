@@ -57,7 +57,7 @@ struct RouterDevicePairingView: View {
 
             if let selectedMAC, actions.showsPair {
                 SecureField("Optional BLE PIN (up to six digits)", text: $pin)
-                    .keyboardType(.numberPad)
+                    .routerNumberInput()
                 Button("Pair selected device") {
                     let submittedPIN = pin
                     pin = ""

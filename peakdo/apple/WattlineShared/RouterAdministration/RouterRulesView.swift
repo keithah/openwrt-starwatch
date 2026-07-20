@@ -415,8 +415,7 @@ struct RouterRuleEditor: View {
             switch mode {
             case .create:
                 TextField("Rule name", text: $draft.name)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .routerLiteralInput()
             case let .update(rule):
                 LabeledContent("Rule name", value: rule.name)
             }
@@ -438,7 +437,7 @@ struct RouterRuleEditor: View {
             case .batteryLevel:
                 comparisonPicker
                 TextField("Percent", text: $draft.percent)
-                    .keyboardType(.numberPad)
+                    .routerNumberInput()
             case .portPower:
                 Picker("Port", selection: $draft.port) {
                     Text("DC").tag(RouterRulePort.dc)
@@ -446,27 +445,26 @@ struct RouterRuleEditor: View {
                 }
                 comparisonPicker
                 TextField("Watts", text: $draft.watts)
-                    .keyboardType(.decimalPad)
+                    .routerDecimalInput()
             case .schedule:
                 TextField("Cron", text: $draft.cron)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                    .routerLiteralInput()
             }
         }
 
         Section("Timing") {
             TextField("Hold", text: $draft.hold.value)
-                .keyboardType(.decimalPad)
+                .routerDecimalInput()
                 .monospacedDigit()
             Picker("Hold unit", selection: $draft.hold.unit) {
                 durationUnitChoices
             }
             TextField("Hysteresis margin", text: $draft.hysteresisMargin)
-                .keyboardType(.decimalPad)
+                .routerDecimalInput()
             Toggle("Repeat", isOn: $draft.hasRepeatEvery)
             if draft.hasRepeatEvery {
                 TextField("Repeat every", text: $draft.repeatEvery.value)
-                    .keyboardType(.decimalPad)
+                    .routerDecimalInput()
                     .monospacedDigit()
                 Picker("Repeat unit", selection: $draft.repeatEvery.unit) {
                     durationUnitChoices
@@ -483,9 +481,7 @@ struct RouterRuleEditor: View {
                 }
                 if action.kind == .webhook {
                     TextField("Webhook URL", text: $action.webhookURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                        .routerURLInput()
                 }
             }
             .onDelete { draft.actions.remove(atOffsets: $0) }
@@ -615,7 +611,7 @@ private struct RouterPowerLossEditor: View {
     var body: some View {
         Toggle("Enabled", isOn: $enabled)
         TextField("Hold", text: $hold.value)
-            .keyboardType(.decimalPad)
+            .routerDecimalInput()
             .monospacedDigit()
         Picker("Hold unit", selection: $hold.unit) {
             ForEach(RouterRuleDurationUnit.allCases, id: \.rawValue) { unit in

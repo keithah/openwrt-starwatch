@@ -1,15 +1,25 @@
 import SwiftUI
 import WattlineNetwork
+import WattlineUI
+
+private enum MacRouterEnrollmentSource: Equatable {
+    case discovered(DiscoveredRouter)
+    case payload(RouterPairingPayload)
+}
 
 struct MacRouterAdministrationView: View {
     let model: RouterAdministrationModel
     let connections: RouterConnectionModel
     let enrollmentRoute: RouterEnrollmentRoute
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selection: RouterHostMetadata.ID?
+    @State private var selectedDiscoveredRouter: DiscoveredRouter?
     @State private var administratorToken = ""
+    @State private var pin = ""
     @State private var enrollmentName = "Wattline Router"
     @State private var enrollmentLabel = "Wattline for Mac"
+    @State private var isEnrollmentSubmitting = false
     @State private var enrollmentError: String?
     @State private var enrollmentAdapter: MacRouterEnrollmentAdapter
 
@@ -30,6 +40,25 @@ struct MacRouterAdministrationView: View {
         connections.savedHosts.first { $0.id == selection }
     }
 
+    private var savedHostSelection: Binding<RouterHostMetadata.ID?> {
+        Binding(
+            get: { selection },
+            set: { id in
+                guard let id else {
+                    selection = nil
+                    return
+                }
+                selectSavedHost(id)
+            }
+        )
+    }
+
+    private var enrollmentSource: MacRouterEnrollmentSource? {
+        if let selectedDiscoveredRouter { return .discovered(selectedDiscoveredRouter) }
+        if let payload = enrollmentRoute.payload { return .payload(payload) }
+        return nil
+    }
+
     var body: some View {
         HSplitView {
             routerList
@@ -41,15 +70,26 @@ struct MacRouterAdministrationView: View {
         .task {
             await connections.reloadSavedHosts()
             connections.startDiscovery()
-            if selection == nil { selection = connections.savedHosts.first?.id }
+            if enrollmentRoute.payload != nil {
+                showPairingPayload()
+            }
+            guard enrollmentSource == nil, selection == nil else { return }
+            selection = connections.savedHosts.first?.id
         }
         .task(id: selection) {
-            guard let selectedHost else {
+            guard enrollmentSource == nil, let selectedHost else {
                 await model.end()
                 return
             }
             await model.open(host: selectedHost)
         }
+        .onChange(of: enrollmentRoute.payload?.deviceID) { _, deviceID in
+            if deviceID != nil { showPairingPayload() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { clearEnrollmentSecrets() }
+        }
+        .onDisappear { clearEnrollmentSecrets() }
         .onDisappear {
             connections.stopDiscovery()
             Task { await model.end() }
@@ -57,7 +97,7 @@ struct MacRouterAdministrationView: View {
     }
 
     private var routerList: some View {
-        List(selection: $selection) {
+        List(selection: savedHostSelection) {
             Section("Saved routers") {
                 ForEach(connections.savedHosts) { host in
                     VStack(alignment: .leading) {
@@ -73,7 +113,8 @@ struct MacRouterAdministrationView: View {
             if !connections.discoveredRouters.isEmpty {
                 Section("Nearby routers") {
                     ForEach(connections.discoveredRouters, id: \.deviceID) { router in
-                        Label(router.serviceName, systemImage: "wifi")
+                        Button(router.serviceName) { beginEnrollment(router) }
+                            .buttonStyle(.plain)
                     }
                 }
             }
@@ -96,23 +137,10 @@ struct MacRouterAdministrationView: View {
 
     @ViewBuilder
     private var administrationDetail: some View {
-        if let host = selectedHost {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    routerSummary(host)
-                    historySection
-                    linkPowerSection
-                    administrationSection
-                    if model.access == .unlocked {
-                        administratorSections
-                    }
-                    rulesSection
-                }
-                .padding(24)
-                .frame(maxWidth: 760, alignment: .leading)
-            }
-        } else if enrollmentRoute.payload != nil {
-            enrollmentForm
+        if let enrollmentSource {
+            enrollmentForm(enrollmentSource)
+        } else if let host = selectedHost {
+            administrationForm(host)
         } else {
             ContentUnavailableView(
                 "No router selected",
@@ -122,115 +150,197 @@ struct MacRouterAdministrationView: View {
         }
     }
 
-    private func routerSummary(_ host: RouterHostMetadata) -> some View {
-        GroupBox("Router") {
-            Grid(alignment: .leading) {
-                GridRow { Text("Name"); Text(host.displayName) }
-                GridRow { Text("Address"); Text("\(host.host):\(host.port)").monospaced() }
+    private func administrationForm(_ host: RouterHostMetadata) -> some View {
+        let presentation = RouterAdministrationPresentation(access: model.access)
+        return Form {
+            Section("Router") {
+                LabeledContent("Name", value: host.displayName)
+                LabeledContent("Address", value: "\(host.host):\(host.port)")
+                    .fontDesign(.monospaced)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
 
-    private var historySection: some View {
-        GroupBox("History") {
-            HStack {
-                Text(model.history.isEmpty
-                     ? "No router history loaded."
-                     : "\(model.history.count) recorded samples")
-                Spacer()
-                Button("Refresh history") { Task { await model.reloadHistory() } }
-            }
-        }
-    }
-
-    private var linkPowerSection: some View {
-        GroupBox("Link-Power pairing") {
-            HStack {
-                Text(model.devicePairingStatus == nil
-                     ? "Pairing status is not loaded."
-                     : "Pairing status available")
-                Spacer()
-                Button("Refresh") { Task { await model.refreshDevicePairing() } }
-            }
-        }
-    }
-
-    private var administrationSection: some View {
-        GroupBox("Administration") {
-            if model.access == .unlocked {
-                HStack {
-                    Label("Unlocked", systemImage: "lock.open")
-                    Spacer()
-                    Button("Lock", role: .destructive) { Task { await model.lock() } }
+            if presentation.showsClientSections, presentation.showsHistory {
+                Section("History") {
+                    RouterHistoryView(model: model)
+                    Button("Refresh history") { Task { await model.reloadHistory() } }
                 }
-            } else {
-                HStack {
-                    SecureField("Administrator token", text: $administratorToken)
-                    Button(model.access == .verifying ? "Verifying…" : "Unlock") {
+            }
+
+            if model.host != nil {
+                Section("Link-Power pairing") {
+                    RouterDevicePairingView(model: model)
+                }
+            }
+
+            if presentation.showsUnlockField {
+                administrationUnlockSection
+            } else if presentation.showsAdministratorSections {
+                Section("Administration") {
+                    Button("Lock administration", role: .destructive) {
+                        Task { await model.lock() }
+                    }
+                    .disabled(model.isTLSRotationRunning || model.isTLSPromotionRunning)
+                }
+            }
+
+            if presentation.visibleSections.contains(.clientEnrollment) {
+                Section("Client enrollment") {
+                    RouterPairingModeView(model: model)
+                }
+            }
+
+            if presentation.visibleSections.contains(.apiClients) {
+                Section("API clients") {
+                    RouterTokensView(model: model)
+                }
+            }
+
+            if presentation.visibleSections.contains(.routerConfiguration) {
+                RouterSettingsView(model: model)
+                RouterAdvancedView(model: model)
+            }
+
+            if presentation.showsClientSections {
+                RouterRulesView(model: model)
+            }
+
+            if let message = model.adminError {
+                Section { Text(message).foregroundStyle(.orange) }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var administrationUnlockSection: some View {
+        Section {
+            SecureField("Administrator token", text: $administratorToken)
+            Button(model.access == .verifying ? "Verifying…" : "Unlock administration") {
+                let token = administratorToken
+                administratorToken = ""
+                Task { await model.unlock(token: token) }
+            }
+            .disabled(
+                administratorToken.isEmpty
+                    || model.access == .verifying
+                    || model.isTLSRotationRunning
+                    || model.isTLSPromotionRunning
+            )
+            if model.host?.stagedCertificateFingerprint != nil {
+                Button(
+                    model.isTLSPromotionRunning
+                        ? "Verifying new certificate…"
+                        : model.tlsPromotionRecoveryAvailable
+                            ? "Verify with administrator token"
+                            : "Verify new certificate"
+                ) {
+                    if model.tlsPromotionRecoveryAvailable {
                         let token = administratorToken
                         administratorToken = ""
-                        Task { await model.unlock(token: token) }
+                        Task { await model.promoteStagedTLSPin(administratorToken: token) }
+                    } else {
+                        Task { await model.promoteStagedTLSPin() }
                     }
-                    .disabled(administratorToken.isEmpty || model.access == .verifying)
                 }
+                .disabled(
+                    model.access == .verifying
+                        || model.isTLSRotationRunning
+                        || model.isTLSPromotionRunning
+                        || (model.tlsPromotionRecoveryAvailable && administratorToken.isEmpty)
+                )
+                Text("Use this after wattlined restarts to verify and promote the staged certificate pin.")
+                    .foregroundStyle(.secondary)
             }
-            if let error = model.adminError {
-                Text(error).foregroundStyle(.orange)
+            if let message = model.tlsError {
+                Text(message).foregroundStyle(.orange)
             }
+        } header: {
+            Text("Administration")
+        } footer: {
+            Text("The administrator token is verified against the router and stored in Keychain. Wattline cannot promote a managed client token.")
         }
     }
 
-    private var administratorSections: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            GroupBox("Client enrollment") {
-                Text("Open or close the router pairing window for managed clients.")
-            }
-            GroupBox("API clients") {
-                Text("\(model.tokens.count) managed clients")
-            }
-            GroupBox("Router Configuration") {
-                Text(model.settings == nil
-                     ? "Configuration has not been loaded."
-                     : "Router configuration loaded.")
-            }
-            GroupBox("Advanced device") {
-                Text("\(model.advancedVisibility.surfaces.count) controls available")
-            }
-        }
-    }
-
-    private var rulesSection: some View {
-        GroupBox("Automation Rules") {
-            HStack {
-                Text("\(model.rules.count) rules")
-                Spacer()
-                Button("Refresh rules") { Task { await model.reloadRules() } }
-            }
-        }
-    }
-
-    private var enrollmentForm: some View {
+    private func enrollmentForm(_ source: MacRouterEnrollmentSource) -> some View {
         Form {
-            Section("Client enrollment") {
+            Section("Router") {
+                LabeledContent("Device", value: enrollmentDeviceID(source))
+                LabeledContent("Address", value: enrollmentAuthority(source))
                 TextField("Router name", text: $enrollmentName)
                 TextField("Client label", text: $enrollmentLabel)
-                Button("Pair router") { enrollPairingLink() }
-                    .buttonStyle(.borderedProminent)
-                if let enrollmentError {
-                    Text(enrollmentError).foregroundStyle(.orange)
+            }
+            if case .discovered = source {
+                Section("Current pairing PIN") {
+                    SecureField("6-digit PIN", text: $pin)
+                        .routerNumberInput()
                 }
+            }
+            Section {
+                Button(isEnrollmentSubmitting ? "Pairing…" : "Pair and connect") {
+                    enroll(source)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canEnroll(source) || isEnrollmentSubmitting)
+            } footer: {
+                Text("The managed client token is stored in Keychain. Wattline never stores the pairing PIN.")
+            }
+            if let enrollmentError {
+                Section { Text(enrollmentError).foregroundStyle(.orange) }
             }
         }
         .formStyle(.grouped)
         .padding()
     }
 
+    private func enrollmentDeviceID(_ source: MacRouterEnrollmentSource) -> String {
+        switch source {
+        case let .discovered(router): router.deviceID
+        case let .payload(payload): payload.deviceID
+        }
+    }
+
+    private func enrollmentAuthority(_ source: MacRouterEnrollmentSource) -> String {
+        switch source {
+        case let .discovered(router):
+            "\(router.endpoint.host):\(router.endpoint.port)"
+        case let .payload(payload):
+            "\(payload.enrollmentEndpoint.host):\(payload.enrollmentEndpoint.port)"
+        }
+    }
+
+    private func canEnroll(_ source: MacRouterEnrollmentSource) -> Bool {
+        !enrollmentLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !enrollmentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && {
+                if case .discovered = source {
+                    return pin.utf8.count == 6
+                        && pin.utf8.allSatisfy { (48...57).contains($0) }
+                }
+                return true
+            }()
+    }
+
+    private func beginEnrollment(_ router: DiscoveredRouter) {
+        enrollmentRoute.clear()
+        selectedDiscoveredRouter = router
+        selection = nil
+        enrollmentName = router.serviceName
+        clearEnrollmentSecrets()
+        enrollmentError = nil
+    }
+
+    private func showPairingPayload() {
+        guard let payload = enrollmentRoute.payload else { return }
+        selectedDiscoveredRouter = nil
+        selection = nil
+        enrollmentName = payload.host
+        clearEnrollmentSecrets()
+        enrollmentError = nil
+    }
+
     private func pastePairingLink() {
         do {
             try enrollmentAdapter.pastePairingLink()
-            selection = nil
-            enrollmentError = nil
+            showPairingPayload()
         } catch {
             enrollmentError = "The clipboard does not contain a Wattline pairing link."
         }
@@ -240,30 +350,59 @@ struct MacRouterAdministrationView: View {
         Task {
             do {
                 try await enrollmentAdapter.importQRImage()
-                selection = nil
-                enrollmentError = nil
+                showPairingPayload()
             } catch {
                 enrollmentError = "The selected image does not contain a Wattline pairing QR code."
             }
         }
     }
 
-    private func enrollPairingLink() {
-        guard let payload = enrollmentRoute.payload else { return }
+    private func enroll(_ source: MacRouterEnrollmentSource) {
+        isEnrollmentSubmitting = true
+        enrollmentError = nil
+        let submittedPIN = pin
+        pin = ""
         Task {
+            let coordinator = RouterEnrollmentCoordinator(
+                connections: connections,
+                connect: { host in selectSavedHost(host.id) }
+            )
             do {
-                let host = try await connections.enroll(
-                    payload: payload,
-                    displayName: enrollmentName,
-                    reachability: .lan,
-                    label: enrollmentLabel
-                )
+                switch source {
+                case let .discovered(router):
+                    try await coordinator.submit(
+                        pin: submittedPIN,
+                        label: enrollmentLabel,
+                        router: router
+                    )
+                case let .payload(payload):
+                    try await coordinator.submit(
+                        payload: payload,
+                        displayName: enrollmentName,
+                        label: enrollmentLabel
+                    )
+                }
                 enrollmentRoute.clear()
+                selectedDiscoveredRouter = nil
                 enrollmentError = nil
-                selection = host.id
             } catch {
-                enrollmentError = "Could not pair with the router. Try again."
+                enrollmentError = coordinator.errorMessage
             }
+            pin = ""
+            isEnrollmentSubmitting = false
         }
+    }
+
+    private func clearEnrollmentSecrets() {
+        pin = ""
+        administratorToken = ""
+    }
+
+    private func selectSavedHost(_ id: RouterHostMetadata.ID) {
+        enrollmentRoute.clear()
+        selectedDiscoveredRouter = nil
+        enrollmentError = nil
+        clearEnrollmentSecrets()
+        selection = id
     }
 }
