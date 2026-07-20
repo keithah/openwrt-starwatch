@@ -228,6 +228,41 @@ public actor RouterAdministrationClient {
         }
     }
 
+    /// Client-authenticated request path for administration surfaces whose
+    /// canonical API role is the unchanged managed-client account.
+    func sendClient(
+        _ method: String,
+        _ path: String,
+        body: Data? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        guard let endpoint, let http else { throw RouterAdministrationError.notAttached }
+        let requestGeneration = generation
+        let storedToken: String?
+        do {
+            storedToken = try await credentials.readToken(for: endpoint, role: .client)
+        } catch {
+            guard generation == requestGeneration else { throw CancellationError() }
+            if error is CancellationError { throw CancellationError() }
+            throw error
+        }
+        guard generation == requestGeneration else { throw CancellationError() }
+        guard let token = storedToken else { throw NetworkError.unauthorized }
+        do {
+            let result = try await http.request(method, path, body: body, token: token)
+            guard generation == requestGeneration else { throw CancellationError() }
+            guard result.1.statusCode == 200 else {
+                throw RouterAdministrationError.invalidResponse
+            }
+            return result
+        } catch {
+            guard generation == requestGeneration else { throw CancellationError() }
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
     /// Request path for mutations whose 2xx response is durable on the router.
     /// Stale work is quarantined before sending and before translating failures,
     /// but a successful response remains observable after a generation change so
