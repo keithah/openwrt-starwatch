@@ -1,0 +1,104 @@
+# Router Administration Milestone 4 — Task 19 verification
+
+Verified from `d983528a` through `093f414d` on 2026-07-20. Milestone 5 was not started.
+
+## Commits
+
+- `9c67de66` `docs: plan router administration milestone 4`
+- `05f2ff32` `docs: refine router administration milestone 4 plan`
+- `fda85e7d` `feat: pair Link-Power through router`
+- `756ae9a2` `fix: align router device pairing contract`
+- `0c4b4864` `fix: quarantine router pairing progress`
+- `8d40dfdf` `feat: add router advanced device controls`
+- `ecca11d5` `fix: validate router running modes`
+- `653ff6c4` `feat: present router device administration`
+- `093f414d` `fix: harden advanced administration lifecycle`
+
+The milestone diff contains 18 files, 3,706 insertions, and 24 deletions.
+
+## TDD evidence
+
+### Task 16
+
+- Initial Network RED: missing `RouterDevicePairingClient` and `RouterDevicePairingError` (`/tmp/wattline-m4-task16-network-red.log`).
+- Initial UI RED: missing pairing presentation/value types (`/tmp/wattline-m4-task16-ui-red.log`).
+- Review REDs then caught the daemon stage mismatch, missing progress API, caller-cancellation gaps, action-composition gaps, gated-terminal false success, and 409-unpair premature completion.
+- Final GREEN: pairing Network 19/19; full Network 204/204; pairing UI 6/6; full UI 51/51; app 281/281.
+- Full detail: `.superpowers/sdd/task-16-report.md`.
+
+### Task 17
+
+- Initial RED: advanced DTO/client APIs absent (`/tmp/wattline-m4-task17-red.log`).
+- PIN RED: daemon errors reflected `020555` (`/tmp/wattline-m4-task17-pin-red.log`).
+- Review RED: mode 2 incorrectly dispatched a third PUT (`/tmp/wattline-m4-task17-mode-red.log`).
+- Final GREEN: focused advanced API 13/13; full Network 217/217; queued stale-operation stress 20/20.
+- Full detail: `.superpowers/sdd/router-admin-m4-task-17-report.md`.
+
+### Task 18
+
+- Initial UI RED: advanced visibility/value types absent (`/tmp/wattline-m4-task18-ui-red.log`).
+- Initial app RED: advanced model members absent (`/tmp/wattline-m4-task18-app-red.log`).
+- Initial GREEN: UI 57/57; Network 217/217; app 288/288.
+- Review REDs proved the overlapping reload gate strand, cancelled-completion publication, stale capability quarantine after Advanced-off, ineffective stale-settings 403 affordance, and BLE-PIN visibility lifecycle gap (`/tmp/wattline-m4-task18-review-*.log`).
+- Corrected focused GREEN: advanced UI 7/7 and `RouterAdministrationModelTests` 114/114. Independent re-review approved `093f414d` with no P0–P3 findings.
+- Full detail: `.superpowers/sdd/task-18-review-fixes.md`.
+
+## Final executed suites
+
+Simulator for all Xcode runs:
+
+- `Wattline-Tests-2`
+- iPhone 17e, iOS 26.5 (23F77), arm64
+- UDID `74C1DA4D-7190-4497-AAD5-9EB140B3A96A`
+
+Results:
+
+- WattlineCore: **156/156**, 0 failures (`/tmp/wattline-m4-core.log`).
+- WattlineUI: **58/58**, 0 failures (`/tmp/wattline-m4-ui.log`).
+- WattlineNetwork: **217/217**, 0 failures (`/tmp/wattline-m4-network.log`).
+- Wattline app scheme: **291/291**, 0 failed/skipped/expected (`/tmp/Wattline-M4-App.xcresult`, `/tmp/wattline-m4-ios-xcresult-summary.json`).
+- WattlineWidgets scheme, deterministic split after XCTest runner instability:
+  - app/widget tests **275/275**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-Unit.xcresult`);
+  - UI tests **16/16**, 0 failed/skipped/expected (`/tmp/Wattline-M4-Widgets-UI.xcresult`);
+  - combined: **291/291 executed green** under the WattlineWidgets scheme.
+- Generic iOS Simulator build: `** BUILD SUCCEEDED **` (`/tmp/wattline-m4-build.log`).
+
+The unfiltered combined widget invocation was also attempted. Xcode first hung for 19 minutes repeatedly reporting `DebuggerLLDB.DebuggerVersionStore.StoreError`; after terminating that orphan and erasing the dedicated simulator, two combined serial attempts each suffered a different UI-event scheduling timeout. The exact same 16 UI cases subsequently passed 16/16 under the same `WattlineWidgets` scheme when run as their own test target, and all 275 non-UI cases passed as their own target. The failed environmental attempts are retained in `/tmp/wattline-m4-widgets.log`, `/tmp/wattline-m4-widgets-combined-final.log`, and their xcresults; no failure originated in Milestone 4 code.
+
+## Audit transcript
+
+Commands and raw output are in `/tmp/wattline-m4-audits.log` and `/tmp/wattline-m4-extra-audits.log`.
+
+- Core/UI `URLSession|NWBrowser|NWConnection|import Network|import Security`: no matches, exit 1.
+- WattlineUI source `import WattlineNetwork`: no matches, exit 1.
+- WattlineUI `Package.swift` `WattlineNetwork`: no matches, exit 1.
+- Deprecated routes `/device/action|/device/usbc-limit|/device/bypass-threshold|/device/schedules`: no matches, exit 1.
+- Admin-side `BLETransport|DeviceSession(|DeviceOperationBroker`: no matches, exit 1.
+- Milestone 5 `/api/v1/rules|/api/v1/device/ota`: no matches, exit 1.
+- Broad logging grep: exit 0 with 125 hits; every hit is the semantic false-positive substring `print` inside `Fingerprint`/`fingerprint`. Refined logging-call grep has no matches, exit 1.
+- UserDefaults-near-PIN/token/private-key: no matches, exit 1.
+- Forbidden contract/OEM diff: empty, exit 0.
+- `DeviceCommand.swift` and `RouterTransport.swift` diff from base: empty, exit 0; the six-argument initializer is unchanged.
+- `git diff --check d983528a..HEAD`: clean, exit 0.
+- Final status before this report: clean.
+
+## Deviations from the Step 0 plan
+
+- Task 16 adopted the live daemon’s exact stages (`idle/scanning/pairing/paired/error`) and its 0–6 ASCII-digit pairing PIN compatibility rule after verifying the router implementation. This corrects the initial plan’s too-strict six-or-empty interpretation without weakening the advanced BLE-PIN rule.
+- A daemon-owned 409 operation is adopted and polled to terminal state; DELETE is never retried. UI action composition uses both local and authoritative busy state.
+- Task 17 added strict BLE-PIN response/error reflection redaction and rejected unsupported running mode 2 before HTTP dispatch.
+- Task 18 split load and mutation generations, refreshed authoritative settings after `advanced_disabled`, and added a pure visibility-transition secret policy after independent review exposed lifecycle races not anticipated by the initial plan.
+- The final WattlineWidgets verification was decomposed into its two test targets because Xcode’s combined runner repeatedly hung or timed out in event synthesis. Both components executed green under the requested scheme; the app scheme also executed all 291 tests green in a single run.
+
+## External live-router/hardware checks
+
+Unit/simulator tests cannot prove:
+
+- physical BlueZ scan, pair, and unpair against a Link-Power;
+- empty-PIN retention of the router’s configured PIN;
+- real bypass-threshold and barrier-free authoritative readback;
+- real clock drift, sync, and `available:false` zero-BLE-I/O behavior;
+- running-mode and BLE-PIN effects on hardware;
+- live-daemon distinction between `advanced_disabled` and `capability_unsupported`.
+
+Milestone 4 stops here. No rules, macOS administration, Demo administration fixtures, OTA, or timers were added.
