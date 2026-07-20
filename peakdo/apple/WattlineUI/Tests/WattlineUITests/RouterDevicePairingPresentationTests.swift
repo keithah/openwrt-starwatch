@@ -14,8 +14,27 @@ final class RouterDevicePairingPresentationTests: XCTestCase {
     func testBusyTerminalAndErrorText() {
         XCTAssertEqual(RouterDevicePairingPresentation.statusText(stage: "scanning", target: nil, error: nil), "Scanning for Link-Power devices…")
         XCTAssertEqual(RouterDevicePairingPresentation.statusText(stage: "pairing", target: "AA", error: nil), "Pairing AA…")
-        XCTAssertEqual(RouterDevicePairingPresentation.statusText(stage: "connected", target: "AA", error: nil), "Connected to AA")
-        XCTAssertEqual(RouterDevicePairingPresentation.statusText(stage: "failed", target: nil, error: "pair_failed"), "Pairing failed.")
+        XCTAssertEqual(RouterDevicePairingPresentation.statusText(stage: "paired", target: "AA", error: nil), "Paired with AA")
+        XCTAssertEqual(RouterDevicePairingPresentation.statusText(stage: "error", target: nil, error: "pair_failed"), "Pairing failed.")
+    }
+
+    func testPINValidationMirrorsRouterCompatibilityContract() {
+        XCTAssertTrue(RouterDevicePairingPresentation.isValidPIN(""))
+        XCTAssertTrue(RouterDevicePairingPresentation.isValidPIN("7"))
+        XCTAssertTrue(RouterDevicePairingPresentation.isValidPIN("020555"))
+        XCTAssertFalse(RouterDevicePairingPresentation.isValidPIN("1234567"))
+        XCTAssertFalse(RouterDevicePairingPresentation.isValidPIN("１２３"))
+    }
+
+    func testBusyCompositionStructurallyOmitsConflictingActions() {
+        XCTAssertEqual(
+            RouterDevicePairingPresentation.actions(isBusy: true, hasSelection: true),
+            .init(showsScan: false, showsPair: false, showsUnpair: false)
+        )
+        XCTAssertEqual(
+            RouterDevicePairingPresentation.actions(isBusy: false, hasSelection: true),
+            .init(showsScan: true, showsPair: true, showsUnpair: true)
+        )
     }
 
     func testPresentationValuesCannotContainPIN() {

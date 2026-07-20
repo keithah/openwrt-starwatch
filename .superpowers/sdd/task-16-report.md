@@ -54,3 +54,51 @@
 
 - Physical BlueZ discovery, real Link-Power pair/unpair, RF RSSI changes, and
   router asynchronous error timing require a live router and power station.
+
+## Review correction wave
+
+### RED
+
+- `swift test --package-path peakdo/apple/WattlineNetwork --filter RouterDevicePairingTests`
+  exited 1 because the production stage enum had no `paired` case and
+  `scan(progress:)` did not exist. The new unpair-409, caller-cancellation,
+  progressive-status, and 0–6 digit PIN cases therefore could not compile.
+- `swift test --package-path peakdo/apple/WattlineUI --filter RouterDevicePairingPresentationTests`
+  exited 1 because the pure PIN predicate and structurally absent action
+  composition did not exist.
+- Captured logs: `/tmp/wattline-m4-task16-fix-network-red.log` and
+  `/tmp/wattline-m4-task16-fix-ui-red.log`.
+
+### GREEN
+
+- Focused WattlineNetwork pairing: 18/18, zero failures.
+- Full WattlineNetwork: 203/203, zero failures.
+- Focused WattlineUI pairing presentation: 5/5, zero failures.
+- Full WattlineUI: 50/50, zero failures.
+- Focused iOS `RouterAdministrationModelTests`: succeeded, including
+  `testDevicePairingPublishesProgressAndQuarantinesLateProgressAfterReplacement`.
+- Full Wattline iOS scheme on `Wattline-Tests-2`: 280 passing test cases,
+  zero failures; `** TEST SUCCEEDED **`.
+- Captured logs: `/tmp/wattline-m4-task16-fix-network-green3.log`,
+  `/tmp/wattline-m4-task16-fix-network-full2.log`,
+  `/tmp/wattline-m4-task16-fix-ui-green1.log`,
+  `/tmp/wattline-m4-task16-fix-ui-full.log`, and
+  `/tmp/wattline-m4-task16-fix-app-focused2.log`, and
+  `/tmp/wattline-m4-task16-fix-app-full2.log`.
+
+### Corrections
+
+- Aligned status decoding and fixtures to the live daemon's exact
+  `idle/scanning/pairing/paired/error` stages.
+- Propagated caller cancellation across credential reads, initial GET, POST,
+  and polling sleep; the client lifecycle `cancel()` remains independently
+  covered.
+- Added an authoritative progress callback for scan/pair/unpair polling and
+  generation-checked app-model publication, so stale progress cannot cross an
+  endpoint replacement.
+- Mirrored the router compatibility rule of empty or 1–6 ASCII digits in the
+  Network validation and pure UI predicate. Unicode digits and seven digits
+  are rejected.
+- A DELETE 409 performs exactly one authoritative status reread and never
+  retries the DELETE. While any operation is active, scan/pair/remove/select actions
+  are structurally absent from the SwiftUI tree rather than disabled.

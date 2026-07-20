@@ -263,21 +263,27 @@ final class RouterAdministrationModel {
     }
 
     func refreshDevicePairing() async {
-        await performDevicePairing { try await $0.status() }
+        await performDevicePairing { client, _ in try await client.status() }
     }
 
     func scanForLinkPower() async {
-        await performDevicePairing { try await $0.scan() }
+        await performDevicePairing { client, progress in
+            try await client.scan(progress: progress)
+        }
     }
 
     func pairLinkPower(mac: String, pin: String) async {
         // Deliberately capture no PIN in model state; the view clears its local
         // secure entry before this asynchronous dispatch.
-        await performDevicePairing { try await $0.pair(mac: mac, pin: pin) }
+        await performDevicePairing { client, progress in
+            try await client.pair(mac: mac, pin: pin, progress: progress)
+        }
     }
 
     func unpairLinkPower(mac: String) async {
-        await performDevicePairing { try await $0.unpair(mac: mac) }
+        await performDevicePairing { client, progress in
+            try await client.unpair(mac: mac, progress: progress)
+        }
     }
 
     func reloadHistory() async {
@@ -1058,7 +1064,10 @@ final class RouterAdministrationModel {
         "Token was revoked, but this device's local client credential could not be removed."
 
     private func performDevicePairing(
-        _ operation: (RouterDevicePairingClient) async throws -> RouterDevicePairingStatus
+        _ operation: (
+            RouterDevicePairingClient,
+            @escaping RouterDevicePairingProgress
+        ) async throws -> RouterDevicePairingStatus
     ) async {
         guard let client = devicePairingClient, host != nil else { return }
         let session = sessionGeneration
@@ -1072,13 +1081,22 @@ final class RouterAdministrationModel {
             }
         }
         do {
-            let status = try await operation(client)
+            let progress: RouterDevicePairingProgress = { [weak self, weak client] status in
+                guard let self, let client else { return }
+                await self.publishDevicePairingProgress(
+                    status,
+                    client: client,
+                    session: session,
+                    generation: generation
+                )
+            }
+            let status = try await operation(client, progress)
             guard sessionGeneration == session,
                   devicePairingGeneration == generation,
                   devicePairingClient === client
             else { return }
             devicePairingStatus = status
-            devicePairingError = status.stage == .failed
+            devicePairingError = status.stage == .error
                 ? "Link-Power pairing failed."
                 : nil
         } catch is CancellationError {
@@ -1093,6 +1111,22 @@ final class RouterAdministrationModel {
             guard sessionGeneration == session, devicePairingGeneration == generation else { return }
             devicePairingError = "Could not complete Link-Power pairing."
         }
+    }
+
+    private func publishDevicePairingProgress(
+        _ status: RouterDevicePairingStatus,
+        client: RouterDevicePairingClient,
+        session: UInt64,
+        generation: UInt64
+    ) {
+        guard sessionGeneration == session,
+              devicePairingGeneration == generation,
+              devicePairingClient === client
+        else { return }
+        devicePairingStatus = status
+        devicePairingError = status.stage == .error
+            ? "Link-Power pairing failed."
+            : nil
     }
 
     private func performAdmin<Value>(

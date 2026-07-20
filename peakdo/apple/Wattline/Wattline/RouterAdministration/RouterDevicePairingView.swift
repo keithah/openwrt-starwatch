@@ -18,6 +18,13 @@ struct RouterDevicePairingView: View {
         )
     }
 
+    private var actions: RouterDevicePairingActions {
+        RouterDevicePairingPresentation.actions(
+            isBusy: model.isDevicePairingRunning,
+            hasSelection: selectedMAC != nil
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let status = model.devicePairingStatus {
@@ -36,33 +43,34 @@ struct RouterDevicePairingView: View {
                         Text(row.detail).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if row.paired {
+                    if row.paired, actions.showsUnpair {
                         Button("Remove", role: .destructive) {
                             pin = ""
                             Task { await model.unpairLinkPower(mac: row.mac) }
                         }
-                    } else {
+                    } else if !row.paired, !model.isDevicePairingRunning {
                         Button("Select") { selectedMAC = row.mac }
                     }
                 }
             }
 
-            if let selectedMAC {
-                SecureField("Optional six-digit BLE PIN", text: $pin)
+            if let selectedMAC, actions.showsPair {
+                SecureField("Optional BLE PIN (up to six digits)", text: $pin)
                     .keyboardType(.numberPad)
                 Button("Pair selected device") {
                     let submittedPIN = pin
                     pin = ""
                     Task { await model.pairLinkPower(mac: selectedMAC, pin: submittedPIN) }
                 }
-                .disabled(model.isDevicePairingRunning || (!pin.isEmpty && (pin.count != 6 || !pin.allSatisfy(\.isNumber))))
+                .disabled(!RouterDevicePairingPresentation.isValidPIN(pin))
             }
 
-            Button(model.isDevicePairingRunning ? "Working…" : "Scan for Link-Power") {
-                pin = ""
-                Task { await model.scanForLinkPower() }
+            if actions.showsScan {
+                Button("Scan for Link-Power") {
+                    pin = ""
+                    Task { await model.scanForLinkPower() }
+                }
             }
-            .disabled(model.isDevicePairingRunning)
 
             if let error = model.devicePairingError {
                 Text(error).foregroundStyle(.orange)

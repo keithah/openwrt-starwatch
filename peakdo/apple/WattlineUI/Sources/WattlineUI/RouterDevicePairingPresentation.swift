@@ -21,6 +21,18 @@ public struct RouterPairingRow: Equatable, Sendable {
     public let paired: Bool
 }
 
+public struct RouterDevicePairingActions: Equatable, Sendable {
+    public let showsScan: Bool
+    public let showsPair: Bool
+    public let showsUnpair: Bool
+
+    public init(showsScan: Bool, showsPair: Bool, showsUnpair: Bool) {
+        self.showsScan = showsScan
+        self.showsPair = showsPair
+        self.showsUnpair = showsUnpair
+    }
+}
+
 public enum RouterDevicePairingPresentation {
     public static func rows(
         stage _: String,
@@ -43,9 +55,25 @@ public enum RouterDevicePairingPresentation {
         switch stage {
         case "scanning": "Scanning for Link-Power devices…"
         case "pairing": target.map { "Pairing \($0)…" } ?? "Pairing…"
-        case "connected": target.map { "Connected to \($0)" } ?? "Connected"
-        case "failed": error == nil ? "Pairing failed." : "Pairing failed."
+        case "paired": target.map { "Paired with \($0)" } ?? "Paired"
+        case "error": error == nil ? "Pairing failed." : "Pairing failed."
         default: "Ready"
         }
+    }
+
+    public static func isValidPIN(_ value: String) -> Bool {
+        value.isEmpty || ((1...6).contains(value.utf8.count)
+            && value.utf8.allSatisfy { (48...57).contains($0) })
+    }
+
+    public static func actions(
+        isBusy: Bool,
+        hasSelection: Bool
+    ) -> RouterDevicePairingActions {
+        .init(
+            showsScan: !isBusy,
+            showsPair: !isBusy && hasSelection,
+            showsUnpair: !isBusy
+        )
     }
 }

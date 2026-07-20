@@ -13,14 +13,14 @@ final class RouterAdministrationModelTests: XCTestCase {
             devicePairingResults: [
                 AdminScriptedHTTP.ok(administrationDevicePairingIdleJSON),
                 AdminScriptedHTTP.response(status: 202, #"{"status":"scanning"}"#),
-                AdminScriptedHTTP.ok(administrationDevicePairingConnectedJSON),
+                AdminScriptedHTTP.ok(administrationDevicePairingPairedJSON),
             ]
         )
         await fixture.model.begin(host: fixture.host)
 
         await fixture.model.scanForLinkPower()
 
-        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .connected)
+        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .paired)
         XCTAssertEqual(fixture.devicePairingHTTP.calls.map(\.token), [
             "wlt_client", "wlt_client", "wlt_client",
         ])
@@ -58,7 +58,7 @@ final class RouterAdministrationModelTests: XCTestCase {
             devicePairingResults: [
                 AdminScriptedHTTP.ok(administrationDevicePairingIdleJSON),
                 AdminScriptedHTTP.response(status: 202, #"{"status":"pairing"}"#),
-                AdminScriptedHTTP.ok(administrationDevicePairingConnectedJSON),
+                AdminScriptedHTTP.ok(administrationDevicePairingPairedJSON),
             ],
             devicePairingGateRequests: true
         )
@@ -74,8 +74,40 @@ final class RouterAdministrationModelTests: XCTestCase {
         await fixture.devicePairingHTTP.waitForGateRegistration(); fixture.devicePairingHTTP.releaseGates()
         await pair.value
 
-        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .connected)
+        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .paired)
         XCTAssertFalse(String(reflecting: fixture.model).contains("020555"))
+    }
+
+    func testDevicePairingPublishesProgressAndQuarantinesLateProgressAfterReplacement() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            devicePairingResults: [
+                AdminScriptedHTTP.ok(administrationDevicePairingIdleJSON),
+                AdminScriptedHTTP.response(status: 202, #"{"status":"scanning"}"#),
+                AdminScriptedHTTP.ok(#"{"stage":"scanning","devices":[]}"#),
+                AdminScriptedHTTP.ok(administrationDevicePairingPairedJSON),
+            ],
+            devicePairingGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+        let scan = Task { await fixture.model.scanForLinkPower() }
+        await fixture.devicePairingHTTP.waitForGateRegistration(); fixture.devicePairingHTTP.releaseNewestGate()
+        await fixture.devicePairingHTTP.waitForGateRegistration(); fixture.devicePairingHTTP.releaseNewestGate()
+        await fixture.devicePairingHTTP.waitForGateRegistration(); fixture.devicePairingHTTP.releaseNewestGate()
+        await fixture.devicePairingHTTP.waitForGateRegistration()
+        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .scanning)
+
+        let replacement = try RouterHostValidator.validate(
+            "https://replacement.local:8378", displayName: "Replacement",
+            reachability: .lan, allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: String(repeating: "1", count: 64)
+        )
+        await fixture.model.begin(host: replacement)
+        fixture.devicePairingHTTP.releaseGates()
+        await scan.value
+        XCTAssertEqual(fixture.model.host, replacement)
+        XCTAssertNil(fixture.model.devicePairingStatus)
     }
 
     func testRotateStagesReturnedPinWithoutReplacingActivePinAndShowsRestart() async throws {
@@ -3268,8 +3300,8 @@ private actor AdministrationPairingClock: RouterConnectionClock {
 
 private let administrationDevicePairingIdleJSON =
     #"{"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-57,"paired":false}]}"#
-private let administrationDevicePairingConnectedJSON =
-    #"{"stage":"connected","target":"DC:04:5A:EB:72:2B","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-48,"paired":true}]}"#
+private let administrationDevicePairingPairedJSON =
+    #"{"stage":"paired","target":"DC:04:5A:EB:72:2B","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-48,"paired":true}]}"#
 
 private final class AdministrationRouterDiscoverySource: RouterDiscoverySource, @unchecked Sendable {
     private let lock = NSLock()

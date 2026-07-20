@@ -24,10 +24,10 @@ final class RouterDevicePairingTests: XCTestCase {
         let (client, http) = try await makeClient(results: [
             ScriptedRouterHTTPClient.ok(idle),
             ScriptedRouterHTTPClient.response(status: 202, scanAccepted),
-            ScriptedRouterHTTPClient.ok(scanning), ScriptedRouterHTTPClient.ok(connected),
+            ScriptedRouterHTTPClient.ok(scanning), ScriptedRouterHTTPClient.ok(paired),
         ], clock: clock)
         let status = try await client.scan()
-        XCTAssertEqual(status.stage, .connected)
+        XCTAssertEqual(status.stage, .paired)
         XCTAssertEqual(http.calls.map { ($0.method, $0.path) }.map { "\($0.0) \($0.1)" }, [
             "GET /api/v1/pairing/status", "POST /api/v1/pairing/scan",
             "GET /api/v1/pairing/status", "GET /api/v1/pairing/status",
@@ -36,11 +36,11 @@ final class RouterDevicePairingTests: XCTestCase {
     }
 
     func testPairNormalizesMACAndSendsExactPINIncludingEmptyPIN() async throws {
-        for pin in ["020555", ""] {
+        for pin in ["020555", "7", ""] {
             let (client, http) = try await makeClient(results: [
                 ScriptedRouterHTTPClient.ok(idle),
                 ScriptedRouterHTTPClient.response(status: 202, pairAccepted),
-                ScriptedRouterHTTPClient.ok(connected),
+                ScriptedRouterHTTPClient.ok(paired),
             ])
             _ = try await client.pair(mac: "dc-04-5a-eb-72-2b", pin: pin)
             XCTAssertEqual(http.calls[1].body,
@@ -51,10 +51,10 @@ final class RouterDevicePairingTests: XCTestCase {
 
     func testExistingActivityIsAdoptedWithoutSecondPOST() async throws {
         let (client, http) = try await makeClient(results: [
-            ScriptedRouterHTTPClient.ok(pairing), ScriptedRouterHTTPClient.ok(connected),
+            ScriptedRouterHTTPClient.ok(pairing), ScriptedRouterHTTPClient.ok(paired),
         ])
         let value = try await client.scan()
-        XCTAssertEqual(value.stage, .connected)
+        XCTAssertEqual(value.stage, .paired)
         XCTAssertEqual(http.calls.map(\.method), ["GET", "GET"])
     }
 
@@ -62,10 +62,10 @@ final class RouterDevicePairingTests: XCTestCase {
         let (client, http) = try await makeClient(results: [
             ScriptedRouterHTTPClient.ok(idle),
             .failure(NetworkError.api(status: 409, code: .operationInProgress, message: "busy")),
-            ScriptedRouterHTTPClient.ok(pairing), ScriptedRouterHTTPClient.ok(connected),
+            ScriptedRouterHTTPClient.ok(pairing), ScriptedRouterHTTPClient.ok(paired),
         ])
         let status = try await client.scan()
-        XCTAssertEqual(status.stage, .connected)
+        XCTAssertEqual(status.stage, .paired)
         XCTAssertEqual(http.calls.map(\.method), ["GET", "POST", "GET", "GET"])
     }
 
@@ -97,11 +97,21 @@ final class RouterDevicePairingTests: XCTestCase {
         XCTAssertNil(http.calls[0].body)
     }
 
+    func testUnpairOperationInProgressAdoptsOneStatusReadWithoutRetryingDelete() async throws {
+        let (client, http) = try await makeClient(results: [
+            .failure(NetworkError.api(status: 409, code: .operationInProgress, message: "busy")),
+            ScriptedRouterHTTPClient.ok(pairing),
+        ])
+        let status = try await client.unpair(mac: "dc045aeb722b")
+        XCTAssertEqual(status.stage, .pairing)
+        XCTAssertEqual(http.calls.map(\.method), ["DELETE", "GET"])
+    }
+
     func testInvalidMACOrPINFailsBeforeCredentialOrHTTPAccess() async throws {
         let (client, http) = try await makeClient(results: [])
         do { _ = try await client.pair(mac: "bad", pin: ""); XCTFail() }
         catch { XCTAssertEqual(error as? RouterDevicePairingError, .invalidMAC) }
-        do { _ = try await client.pair(mac: "DC:04:5A:EB:72:2B", pin: "123"); XCTFail() }
+        do { _ = try await client.pair(mac: "DC:04:5A:EB:72:2B", pin: "1234567"); XCTFail() }
         catch { XCTAssertEqual(error as? RouterDevicePairingError, .invalidPIN) }
         do { _ = try await client.pair(mac: "DC:04:5A:EB:72:2B", pin: "１２３４５６"); XCTFail() }
         catch { XCTAssertEqual(error as? RouterDevicePairingError, .invalidPIN) }
@@ -109,7 +119,7 @@ final class RouterDevicePairingTests: XCTestCase {
     }
 
     func testFailedStageSanitizesUnexpectedError() async throws {
-        let unsafe = #"{"stage":"failed","devices":[],"error":"secret token=abc!"}"#
+        let unsafe = #"{"stage":"error","devices":[],"error":"secret token=abc!"}"#
         let (client, _) = try await makeClient(results: [ScriptedRouterHTTPClient.ok(unsafe)])
         let status = try await client.status()
         XCTAssertEqual(status.error, "pair_failed")
@@ -119,7 +129,7 @@ final class RouterDevicePairingTests: XCTestCase {
         let http = ScriptedRouterHTTPClient(results: [
             ScriptedRouterHTTPClient.ok(idle),
             ScriptedRouterHTTPClient.response(status: 202, scanAccepted),
-            ScriptedRouterHTTPClient.ok(connected),
+            ScriptedRouterHTTPClient.ok(paired),
         ], gateRequests: true)
         let store = RouterCredentialStore(backend: AdministrationCredentialBackend())
         try await store.saveToken("managed-client", for: endpoint)
@@ -170,6 +180,85 @@ final class RouterDevicePairingTests: XCTestCase {
         XCTAssertEqual(http.calls.count, 1)
     }
 
+    func testCallerCancellationStopsAnInjectedPollingSleep() async throws {
+        let clock = SuspendedPairingClock()
+        let (client, http) = try await makeClient(
+            results: [ScriptedRouterHTTPClient.ok(scanning)], clock: clock
+        )
+        let operation = Task { try await client.scan() }
+        let isSleeping = await clock.waitUntilSleeping()
+        XCTAssertTrue(isSleeping)
+        operation.cancel()
+        do { _ = try await operation.value; XCTFail("expected caller cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(http.calls.count, 1)
+    }
+
+    func testCallerCancellationDuringInitialGETIsPropagatedAfterTheRequestUnblocks() async throws {
+        let http = ScriptedRouterHTTPClient(
+            results: [ScriptedRouterHTTPClient.ok(idle)], gateRequests: true
+        )
+        let store = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await store.saveToken("managed-client", for: endpoint)
+        let client = RouterDevicePairingClient(
+            endpoint: endpoint, credentials: store, http: http,
+            clock: ImmediatePairingClock()
+        )
+        let operation = Task { try await client.scan() }
+        await http.waitForGateRegistration()
+        operation.cancel()
+        http.releaseGates()
+        do { _ = try await operation.value; XCTFail("expected caller cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    func testCallerCancellationDuringPOSTIsPropagatedAfterTheRequestUnblocks() async throws {
+        let http = ScriptedRouterHTTPClient(results: [
+            ScriptedRouterHTTPClient.ok(idle),
+            ScriptedRouterHTTPClient.response(status: 202, scanAccepted),
+        ], gateRequests: true)
+        let store = RouterCredentialStore(backend: AdministrationCredentialBackend())
+        try await store.saveToken("managed-client", for: endpoint)
+        let client = RouterDevicePairingClient(
+            endpoint: endpoint, credentials: store, http: http,
+            clock: ImmediatePairingClock()
+        )
+        let operation = Task { try await client.scan() }
+        await http.waitForGateRegistration(); http.releaseNextGate()
+        await http.waitForGateRegistration()
+        operation.cancel()
+        http.releaseGates()
+        do { _ = try await operation.value; XCTFail("expected caller cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    func testCallerCancellationDuringCredentialReadIsPropagated() async throws {
+        let backend = GatedPairingCredentialBackend(token: "managed-client")
+        let client = RouterDevicePairingClient(
+            endpoint: endpoint, credentials: RouterCredentialStore(backend: backend),
+            http: ScriptedRouterHTTPClient(results: []), clock: ImmediatePairingClock()
+        )
+        let operation = Task { try await client.status() }
+        await backend.waitUntilReading()
+        operation.cancel()
+        await backend.releaseRead()
+        do { _ = try await operation.value; XCTFail("expected caller cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    func testScanPublishesEveryAuthoritativeProgressStatus() async throws {
+        let (client, _) = try await makeClient(results: [
+            ScriptedRouterHTTPClient.ok(idle),
+            ScriptedRouterHTTPClient.response(status: 202, scanAccepted),
+            ScriptedRouterHTTPClient.ok(scanning), ScriptedRouterHTTPClient.ok(paired),
+        ])
+        let recorder = PairingProgressRecorder()
+        let terminal = try await client.scan { await recorder.append($0) }
+        let stages = await recorder.stages
+        XCTAssertEqual(stages, [.idle, .scanning, .paired])
+        XCTAssertEqual(terminal.stage, .paired)
+    }
+
     private func makeClient(
         results: [Result<(Data, HTTPURLResponse), Error>],
         clock: any RouterConnectionClock = ImmediatePairingClock(),
@@ -188,10 +277,39 @@ final class RouterDevicePairingTests: XCTestCase {
     private var idle: String { #"{"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-57,"paired":false}]}"# }
     private var scanning: String { #"{"stage":"scanning","target":null,"devices":[]}"# }
     private var pairing: String { #"{"stage":"pairing","target":"DC:04:5A:EB:72:2B","devices":[]}"# }
-    private var connected: String { #"{"stage":"connected","target":"DC:04:5A:EB:72:2B","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-48,"paired":true}]}"# }
+    private var paired: String { #"{"stage":"paired","target":"DC:04:5A:EB:72:2B","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-48,"paired":true}]}"# }
     private var scanAccepted: String { #"{"status":"scanning"}"# }
     private var pairAccepted: String { #"{"status":"pairing"}"# }
     private var removed: String { #"{"status":"removed"}"# }
+}
+
+private actor PairingProgressRecorder {
+    private var values: [RouterDevicePairingStage] = []
+    var stages: [RouterDevicePairingStage] { values }
+    func append(_ status: RouterDevicePairingStatus) { values.append(status.stage) }
+}
+
+private actor GatedPairingCredentialBackend: RouterCredentialBackend {
+    private let token: Data
+    private var readStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var readGate: CheckedContinuation<Void, Never>?
+
+    init(token: String) { self.token = Data(token.utf8) }
+    func read(account: String) async throws -> Data? {
+        readStarted = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters = []
+        await withCheckedContinuation { readGate = $0 }
+        return token
+    }
+    func save(_ data: Data, account: String) async throws {}
+    func delete(account: String) async throws {}
+    func waitUntilReading() async {
+        if readStarted { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+    func releaseRead() { readGate?.resume(); readGate = nil }
 }
 
 private actor ImmediatePairingClock: RouterConnectionClock {
