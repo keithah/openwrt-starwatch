@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import WattlineCore
 import WattlineNetwork
 import WattlineUI
 
@@ -72,6 +73,11 @@ final class RouterAdministrationModel {
     private(set) var devicePairingStatus: RouterDevicePairingStatus?
     private(set) var devicePairingError: String?
     private(set) var isDevicePairingRunning = false
+    private(set) var advancedIdentity: RouterDeviceDTO?
+    private(set) var advancedValues = RouterAdvancedValues()
+    private(set) var advancedError: String?
+    private(set) var isAdvancedLoading = false
+    private(set) var isAdvancedMutationRunning = false
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
@@ -92,6 +98,9 @@ final class RouterAdministrationModel {
     private var replacementRequestGeneration: UInt64 = 0
     private var tlsRequestGeneration: UInt64 = 0
     private var devicePairingGeneration: UInt64 = 0
+    private var advancedRequestGeneration: UInt64 = 0
+    private var unsupportedAdvancedSurfaces: Set<RouterAdvancedSurface> = []
+    private var advancedServerGate: RouterAdvancedServerGate = .allowed
     private var devicePairingClient: RouterDevicePairingClient?
     private var pairingExpiryTask: Task<Void, Never>?
 
@@ -99,6 +108,28 @@ final class RouterAdministrationModel {
         isDevicePairingRunning
             || devicePairingStatus?.stage == .scanning
             || devicePairingStatus?.stage == .pairing
+    }
+
+    var advancedVisibility: RouterAdvancedVisibility {
+        guard let settings else {
+            return RouterAdvancedVisibility(
+                surfaces: [],
+                showsEnableAdvancedAffordance: false
+            )
+        }
+        let features = FeatureFlags(rawValue: advancedIdentity?.featuresRaw ?? 0)
+        return RouterAdvancedVisibility.evaluate(RouterAdvancedVisibilityInput(
+            adminVerified: access == .unlocked,
+            advanced: settings.advanced,
+            mode: advancedIdentity?.mode == "app" ? .application : .ota,
+            hasFactoryMode: features.contains(.factoryMode),
+            hasBypassControl: features.contains(.dcBypassControl),
+            currentTimeAvailable: advancedIdentity?.available.currentTime == true,
+            dcAvailable: advancedIdentity?.available.dc == true,
+            usbAvailable: advancedIdentity?.available.usbc == true,
+            unsupported: unsupportedAdvancedSurfaces,
+            serverGate: advancedServerGate
+        ))
     }
     private var settingsRestartRequiredHosts: Set<UUID> = []
     private var validatedReplacementLease: ValidatedReplacementLease?
@@ -292,6 +323,120 @@ final class RouterAdministrationModel {
         }
     }
 
+    func reloadAdvanced() async {
+        guard host != nil, access == .unlocked else { return }
+        advancedRequestGeneration &+= 1
+        let request = advancedRequestGeneration
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
+        isAdvancedLoading = true
+        advancedError = nil
+        let result: AdvancedResult<(RouterSettings, RouterDeviceDTO)> = await performAdvanced {
+            let settings = try await $0.settings()
+            let identity = try await $0.advancedIdentity()
+            return (settings, identity)
+        }
+        guard isCurrentAdvancedOperation(
+            session: session,
+            adminOperation: adminOperation,
+            request: request
+        ) else { return }
+        isAdvancedLoading = false
+        switch result {
+        case let .success((authoritativeSettings, identity)):
+            settings = authoritativeSettings
+            advancedServerGate = .allowed
+            if authoritativeSettings.advanced {
+                advancedIdentity = identity
+            } else {
+                advancedIdentity = nil
+                clearAdvancedValues()
+            }
+        case .advancedDisabled:
+            advancedServerGate = .advancedDisabled
+            clearAdvancedValues()
+        case .capabilityUnsupported, .failure:
+            advancedError = "Could not load advanced device controls."
+        case .stale:
+            break
+        }
+    }
+
+    func loadAdvancedBypassThreshold() async {
+        await performAdvancedSurface(.bypassThreshold) { try await $0.bypassThreshold() } publish: {
+            self.publishAdvancedValue(.bypassThreshold($0.volts))
+        }
+    }
+
+    func setAdvancedBypassThreshold(volts: Double) async {
+        await performAdvancedSurface(.bypassThreshold) {
+            try await $0.setBypassThreshold(volts: volts)
+        } publish: {
+            self.publishAdvancedValue(.bypassThreshold($0.volts))
+        }
+    }
+
+    func loadAdvancedClock() async {
+        await performAdvancedSurface(.clock) { try await $0.deviceClock() } publish: {
+            self.publishAdvancedValue(.clock(Self.clockValue($0)))
+        }
+    }
+
+    func syncAdvancedClock() async {
+        await performAdvancedSurface(.clock) { client in
+            _ = try await client.syncDeviceClock()
+            return try await client.deviceClock()
+        } publish: {
+            self.publishAdvancedValue(.clock(Self.clockValue($0)))
+        }
+    }
+
+    func setAdvancedRunningMode(
+        _ mode: UInt8,
+        confirmation: RouterAdvancedConfirmation?
+    ) async {
+        guard confirmation == .runningMode else { return }
+        await performAdvancedSurface(.runningMode) { try await $0.setRunningMode(mode) } publish: {
+            self.publishAdvancedValue(.runningMode($0.mode))
+        }
+    }
+
+    func loadAdvancedBarrierFree() async {
+        await performAdvancedSurface(.barrierFree) { try await $0.barrierFree() } publish: {
+            self.publishAdvancedValue(.barrierFree($0.enabled))
+        }
+    }
+
+    func setAdvancedBarrierFree(_ enabled: Bool) async {
+        await performAdvancedSurface(.barrierFree) {
+            try await $0.setBarrierFree(enabled)
+        } publish: {
+            self.publishAdvancedValue(.barrierFree($0.enabled))
+        }
+    }
+
+    func loadAdvancedUSBFirmware() async {
+        await performAdvancedSurface(.usbFirmware) { try await $0.usbFirmwareVersion() } publish: {
+            self.publishAdvancedValue(.usbFirmware(RouterAdvancedUSBFirmwareValue(
+                raw: $0.raw,
+                major: $0.major,
+                minor: $0.minor,
+                patch: $0.patch
+            )))
+        }
+    }
+
+    func setAdvancedBLEPIN(
+        _ pin: String,
+        confirmation: RouterAdvancedConfirmation?
+    ) async {
+        guard confirmation == .blePIN else { return }
+        // The secret is captured only by this call and is never assigned to model state.
+        await performAdvancedSurface(.blePIN) { try await $0.setBLEPIN(pin) } publish: {
+            self.publishAdvancedValue(.blePINUpdated($0.updated))
+        }
+    }
+
     func reloadHistory() async {
         guard let host else { return }
         let generation = sessionGeneration
@@ -383,6 +528,10 @@ final class RouterAdministrationModel {
         case let .success(value):
             settings = value
             settingsError = nil
+            if !value.advanced {
+                advancedIdentity = nil
+                clearAdvancedValues()
+            }
             invalidateReplacementValidation()
         case let .failure(message):
             settingsError = message
@@ -1018,6 +1167,23 @@ final class RouterAdministrationModel {
         case stale
     }
 
+    private enum AdvancedResult<Value> {
+        case success(Value)
+        case advancedDisabled
+        case capabilityUnsupported
+        case failure
+        case stale
+    }
+
+    private enum AdvancedValueUpdate {
+        case bypassThreshold(Double)
+        case clock(RouterAdvancedClockValue)
+        case runningMode(UInt8)
+        case barrierFree(Bool)
+        case usbFirmware(RouterAdvancedUSBFirmwareValue)
+        case blePINUpdated(Bool)
+    }
+
     private func publishTokenResult(_ result: AdminResult<[RouterTokenMetadata]>) {
         switch result {
         case let .success(list):
@@ -1136,6 +1302,177 @@ final class RouterAdministrationModel {
             : nil
     }
 
+    private func performAdvanced<Value>(
+        _ operation: (RouterAdministrationClient) async throws -> Value
+    ) async -> AdvancedResult<Value> {
+        guard host != nil, access == .unlocked else { return .stale }
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
+        do {
+            let value = try await operation(adminClient)
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation,
+                  access == .unlocked
+            else { return .stale }
+            return .success(value)
+        } catch is CancellationError {
+            return .stale
+        } catch NetworkError.api(403, .advancedDisabled, _) {
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation,
+                  access == .unlocked
+            else { return .stale }
+            return .advancedDisabled
+        } catch NetworkError.api(409, .capabilityUnsupported, _) {
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation,
+                  access == .unlocked
+            else { return .stale }
+            return .capabilityUnsupported
+        } catch {
+            guard sessionGeneration == session,
+                  adminOperationGeneration == adminOperation,
+                  access == .unlocked
+            else { return .stale }
+            if handleAdminFailure(error) {
+                try? await adminClient.clearAdministratorCredential()
+                return .stale
+            }
+            return .failure
+        }
+    }
+
+    private func performAdvancedSurface<Value>(
+        _ surface: RouterAdvancedSurface,
+        operation: (RouterAdministrationClient) async throws -> Value,
+        publish: (Value) -> Void
+    ) async {
+        guard advancedVisibility.surfaces.contains(surface),
+              !isAdvancedMutationRunning
+        else { return }
+        advancedRequestGeneration &+= 1
+        let request = advancedRequestGeneration
+        let session = sessionGeneration
+        let adminOperation = adminOperationGeneration
+        isAdvancedMutationRunning = true
+        advancedError = nil
+        let result = await performAdvanced(operation)
+        guard isCurrentAdvancedOperation(
+            session: session,
+            adminOperation: adminOperation,
+            request: request
+        ) else { return }
+        isAdvancedMutationRunning = false
+        switch result {
+        case let .success(value):
+            publish(value)
+        case .advancedDisabled:
+            advancedServerGate = .advancedDisabled
+            clearAdvancedValues()
+        case .capabilityUnsupported:
+            unsupportedAdvancedSurfaces.insert(surface)
+            await reloadAdvanced()
+        case .failure:
+            advancedError = "The advanced device request failed. Try again."
+        case .stale:
+            break
+        }
+    }
+
+    private func isCurrentAdvancedOperation(
+        session: UInt64,
+        adminOperation: UInt64,
+        request: UInt64
+    ) -> Bool {
+        sessionGeneration == session
+            && adminOperationGeneration == adminOperation
+            && advancedRequestGeneration == request
+            && access == .unlocked
+    }
+
+    private func publishAdvancedValue(_ update: AdvancedValueUpdate) {
+        switch update {
+        case let .bypassThreshold(value):
+            advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: value,
+                clock: advancedValues.clock,
+                runningMode: advancedValues.runningMode,
+                barrierFreeEnabled: advancedValues.barrierFreeEnabled,
+                usbFirmware: advancedValues.usbFirmware,
+                blePINUpdated: advancedValues.blePINUpdated
+            )
+        case let .clock(value):
+            advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: advancedValues.bypassThresholdVolts,
+                clock: value,
+                runningMode: advancedValues.runningMode,
+                barrierFreeEnabled: advancedValues.barrierFreeEnabled,
+                usbFirmware: advancedValues.usbFirmware,
+                blePINUpdated: advancedValues.blePINUpdated
+            )
+        case let .runningMode(value):
+            advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: advancedValues.bypassThresholdVolts,
+                clock: advancedValues.clock,
+                runningMode: value,
+                barrierFreeEnabled: advancedValues.barrierFreeEnabled,
+                usbFirmware: advancedValues.usbFirmware,
+                blePINUpdated: advancedValues.blePINUpdated
+            )
+        case let .barrierFree(value):
+            advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: advancedValues.bypassThresholdVolts,
+                clock: advancedValues.clock,
+                runningMode: advancedValues.runningMode,
+                barrierFreeEnabled: value,
+                usbFirmware: advancedValues.usbFirmware,
+                blePINUpdated: advancedValues.blePINUpdated
+            )
+        case let .usbFirmware(value):
+            advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: advancedValues.bypassThresholdVolts,
+                clock: advancedValues.clock,
+                runningMode: advancedValues.runningMode,
+                barrierFreeEnabled: advancedValues.barrierFreeEnabled,
+                usbFirmware: value,
+                blePINUpdated: advancedValues.blePINUpdated
+            )
+        case let .blePINUpdated(value):
+            advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: advancedValues.bypassThresholdVolts,
+                clock: advancedValues.clock,
+                runningMode: advancedValues.runningMode,
+                barrierFreeEnabled: advancedValues.barrierFreeEnabled,
+                usbFirmware: advancedValues.usbFirmware,
+                blePINUpdated: value
+            )
+        }
+    }
+
+    private static func clockValue(_ value: RouterDeviceClockStatus) -> RouterAdvancedClockValue {
+        RouterAdvancedClockValue(
+            available: value.available,
+            deviceTime: value.deviceTime,
+            systemTime: value.systemTime,
+            driftSeconds: value.driftSeconds
+        )
+    }
+
+    private func clearAdvancedValues() {
+        advancedValues = RouterAdvancedValues()
+    }
+
+    private func clearAdvancedState() {
+        advancedRequestGeneration &+= 1
+        advancedIdentity = nil
+        clearAdvancedValues()
+        advancedError = nil
+        isAdvancedLoading = false
+        isAdvancedMutationRunning = false
+        unsupportedAdvancedSurfaces = []
+        advancedServerGate = .allowed
+    }
+
     private func performAdmin<Value>(
         _ operation: (RouterAdministrationClient) async throws -> Value,
         isCurrent: () -> Bool = { true }
@@ -1229,6 +1566,10 @@ final class RouterAdministrationModel {
         source: RouterHostMetadata
     ) {
         settings = value.settings
+        if !value.settings.advanced {
+            clearAdvancedValues()
+            advancedIdentity = nil
+        }
         if value.restartRequired {
             settingsRestartRequiredHosts.insert(source.id)
         }
@@ -1271,6 +1612,7 @@ final class RouterAdministrationModel {
         isTLSRotationRunning = false
         isTLSPromotionRunning = false
         tlsPromotionRecoveryAvailable = false
+        clearAdvancedState()
     }
 
     private static func unlockMessage(for error: Error) -> String {

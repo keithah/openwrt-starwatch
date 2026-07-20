@@ -109,6 +109,7 @@ struct RouterAdministrationView: View {
 
                 if presentation.visibleSections.contains(.routerConfiguration) {
                     RouterSettingsView(model: admin)
+                    RouterAdvancedView(model: admin)
                 }
 
                 if let message = admin.adminError {

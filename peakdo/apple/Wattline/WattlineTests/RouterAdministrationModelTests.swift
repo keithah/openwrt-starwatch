@@ -7,6 +7,137 @@ import XCTest
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testAdvancedStateAppearsOnlyAfterAdminSettingsIdentityGates() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
+            AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.isEmpty)
+
+        await fixture.model.unlock(token: "boot-admin")
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.isEmpty)
+        await fixture.model.reloadAdvanced()
+
+        XCTAssertEqual(
+            fixture.model.advancedVisibility.surfaces,
+            Set(RouterAdvancedSurface.allCases)
+        )
+        XCTAssertEqual(fixture.http.calls.suffix(2).map(\.path), [
+            "/api/v1/settings", "/api/v1/device",
+        ])
+    }
+
+    func testThresholdAndBarrierPublishOnlyObservedResponse() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            AdminScriptedHTTP.ok(#"{"volts":19.5}"#),
+            AdminScriptedHTTP.ok(#"{"enabled":false}"#),
+        ])
+
+        await fixture.model.setAdvancedBypassThreshold(volts: 19.6)
+        await fixture.model.setAdvancedBarrierFree(true)
+
+        XCTAssertEqual(fixture.model.advancedValues.bypassThresholdVolts, 19.5)
+        XCTAssertEqual(fixture.model.advancedValues.barrierFreeEnabled, false)
+    }
+
+    func testAdvancedDisabledPublishesSettingsEditorAffordance() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            .failure(NetworkError.api(
+                status: 403,
+                code: .advancedDisabled,
+                message: "Advanced API access is disabled"
+            )),
+        ])
+
+        await fixture.model.setAdvancedBypassThreshold(volts: 19.6)
+
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.isEmpty)
+        XCTAssertTrue(fixture.model.advancedVisibility.showsEnableAdvancedAffordance)
+    }
+
+    func testCapabilityUnsupportedRemovesOnlyAffectedSurfaceAfterRefresh() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            .failure(NetworkError.api(
+                status: 409,
+                code: .capabilityUnsupported,
+                message: "Barrier-free is unsupported"
+            )),
+            AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
+            AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
+        ])
+
+        await fixture.model.setAdvancedBarrierFree(true)
+
+        XCTAssertFalse(fixture.model.advancedVisibility.surfaces.contains(.barrierFree))
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.contains(.runningMode))
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.contains(.blePIN))
+        XCTAssertEqual(fixture.http.calls.suffix(2).map(\.path), [
+            "/api/v1/settings", "/api/v1/device",
+        ])
+    }
+
+    func testLateAdvancedMutationAfterHostReplacementPublishesNothing() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            AdminScriptedHTTP.ok(#"{"volts":19.5}"#),
+        ])
+        fixture.http.gateNextRequest()
+        let mutation = Task { await fixture.model.setAdvancedBypassThreshold(volts: 19.6) }
+        await fixture.http.waitForGateRegistration()
+        let replacement = try RouterHostValidator.validate(
+            "https://replacement.local:8378",
+            displayName: "Replacement router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: String(repeating: "1", count: 64)
+        )
+
+        await fixture.model.begin(host: replacement)
+        fixture.http.releaseGates()
+        await mutation.value
+
+        XCTAssertEqual(fixture.model.host, replacement)
+        XCTAssertNil(fixture.model.advancedValues.bypassThresholdVolts)
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.isEmpty)
+    }
+
+    func testBLEPINClearsBeforeAwaitAndIsNotRetainedOrReflected() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            AdminScriptedHTTP.ok(#"{"updated":true}"#),
+        ])
+        let initialCallCount = fixture.http.calls.count
+
+        await fixture.model.setAdvancedBLEPIN("020555", confirmation: nil)
+        XCTAssertEqual(fixture.http.calls.count, initialCallCount)
+
+        fixture.http.gateNextRequest()
+        let update = Task {
+            await fixture.model.setAdvancedBLEPIN("020555", confirmation: .blePIN)
+        }
+        await fixture.http.waitForGateRegistration()
+        XCTAssertFalse(String(reflecting: fixture.model).contains("020555"))
+        fixture.http.releaseGates()
+        await update.value
+
+        XCTAssertTrue(fixture.model.advancedValues.blePINUpdated == true)
+        XCTAssertFalse(String(reflecting: fixture.model).contains("020555"))
+    }
+
+    func testRunningModeDoesNotDispatchBeforePurposeSpecificConfirmation() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            AdminScriptedHTTP.ok(#"{"mode":1}"#),
+        ])
+        let initialCallCount = fixture.http.calls.count
+
+        await fixture.model.setAdvancedRunningMode(1, confirmation: nil)
+        XCTAssertEqual(fixture.http.calls.count, initialCallCount)
+
+        await fixture.model.setAdvancedRunningMode(1, confirmation: .runningMode)
+        XCTAssertEqual(fixture.model.advancedValues.runningMode, 1)
+    }
+
     func testDevicePairingPublishesAuthoritativeTerminalStatusWithClientCredential() async throws {
         let fixture = try await makeFixture(
             results: [],
@@ -3319,6 +3450,22 @@ private let administrationDevicePairingIdleJSON =
 private let administrationDevicePairingPairedJSON =
     #"{"stage":"paired","target":"DC:04:5A:EB:72:2B","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-48,"paired":true}]}"#
 
+private let administrationAdvancedIdentityJSON = #"""
+{
+  "id":"DC:04:5A:EB:72:2B",
+  "model":"BP4SL3V1",
+  "hardware_revision":"1",
+  "application_firmware":"1.2.3",
+  "ota_firmware":"1.0.0",
+  "cid":257,
+  "features_raw":12578,
+  "available":{"current_time":true,"ota":true,"dc":true,"usbc":true},
+  "mode":"app",
+  "connection":{"connected":true,"phase":"ready","reconnect":"idle"},
+  "magic_dns_name":"wattline.local"
+}
+"""#
+
 private final class AdministrationRouterDiscoverySource: RouterDiscoverySource, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AsyncStream<[RouterServiceRecord]>.Continuation?
@@ -3482,6 +3629,21 @@ private func makeFixture(
         adminHTTPFactory: adminHTTPFactory,
         devicePairingHTTP: devicePairingHTTP
     )
+}
+
+@MainActor
+private func makeAdvancedFixture(
+    extraResults: [Result<(Data, HTTPURLResponse), Error>]
+) async throws -> AdministrationFixture {
+    let fixture = try await makeFixture(results: [
+        AdminScriptedHTTP.ok("{}"),
+        AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
+        AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
+    ] + extraResults)
+    await fixture.model.begin(host: fixture.host)
+    await fixture.model.unlock(token: "boot-admin")
+    await fixture.model.reloadAdvanced()
+    return fixture
 }
 
 private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
