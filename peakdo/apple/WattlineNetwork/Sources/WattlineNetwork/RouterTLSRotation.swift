@@ -75,7 +75,7 @@ public actor RouterTLSPinPromoter {
         guard let host = await hostStore.hosts().first(where: { $0.id == hostID }),
               host.scheme == "https",
               let active = host.certificateFingerprint,
-              let expectedID = host.deviceID
+              let expectedID = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID)
         else { throw RouterTLSPromotionError.invalidHost }
         guard let staged = host.stagedCertificateFingerprint else {
             throw RouterTLSPromotionError.missingStagedPin
@@ -96,12 +96,13 @@ public actor RouterTLSPinPromoter {
         )
         guard response.statusCode == 200,
               let device = try? JSONDecoder().decode(RouterDeviceDTO.self, from: data),
-              DeviceIdentityDeduplicator.normalizedMAC(device.id)
-                == DeviceIdentityDeduplicator.normalizedMAC(expectedID)
+              let observedID = DeviceIdentityDeduplicator.normalizedMAC(device.id),
+              observedID == expectedID
         else { throw RouterTLSPromotionError.deviceIDMismatch }
 
         return try await hostStore.promoteCertificateFingerprint(
             for: hostID,
+            expectedEndpoint: host.endpoint,
             expectedActive: active,
             expectedStaged: staged,
             expectedDeviceID: expectedID

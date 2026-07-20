@@ -7,14 +7,15 @@ Implemented Milestone 3 Task 14 only, starting from reviewed Task 13 head
 
 The feature commit subject is exactly `feat: rotate router TLS pins safely`. Independent review
 then identified two promotion-control races, addressed in the focused follow-up commits
-`fix: keep staged TLS promotion reachable` and `fix: serialize TLS promotion controls`. All SHAs
-are returned with the task handoff because recording the final commit's own SHA inside its contents
-is self-referential.
+`fix: keep staged TLS promotion reachable` and `fix: serialize TLS promotion controls`. A further
+strict review found correlation, endpoint-CAS, operation-exclusion, and byte-assertion gaps,
+addressed by `fix: harden TLS rotation invariants`. All SHAs are returned with the task handoff
+because recording the final commit's own SHA inside its contents is self-referential.
 
 ## Behavior delivered
 
 - `POST /api/v1/tls/rotate` sends the exact JSON body `{"confirm":true}` through the existing
-  serialized administrator mutation path.
+  serialized administrator mutation path; the test compares the recorded bytes directly.
 - Rotation accepts only an exact lowercase 64-character hexadecimal `sha256` and
   `restart_required: true`; uppercase, short, non-hex, and false-restart replies are rejected.
 - Persisted fingerprints remain normalized uppercase. A staged fingerprint is stored separately
@@ -23,10 +24,12 @@ is self-referential.
 - Promotion constructs exactly one HTTPS trial endpoint with only the staged pin, uses the
   redirect-rejecting pinned URLSession factory, and sends the client credential only through that
   staged-pinned client.
-- Promotion calls only `GET /api/v1/device`, normalizes and correlates its device ID, then performs
-  an actor-isolated compare-and-swap from staged to active and clears staged state.
-- Concurrent restaging, host replacement, and conditional-stage replacement are rejected as
-  `hostChanged`; neither the stale trial nor stale rotation response overwrites newer metadata.
+- Promotion rejects a malformed stored device ID before constructing its trial transport, calls
+  only `GET /api/v1/device`, requires a concrete normalized response ID, and compares the two
+  concrete identities before its actor-isolated compare-and-swap.
+- The promotion compare-and-swap binds the proof to the captured normalized scheme/host/port as
+  well as active pin, staged pin, and device ID. Concurrent restaging, endpoint-only replacement,
+  broader host replacement, and conditional-stage replacement are rejected as `hostChanged`.
 - After promotion, the ordinary endpoint contains only the promoted pin; deterministic leaf-DER
   tests prove the new bytes match and the old certificate bytes no longer match.
 - The administrator settings UI exposes rotation only for HTTPS hosts, uses a destructive
@@ -35,8 +38,9 @@ is self-referential.
 - After a restart makes the old active pin unusable, a reopened locked administration screen still
   offers the explicit staged-pin verification action. Successful promotion reattaches the
   administrator client to the promoted endpoint before a subsequent unlock.
-- Lock and Unlock are both structurally disabled and model-guarded while staged verification is in
-  flight, so neither can invalidate publication after the host-store promotion becomes durable.
+- Rotation and promotion form one mutually exclusive TLS-operation domain. Lock, Unlock, Rotate,
+  and Verify are model-guarded against either in-flight TLS flag, with matching disabled UI states,
+  so no overlap can discard a durable rotation response or promotion.
 - App publication is scoped to the captured host/session/admin/request generation. A stale
   completion after endpoint replacement does not stage into or publish over the replacement.
 
@@ -117,16 +121,42 @@ evidence: `/tmp/wattline-m3-task14-overlap-red.log`). Model guards plus matching
 were the minimal fix; both focused tests passed afterward (exit 0; evidence:
 `/tmp/wattline-m3-task14-overlap-green.log`).
 
+### Strict correlation, endpoint CAS, exact bytes, and full exclusion RED/GREEN
+
+Further review added three Network regressions and strengthened the rotation-body assertion:
+
+- malformed stored device identity must fail as `invalidHost` before trial construction;
+- malformed response identity cannot promote a valid stored identity;
+- a gated same-ID replacement changing only endpoint location cannot consume proof from the old
+  endpoint; and
+- the recorded rotation body must equal `Data(#"{"confirm":true}"#.utf8)` byte for byte.
+
+The first focused run executed 15 tests and failed with 6 assertions across the malformed-stored-ID
+and endpoint-only-replacement cases (exit 1; evidence:
+`/tmp/wattline-m3-task14-review-network-red.log`). Requiring a concrete normalized expected ID
+before the request, a concrete normalized observed ID before CAS, and captured normalized
+scheme/host/port equality in the actor-isolated CAS was the minimal production fix. The next
+focused run passed all 15 tests (exit 0; evidence:
+`/tmp/wattline-m3-task14-review-network-green.log`).
+
+Five deterministic gated app regressions then covered double promotion, Lock during rotation,
+Unlock during rotation, promotion during rotation, and rotation during promotion. All five failed
+against the prior code (exit 65); the `.xcresult` summary records each exact failure at
+`/tmp/wattline-m3-task14-review-app-red-summary.log`. Guards against both TLS flags on all four
+model actions, plus matching Lock/Unlock UI disabled states, were the minimal fix. The focused
+rerun passed all 5 tests (exit 0; evidence:
+`/tmp/wattline-m3-task14-review-app-green.log`).
+
 ## Fresh verification
 
 - `swift test --package-path peakdo/apple/WattlineNetwork --filter RouterTLSRotationTests`:
-  **12 tests, 0 failures**, exit 0.
+  **15 tests, 0 failures**, exit 0.
 - `swift test --package-path peakdo/apple/WattlineNetwork`:
-  **171 tests, 0 failures**, exit 0. Evidence: `/tmp/wattline-m3-task14-network.log`.
+  **174 tests, 0 failures**, exit 0. Evidence: `/tmp/wattline-m3-task14-network.log`.
 - `swift test --package-path peakdo/apple/WattlineUI`:
   **42 tests, 0 failures**, exit 0. Evidence: `/tmp/wattline-m3-task14-ui.log`.
 - Focused iOS `RouterAdministrationModelTests`:
-  **81 tests passed**, exit 0.
+  **86 tests passed**, exit 0. Evidence: `/tmp/wattline-m3-task14-app-green.log`.
 - `xcodebuild build -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline
   -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO`:
   **exit 0**. Evidence: `/tmp/wattline-m3-task14-build.log`.
@@ -171,6 +201,9 @@ and generic build exited 0.
 - Re-review added model-level Lock/Unlock exclusion during promotion as well as disabled button
   states. This preserves the exact captured generation through durable compare-and-swap and model
   publication without broadening TLS authorization.
+- Strict review extended promotion CAS to the captured normalized endpoint location and made both
+  device identities concrete before comparison. It also generalized model exclusion across both
+  TLS operations and all four control actions; no new authorization path was introduced.
 - Staging also requires an existing active pin. This enforces the no-TOFU requirement for rotation.
 - Ran the explicitly requested generic iOS build in addition to the brief's focused suites.
 - The pre-existing report at this path described an unrelated earlier widget task; it was replaced

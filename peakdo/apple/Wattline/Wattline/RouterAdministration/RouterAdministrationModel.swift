@@ -239,6 +239,7 @@ final class RouterAdministrationModel {
     func unlock(token: String) async {
         guard host != nil,
               access != .verifying,
+              !isTLSRotationRunning,
               !isTLSPromotionRunning
         else { return }
         adminOperationGeneration &+= 1
@@ -272,7 +273,10 @@ final class RouterAdministrationModel {
     }
 
     func lock() async {
-        guard host != nil, !isTLSPromotionRunning else { return }
+        guard host != nil,
+              !isTLSRotationRunning,
+              !isTLSPromotionRunning
+        else { return }
         adminOperationGeneration &+= 1
         access = .locked
         adminError = nil
@@ -331,7 +335,9 @@ final class RouterAdministrationModel {
         guard let source = host,
               source.scheme == "https",
               source.certificateFingerprint != nil,
-              access == .unlocked
+              access == .unlocked,
+              !isTLSRotationRunning,
+              !isTLSPromotionRunning
         else { return }
         tlsRequestGeneration &+= 1
         let request = tlsRequestGeneration
@@ -388,7 +394,9 @@ final class RouterAdministrationModel {
         guard let source = host,
               source.scheme == "https",
               source.stagedCertificateFingerprint != nil,
-              access != .verifying
+              access != .verifying,
+              !isTLSRotationRunning,
+              !isTLSPromotionRunning
         else { return }
         let operationAccess = access
         tlsRequestGeneration &+= 1

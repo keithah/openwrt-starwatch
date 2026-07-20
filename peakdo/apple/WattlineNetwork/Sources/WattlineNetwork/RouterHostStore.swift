@@ -259,19 +259,36 @@ public actor RouterHostStore {
 
     func promoteCertificateFingerprint(
         for id: UUID,
+        expectedEndpoint: RouterEndpoint,
         expectedActive: String,
         expectedStaged: String,
         expectedDeviceID: String
     ) throws -> RouterHostMetadata {
         guard let host = hosts().first(where: { $0.id == id }),
+              Self.matchesLocation(host, expected: expectedEndpoint),
               host.certificateFingerprint == expectedActive,
               host.stagedCertificateFingerprint == expectedStaged,
-              DeviceIdentityDeduplicator.normalizedMAC(host.deviceID)
-                == DeviceIdentityDeduplicator.normalizedMAC(expectedDeviceID)
+              let currentDeviceID = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID),
+              currentDeviceID == expectedDeviceID
         else { throw RouterTLSPromotionError.hostChanged }
         let promoted = host.promotingStagedCertificateFingerprint(expectedStaged)
         try save(promoted)
         return promoted
+    }
+
+    private static func matchesLocation(
+        _ host: RouterHostMetadata,
+        expected: RouterEndpoint
+    ) -> Bool {
+        host.scheme == expected.scheme
+            && normalizedHost(host.host) == normalizedHost(expected.host)
+            && host.port == expected.port
+    }
+
+    private static func normalizedHost(_ value: String) -> String {
+        let lowercase = value.lowercased()
+        guard lowercase.count > 1, lowercase.last == "." else { return lowercase }
+        return String(lowercase.dropLast())
     }
 
     public func remove(id: UUID) throws {

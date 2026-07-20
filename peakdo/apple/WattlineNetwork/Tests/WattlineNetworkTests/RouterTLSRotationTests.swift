@@ -29,8 +29,8 @@ final class RouterTLSRotationTests: XCTestCase {
         XCTAssertEqual(http.calls[0].method, "POST")
         XCTAssertEqual(http.calls[0].path, "/api/v1/tls/rotate")
         XCTAssertEqual(
-            try JSONSerialization.jsonObject(with: XCTUnwrap(http.calls[0].body)) as? NSDictionary,
-            ["confirm": true]
+            try XCTUnwrap(http.calls[0].body),
+            Data(#"{"confirm":true}"#.utf8)
         )
     }
 
@@ -153,6 +153,41 @@ final class RouterTLSRotationTests: XCTestCase {
         XCTAssertEqual(saved.stagedCertificateFingerprint, stagedPin.uppercased())
     }
 
+    func testMalformedStoredDeviceIDIsRejectedBeforeTrialRequest() async throws {
+        let host = makeHost(
+            active: activePin,
+            staged: stagedPin,
+            deviceID: "not-a-device-id"
+        )
+        let harness = try await promotionHarness(host: host, deviceReplyID: "also-invalid")
+
+        await XCTAssertThrowsTLSRotationError(
+            try await harness.promoter.promote(hostID: host.id)
+        ) {
+            XCTAssertEqual($0 as? RouterTLSPromotionError, .invalidHost)
+        }
+
+        XCTAssertTrue(harness.factory.endpoints.isEmpty)
+        XCTAssertTrue(harness.http.calls.isEmpty)
+        let savedHosts = await harness.store.hosts()
+        XCTAssertEqual(savedHosts.first, host)
+    }
+
+    func testMalformedResponseDeviceIDCannotPromoteValidStoredIdentity() async throws {
+        let harness = try await promotionHarness(deviceReplyID: "not-a-device-id")
+
+        await XCTAssertThrowsTLSRotationError(
+            try await harness.promoter.promote(hostID: harness.host.id)
+        ) {
+            XCTAssertEqual($0 as? RouterTLSPromotionError, .deviceIDMismatch)
+        }
+
+        let savedHosts = await harness.store.hosts()
+        let saved = try XCTUnwrap(savedHosts.first)
+        XCTAssertEqual(saved.certificateFingerprint, activePin.uppercased())
+        XCTAssertEqual(saved.stagedCertificateFingerprint, stagedPin.uppercased())
+    }
+
     func testConcurrentRestagePreventsStaleTrialFromPromoting() async throws {
         let harness = try await promotionHarness(deviceReplyID: deviceID, gate: true)
         let promotion = Task {
@@ -188,6 +223,35 @@ final class RouterTLSRotationTests: XCTestCase {
             certificateFingerprint: thirdPin.uppercased(),
             stagedCertificateFingerprint: nil,
             tokenID: "replacement-token-id"
+        )
+        try await harness.store.save(replacement)
+        harness.http.releaseGates()
+
+        await XCTAssertThrowsTLSRotationError(try await promotion.value) {
+            XCTAssertEqual($0 as? RouterTLSPromotionError, .hostChanged)
+        }
+        let savedHosts = await harness.store.hosts()
+        XCTAssertEqual(savedHosts.first, replacement)
+    }
+
+    func testConcurrentEndpointOnlyReplacementPreventsOldEndpointProofFromPromoting() async throws {
+        let harness = try await promotionHarness(deviceReplyID: deviceID, gate: true)
+        let promotion = Task {
+            try await harness.promoter.promote(hostID: harness.host.id)
+        }
+        await harness.http.waitForGateRegistration()
+        let replacement = RouterHostMetadata(
+            id: harness.host.id,
+            displayName: harness.host.displayName,
+            scheme: harness.host.scheme,
+            host: "replacement.router.local",
+            port: 9443,
+            reachability: harness.host.reachability,
+            allowsInsecureWAN: harness.host.allowsInsecureWAN,
+            deviceID: harness.host.deviceID,
+            certificateFingerprint: harness.host.certificateFingerprint,
+            stagedCertificateFingerprint: harness.host.stagedCertificateFingerprint,
+            tokenID: harness.host.tokenID
         )
         try await harness.store.save(replacement)
         harness.http.releaseGates()

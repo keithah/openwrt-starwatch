@@ -159,6 +159,144 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
     }
 
+    func testSecondPromotionCannotInvalidateFirstPromotionInFlight() async throws {
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.tlsPromotionHTTP.gateNextRequest()
+
+        let firstPromotion = Task { await fixture.model.promoteStagedTLSPin() }
+        await fixture.tlsPromotionHTTP.waitForGateRegistration()
+        await fixture.model.promoteStagedTLSPin()
+
+        XCTAssertEqual(fixture.tlsPromotionHTTP.calls.count, 1)
+        XCTAssertTrue(fixture.model.isTLSPromotionRunning)
+
+        fixture.tlsPromotionHTTP.releaseGates()
+        await firstPromotion.value
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appStagedPin)
+        XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
+        let persisted = await fixture.hostStore.hosts()
+        XCTAssertEqual(persisted.first, fixture.model.host)
+    }
+
+    func testLockCannotInvalidateRotationInFlight() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationRotateJSON(pin: appStagedPin)),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let rotation = Task { await fixture.model.rotateTLS() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.lock()
+
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertTrue(fixture.model.isTLSRotationRunning)
+
+        fixture.http.releaseGates()
+        await rotation.value
+        XCTAssertEqual(fixture.model.host?.stagedCertificateFingerprint, appStagedPin)
+        XCTAssertTrue(fixture.model.tlsRestartRequired)
+    }
+
+    func testUnlockCannotInvalidateRotationInFlight() async throws {
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(administrationRotateJSON(pin: appStagedPin)),
+            AdminScriptedHTTP.ok("{}"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let rotation = Task { await fixture.model.rotateTLS() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.unlock(token: "replacement-admin")
+
+        XCTAssertEqual(fixture.http.calls.count, 2)
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertTrue(fixture.model.isTLSRotationRunning)
+
+        fixture.http.releaseGates()
+        await rotation.value
+        XCTAssertEqual(fixture.model.host?.stagedCertificateFingerprint, appStagedPin)
+        XCTAssertTrue(fixture.model.tlsRestartRequired)
+    }
+
+    func testPromotionCannotStartWhileRotationIsInFlight() async throws {
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(administrationRotateJSON(pin: appThirdPin)),
+            ],
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.http.gateNextRequest()
+
+        let rotation = Task { await fixture.model.rotateTLS() }
+        await fixture.http.waitForGateRegistration()
+        await fixture.model.promoteStagedTLSPin()
+
+        XCTAssertTrue(fixture.tlsPromotionHTTP.calls.isEmpty)
+        XCTAssertTrue(fixture.model.isTLSRotationRunning)
+
+        fixture.http.releaseGates()
+        await rotation.value
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appActivePin)
+        XCTAssertEqual(fixture.model.host?.stagedCertificateFingerprint, appThirdPin)
+    }
+
+    func testRotationCannotStartWhilePromotionIsInFlight() async throws {
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("{}"),
+                AdminScriptedHTTP.ok(administrationRotateJSON(pin: appThirdPin)),
+            ],
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.tlsPromotionHTTP.gateNextRequest()
+
+        let promotion = Task { await fixture.model.promoteStagedTLSPin() }
+        await fixture.tlsPromotionHTTP.waitForGateRegistration()
+        await fixture.model.rotateTLS()
+
+        XCTAssertEqual(fixture.http.calls.count, 1)
+        XCTAssertTrue(fixture.model.isTLSPromotionRunning)
+
+        fixture.tlsPromotionHTTP.releaseGates()
+        await promotion.value
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appStagedPin)
+        XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
+    }
+
     func testUnlockedModelLoadsSettingsAndPublishesOnlyCompletePUTReadback() async throws {
         let original = try administrationSettings(advanced: false, httpPort: 8377)
         let readback = try administrationSettings(advanced: true, httpPort: 9000)

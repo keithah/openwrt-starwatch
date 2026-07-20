@@ -40,6 +40,7 @@ struct RouterAdministrationView: View {
                         .disabled(
                             adminToken.isEmpty
                                 || admin.access == .verifying
+                                || admin.isTLSRotationRunning
                                 || admin.isTLSPromotionRunning
                         )
                         if admin.host?.stagedCertificateFingerprint != nil {
@@ -50,7 +51,11 @@ struct RouterAdministrationView: View {
                             ) {
                                 Task { await admin.promoteStagedTLSPin() }
                             }
-                            .disabled(admin.access == .verifying || admin.isTLSPromotionRunning)
+                            .disabled(
+                                admin.access == .verifying
+                                    || admin.isTLSRotationRunning
+                                    || admin.isTLSPromotionRunning
+                            )
                             Text("Use this after wattlined restarts to verify and promote the staged certificate pin.")
                                 .foregroundStyle(.secondary)
                         }
@@ -67,7 +72,7 @@ struct RouterAdministrationView: View {
                         Button("Lock administration", role: .destructive) {
                             Task { await admin.lock() }
                         }
-                        .disabled(admin.isTLSPromotionRunning)
+                        .disabled(admin.isTLSRotationRunning || admin.isTLSPromotionRunning)
                     }
                 }
 
