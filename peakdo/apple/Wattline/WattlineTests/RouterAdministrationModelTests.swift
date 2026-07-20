@@ -81,6 +81,23 @@ final class RouterAdministrationModelTests: XCTestCase {
         ])
     }
 
+    func testCapabilityUnsupportedDoesNotQuarantineBeforeSuccessfulRefresh() async throws {
+        let fixture = try await makeAdvancedFixture(extraResults: [
+            .failure(NetworkError.api(
+                status: 409,
+                code: .capabilityUnsupported,
+                message: "Barrier-free is unsupported"
+            )),
+            .failure(NetworkError.transport("refresh unavailable")),
+        ])
+
+        await fixture.model.setAdvancedBarrierFree(true)
+
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.contains(.barrierFree))
+        XCTAssertNotNil(fixture.model.advancedError)
+        XCTAssertEqual(fixture.http.calls.last?.path, "/api/v1/settings")
+    }
+
     func testLateAdvancedMutationAfterHostReplacementPublishesNothing() async throws {
         let fixture = try await makeAdvancedFixture(extraResults: [
             AdminScriptedHTTP.ok(#"{"volts":19.5}"#),
@@ -3538,7 +3555,8 @@ private let administrationAdvancedIdentityJSON = #"""
   "application_firmware":"1.2.3",
   "ota_firmware":"1.0.0",
   "cid":257,
-  "features_raw":12578,
+  "features_raw":12576,
+  "features":{"running_mode":true,"barrier_free":true,"usb_firmware":true,"ble_pin":true},
   "available":{"current_time":true,"ota":true,"dc":true,"usbc":true},
   "mode":"app",
   "connection":{"connected":true,"phase":"ready","reconnect":"idle"},

@@ -8,6 +8,7 @@ public struct RouterDeviceDTO: Decodable, Equatable, Sendable {
     public let otaFirmware: String
     public let cid: UInt16
     public let featuresRaw: UInt32
+    public let features: RouterDeviceFeaturesDTO
     public let available: RouterAvailabilityDTO
     public let mode: String
     public let connection: RouterDeviceConnectionDTO
@@ -21,10 +22,80 @@ public struct RouterDeviceDTO: Decodable, Equatable, Sendable {
         case otaFirmware = "ota_firmware"
         case cid
         case featuresRaw = "features_raw"
+        case features
         case available
         case mode
         case connection
         case magicDNSName = "magic_dns_name"
+    }
+}
+
+public struct RouterDeviceFeaturesDTO: Decodable, Equatable, Sendable {
+    public let display: Bool
+    public let factoryMode: Bool
+    public let sleep: Bool
+    public let shutdown: Bool
+    public let batteryCapacity: Bool
+    public let dcOutPort: Bool
+    public let dcOutControl: Bool
+    public let dcOutScheduler: Bool
+    public let usbPort: Bool
+    public let usbPowerLimit: Bool
+    public let usbOutputControl: Bool
+    public let dcBypass: Bool
+    public let dcBypassControl: Bool
+    public let usbDCInput: Bool
+    public let usbDCInputPower: Bool
+    public let runningMode: Bool
+    public let barrierFree: Bool
+    public let usbFirmware: Bool
+    public let blePIN: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case display
+        case factoryMode = "factory_mode"
+        case sleep, shutdown
+        case batteryCapacity = "battery_capacity"
+        case dcOutPort = "dc_out_port"
+        case dcOutControl = "dc_out_control"
+        case dcOutScheduler = "dc_out_scheduler"
+        case usbPort = "usb_port"
+        case usbPowerLimit = "usb_power_limit"
+        case usbOutputControl = "usb_output_control"
+        case dcBypass = "dc_bypass"
+        case dcBypassControl = "dc_bypass_control"
+        case usbDCInput = "usb_dc_input"
+        case usbDCInputPower = "usb_dc_input_power"
+        case runningMode = "running_mode"
+        case barrierFree = "barrier_free"
+        case usbFirmware = "usb_firmware"
+        case blePIN = "ble_pin"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        func flag(_ key: CodingKeys) throws -> Bool {
+            try values.decodeIfPresent(Bool.self, forKey: key) ?? false
+        }
+        display = try flag(.display)
+        factoryMode = try flag(.factoryMode)
+        sleep = try flag(.sleep)
+        shutdown = try flag(.shutdown)
+        batteryCapacity = try flag(.batteryCapacity)
+        dcOutPort = try flag(.dcOutPort)
+        dcOutControl = try flag(.dcOutControl)
+        dcOutScheduler = try flag(.dcOutScheduler)
+        usbPort = try flag(.usbPort)
+        usbPowerLimit = try flag(.usbPowerLimit)
+        usbOutputControl = try flag(.usbOutputControl)
+        dcBypass = try flag(.dcBypass)
+        dcBypassControl = try flag(.dcBypassControl)
+        usbDCInput = try flag(.usbDCInput)
+        usbDCInputPower = try flag(.usbDCInputPower)
+        runningMode = try flag(.runningMode)
+        barrierFree = try flag(.barrierFree)
+        usbFirmware = try flag(.usbFirmware)
+        blePIN = try flag(.blePIN)
     }
 }
 

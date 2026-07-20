@@ -32,7 +32,13 @@ final class RouterMappingTests: XCTestCase {
             "ota_firmware": "1.0.3",
             "cid": 773,
             "features_raw": 32767,
-            "features": {"display": true},
+            "features": {
+                "display": true,
+                "running_mode": true,
+                "barrier_free": false,
+                "usb_firmware": true,
+                "ble_pin": false
+            },
             "available": {"current_time": true, "ota": true, "dc": true, "usbc": true},
             "mode": "ota",
             "connection": {"connected": true, "phase": "bootloader", "reconnect": "bootloader"},
@@ -51,6 +57,10 @@ final class RouterMappingTests: XCTestCase {
         XCTAssertEqual(device.cid, 773)
         XCTAssertEqual(device.featuresRaw, 32767)
         XCTAssertTrue(device.available.currentTime)
+        XCTAssertTrue(device.features.runningMode)
+        XCTAssertFalse(device.features.barrierFree)
+        XCTAssertTrue(device.features.usbFirmware)
+        XCTAssertFalse(device.features.blePIN)
 
         let identity = try mapping.identity(device)
         XCTAssertEqual(identity.peripheralID, peripheralID)

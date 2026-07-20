@@ -12,17 +12,24 @@ final class RouterAdvancedPresentationTests: XCTestCase {
 
     func testFeatureAndInventoryIntersectPerSurface() {
         let result = RouterAdvancedVisibility.evaluate(input(
-            hasFactoryMode: false,
+            hasRunningMode: false,
+            hasBarrierFree: true,
+            hasUSBFirmware: false,
+            hasBLEPIN: true,
             hasBypassControl: true,
             currentTimeAvailable: true,
             dcAvailable: true,
             usbAvailable: true
         ))
-        XCTAssertEqual(result.surfaces, [.bypassThreshold, .clock])
+        XCTAssertEqual(result.surfaces, [.bypassThreshold, .clock, .barrierFree, .blePIN])
 
         XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(dcAvailable: false)).surfaces.contains(.bypassThreshold))
         XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(hasBypassControl: false)).surfaces.contains(.bypassThreshold))
         XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(currentTimeAvailable: false)).surfaces.contains(.clock))
+        XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(hasRunningMode: false)).surfaces.contains(.runningMode))
+        XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(hasBarrierFree: false)).surfaces.contains(.barrierFree))
+        XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(hasUSBFirmware: false)).surfaces.contains(.usbFirmware))
+        XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(hasBLEPIN: false)).surfaces.contains(.blePIN))
         XCTAssertFalse(RouterAdvancedVisibility.evaluate(input(usbAvailable: false)).surfaces.contains(.usbFirmware))
     }
 
@@ -86,7 +93,10 @@ final class RouterAdvancedPresentationTests: XCTestCase {
         adminVerified: Bool = true,
         advanced: Bool = true,
         mode: RouterAdvancedApplicationMode = .application,
-        hasFactoryMode: Bool = true,
+        hasRunningMode: Bool = true,
+        hasBarrierFree: Bool = true,
+        hasUSBFirmware: Bool = true,
+        hasBLEPIN: Bool = true,
         hasBypassControl: Bool = true,
         currentTimeAvailable: Bool = true,
         dcAvailable: Bool = true,
@@ -98,7 +108,10 @@ final class RouterAdvancedPresentationTests: XCTestCase {
             adminVerified: adminVerified,
             advanced: advanced,
             mode: mode,
-            hasFactoryMode: hasFactoryMode,
+            hasRunningMode: hasRunningMode,
+            hasBarrierFree: hasBarrierFree,
+            hasUSBFirmware: hasUSBFirmware,
+            hasBLEPIN: hasBLEPIN,
             hasBypassControl: hasBypassControl,
             currentTimeAvailable: currentTimeAvailable,
             dcAvailable: dcAvailable,

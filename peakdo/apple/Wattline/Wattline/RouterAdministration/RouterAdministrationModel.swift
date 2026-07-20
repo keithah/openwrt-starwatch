@@ -118,13 +118,17 @@ final class RouterAdministrationModel {
                 showsEnableAdvancedAffordance: false
             )
         }
-        let features = FeatureFlags(rawValue: advancedIdentity?.featuresRaw ?? 0)
+        let rawFeatures = FeatureFlags(rawValue: advancedIdentity?.featuresRaw ?? 0)
+        let operationFeatures = advancedIdentity?.features
         return RouterAdvancedVisibility.evaluate(RouterAdvancedVisibilityInput(
             adminVerified: access == .unlocked,
             advanced: settings.advanced,
             mode: advancedIdentity?.mode == "app" ? .application : .ota,
-            hasFactoryMode: features.contains(.factoryMode),
-            hasBypassControl: features.contains(.dcBypassControl),
+            hasRunningMode: operationFeatures?.runningMode == true,
+            hasBarrierFree: operationFeatures?.barrierFree == true,
+            hasUSBFirmware: operationFeatures?.usbFirmware == true,
+            hasBLEPIN: operationFeatures?.blePIN == true,
+            hasBypassControl: rawFeatures.contains(.dcBypassControl),
             currentTimeAvailable: advancedIdentity?.available.currentTime == true,
             dcAvailable: advancedIdentity?.available.dc == true,
             usbAvailable: advancedIdentity?.available.usbc == true,
@@ -324,8 +328,9 @@ final class RouterAdministrationModel {
         }
     }
 
-    func reloadAdvanced() async {
-        guard host != nil, access == .unlocked else { return }
+    @discardableResult
+    func reloadAdvanced() async -> Bool {
+        guard host != nil, access == .unlocked else { return false }
         advancedLoadGeneration &+= 1
         let request = advancedLoadGeneration
         let session = sessionGeneration
@@ -341,7 +346,7 @@ final class RouterAdministrationModel {
             session: session,
             adminOperation: adminOperation,
             request: request
-        ) else { return }
+        ) else { return false }
         isAdvancedLoading = false
         switch result {
         case let .success((authoritativeSettings, identity)):
@@ -352,6 +357,7 @@ final class RouterAdministrationModel {
             } else {
                 clearAdvancedState()
             }
+            return true
         case .advancedDisabled:
             advancedServerGate = .advancedDisabled
             clearAdvancedValues()
@@ -360,6 +366,7 @@ final class RouterAdministrationModel {
         case .stale:
             break
         }
+        return false
     }
 
     func loadAdvancedBypassThreshold() async {
@@ -1358,6 +1365,11 @@ final class RouterAdministrationModel {
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
         isAdvancedMutationRunning = true
+        defer {
+            if advancedMutationGeneration == request {
+                isAdvancedMutationRunning = false
+            }
+        }
         advancedError = nil
         let result = await performAdvanced(operation)
         guard isCurrentAdvancedMutation(
@@ -1365,7 +1377,6 @@ final class RouterAdministrationModel {
             adminOperation: adminOperation,
             request: request
         ) else { return }
-        isAdvancedMutationRunning = false
         switch result {
         case let .success(value):
             publish(value)
@@ -1374,8 +1385,15 @@ final class RouterAdministrationModel {
             clearAdvancedValues()
             await reloadSettings()
         case .capabilityUnsupported:
-            unsupportedAdvancedSurfaces.insert(surface)
-            await reloadAdvanced()
+            let refreshed = await reloadAdvanced()
+            guard isCurrentAdvancedMutation(
+                session: session,
+                adminOperation: adminOperation,
+                request: request
+            ) else { return }
+            if refreshed, settings?.advanced == true {
+                unsupportedAdvancedSurfaces.insert(surface)
+            }
         case .failure:
             advancedError = "The advanced device request failed. Try again."
         case .stale:

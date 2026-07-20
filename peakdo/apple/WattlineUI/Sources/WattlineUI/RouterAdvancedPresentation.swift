@@ -23,7 +23,10 @@ public struct RouterAdvancedVisibilityInput: Sendable {
     public let adminVerified: Bool
     public let advanced: Bool
     public let mode: RouterAdvancedApplicationMode
-    public let hasFactoryMode: Bool
+    public let hasRunningMode: Bool
+    public let hasBarrierFree: Bool
+    public let hasUSBFirmware: Bool
+    public let hasBLEPIN: Bool
     public let hasBypassControl: Bool
     public let currentTimeAvailable: Bool
     public let dcAvailable: Bool
@@ -35,7 +38,10 @@ public struct RouterAdvancedVisibilityInput: Sendable {
         adminVerified: Bool,
         advanced: Bool,
         mode: RouterAdvancedApplicationMode,
-        hasFactoryMode: Bool,
+        hasRunningMode: Bool,
+        hasBarrierFree: Bool,
+        hasUSBFirmware: Bool,
+        hasBLEPIN: Bool,
         hasBypassControl: Bool,
         currentTimeAvailable: Bool,
         dcAvailable: Bool,
@@ -46,7 +52,10 @@ public struct RouterAdvancedVisibilityInput: Sendable {
         self.adminVerified = adminVerified
         self.advanced = advanced
         self.mode = mode
-        self.hasFactoryMode = hasFactoryMode
+        self.hasRunningMode = hasRunningMode
+        self.hasBarrierFree = hasBarrierFree
+        self.hasUSBFirmware = hasUSBFirmware
+        self.hasBLEPIN = hasBLEPIN
         self.hasBypassControl = hasBypassControl
         self.currentTimeAvailable = currentTimeAvailable
         self.dcAvailable = dcAvailable
@@ -82,10 +91,10 @@ public struct RouterAdvancedVisibility: Equatable, Sendable {
         var surfaces: Set<RouterAdvancedSurface> = []
         if input.hasBypassControl, input.dcAvailable { surfaces.insert(.bypassThreshold) }
         if input.currentTimeAvailable { surfaces.insert(.clock) }
-        if input.hasFactoryMode {
-            surfaces.formUnion([.runningMode, .barrierFree, .blePIN])
-            if input.usbAvailable { surfaces.insert(.usbFirmware) }
-        }
+        if input.hasRunningMode { surfaces.insert(.runningMode) }
+        if input.hasBarrierFree { surfaces.insert(.barrierFree) }
+        if input.hasBLEPIN { surfaces.insert(.blePIN) }
+        if input.hasUSBFirmware, input.usbAvailable { surfaces.insert(.usbFirmware) }
         surfaces.subtract(input.unsupported)
         return .init(surfaces: surfaces, showsEnableAdvancedAffordance: false)
     }
