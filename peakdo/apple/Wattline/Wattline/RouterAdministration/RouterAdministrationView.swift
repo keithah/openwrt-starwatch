@@ -27,6 +27,12 @@ struct RouterAdministrationView: View {
                     }
                 }
 
+                if admin.host != nil {
+                    Section("Link-Power pairing") {
+                        RouterDevicePairingView(model: admin)
+                    }
+                }
+
                 if presentation.showsUnlockField {
                     Section {
                         SecureField("Administrator token", text: $adminToken)

@@ -1,14 +1,56 @@
-# Task 16 report
+# Task 16 Report — Router-to-Link-Power Pairing
 
-Commits: `b13b3bf5..033ecea9`
+## RED
 
-Implemented snapshot-only small/medium widgets, placeholder/store isolation, WidgetCenter reload fanout wiring, dashboard deep-link registration/handling, and unavailable handling for snapshots without battery telemetry. The deep-link regression now explicitly marks onboarding complete before constructing `AppModel`, so it exercises the connected-capable route rather than silently testing the onboarding guard.
+- `swift test --package-path peakdo/apple/WattlineNetwork --filter RouterDevicePairingTests`
+  exited 1: `cannot find 'RouterDevicePairingClient' in scope` and
+  `cannot find type 'RouterDevicePairingError' in scope`.
+- `swift test --package-path peakdo/apple/WattlineUI --filter RouterDevicePairingPresentationTests`
+  exited 1: `cannot find 'RouterDevicePairingPresentation' in scope` and
+  `cannot find 'RouterPairableDeviceValue' in scope`.
+- Complete captured logs: `/tmp/wattline-m4-task16-network-red.log` and
+  `/tmp/wattline-m4-task16-ui-red.log`.
 
-Verification:
-- Generic iOS app build-for-testing: TEST BUILD SUCCEEDED.
-- Focused deep-link test build-for-testing: TEST BUILD SUCCEEDED. Runtime test launch was blocked by the local passcode-protected device/DVT launcher state.
-- WattlineCore: 154/154 tests passed.
-- Focused widget/provider and integration regressions added; runtime simulator execution remains environment-dependent.
-- `git diff --check`: clean.
+## GREEN
 
-No widget source constructs a BLE transport/session or imports CoreBluetooth. Runtime widget refresh and deep-link behavior should receive simulator/device validation.
+- Focused Network: 12/12, zero failures.
+- Full WattlineNetwork: 197/197, zero failures.
+- Focused UI: 3/3, zero failures.
+- Full WattlineUI: 48/48, zero failures.
+- Full Wattline iOS scheme on `Wattline-Tests-2`: 279 passing test cases,
+  zero failures; `** TEST SUCCEEDED **`.
+- Complete logs: `/tmp/wattline-m4-task16-network-green5.log`,
+  `/tmp/wattline-m4-task16-network-full.log`,
+  `/tmp/wattline-m4-task16-ui-full.log`, and
+  `/tmp/wattline-m4-task16-app-full.log`.
+
+## Implementation
+
+- Added the client-token-only pairing DTO/client with exact status, scan,
+  pair, and unpair routes/status codes; deterministic redacted pair payload;
+  normalized/encoded MACs; ASCII six-digit-or-empty PIN validation; and
+  authoritative status polling.
+- Polling is bounded by the injected `RouterConnectionClock`. One operation
+  owns an opaque operation ID, cancellation cancels a suspended polling task,
+  and generation checks quarantine late HTTP/status completions. Existing and
+  409-reported daemon operations are adopted without a second mutation.
+- Added Foundation-only WattlineUI row/status presentation.
+- Added iOS model ownership and lifecycle cancellation, endpoint-replacement
+  quarantine, structurally present saved-router entry, secure optional PIN
+  field, and PIN clearing before dispatch/on disappear/on background.
+
+## Deviations
+
+- The detailed plan listed eleven Network test names. They were consolidated
+  into twelve non-vacuous tests where closely related exact-body cases share a
+  test loop; coverage includes all listed behaviors plus cancellation of an
+  actually suspended injected-clock sleep and rejection of Unicode digits.
+- Pairing is shown in the existing saved-router administration screen rather
+  than creating another scan-screen navigation path. The screen itself is the
+  existing saved-host-only scan-row destination, so raw discovery rows still
+  cannot gain client credentials or pairing controls.
+
+## External checks
+
+- Physical BlueZ discovery, real Link-Power pair/unpair, RF RSSI changes, and
+  router asynchronous error timing require a live router and power station.

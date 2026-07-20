@@ -7,6 +7,77 @@ import XCTest
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testDevicePairingPublishesAuthoritativeTerminalStatusWithClientCredential() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            devicePairingResults: [
+                AdminScriptedHTTP.ok(administrationDevicePairingIdleJSON),
+                AdminScriptedHTTP.response(status: 202, #"{"status":"scanning"}"#),
+                AdminScriptedHTTP.ok(administrationDevicePairingConnectedJSON),
+            ]
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        await fixture.model.scanForLinkPower()
+
+        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .connected)
+        XCTAssertEqual(fixture.devicePairingHTTP.calls.map(\.token), [
+            "wlt_client", "wlt_client", "wlt_client",
+        ])
+        XCTAssertNil(fixture.model.devicePairingError)
+    }
+
+    func testDevicePairingEndpointReplacementQuarantinesLateCompletion() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            devicePairingResults: [AdminScriptedHTTP.ok(administrationDevicePairingIdleJSON)],
+            devicePairingGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+        let scan = Task { await fixture.model.scanForLinkPower() }
+        await fixture.devicePairingHTTP.waitForGateRegistration()
+        let replacement = try RouterHostValidator.validate(
+            "https://replacement.local:8378", displayName: "Replacement",
+            reachability: .lan, allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: String(repeating: "1", count: 64)
+        )
+
+        await fixture.model.begin(host: replacement)
+        fixture.devicePairingHTTP.releaseGates()
+        await scan.value
+
+        XCTAssertEqual(fixture.model.host, replacement)
+        XCTAssertNil(fixture.model.devicePairingStatus)
+        XCTAssertNil(fixture.model.devicePairingError)
+    }
+
+    func testDevicePairingModelAllowsOnlyOneOperationAndRetainsNoPIN() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            devicePairingResults: [
+                AdminScriptedHTTP.ok(administrationDevicePairingIdleJSON),
+                AdminScriptedHTTP.response(status: 202, #"{"status":"pairing"}"#),
+                AdminScriptedHTTP.ok(administrationDevicePairingConnectedJSON),
+            ],
+            devicePairingGateRequests: true
+        )
+        await fixture.model.begin(host: fixture.host)
+        let pair = Task {
+            await fixture.model.pairLinkPower(mac: "DC:04:5A:EB:72:2B", pin: "020555")
+        }
+        await fixture.devicePairingHTTP.waitForGateRegistration()
+        await fixture.model.scanForLinkPower()
+        XCTAssertEqual(fixture.devicePairingHTTP.calls.count, 1)
+        fixture.devicePairingHTTP.releaseGates()
+        await fixture.devicePairingHTTP.waitForGateRegistration(); fixture.devicePairingHTTP.releaseGates()
+        await fixture.devicePairingHTTP.waitForGateRegistration(); fixture.devicePairingHTTP.releaseGates()
+        await pair.value
+
+        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .connected)
+        XCTAssertFalse(String(reflecting: fixture.model).contains("020555"))
+    }
+
     func testRotateStagesReturnedPinWithoutReplacingActivePinAndShowsRestart() async throws {
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
@@ -3179,7 +3250,26 @@ private struct AdministrationFixture {
     let migrationHTTP: AdminScriptedHTTP
     let tlsPromotionHTTP: AdminScriptedHTTP
     let adminHTTPFactory: AdminRecordingHTTPFactory
+    let devicePairingHTTP: AdminScriptedHTTP
 }
+
+private actor AdministrationPairingClock: RouterConnectionClock {
+    private var timestamp = DeviceTimestamp.seconds(0)
+    var now: DeviceTimestamp { timestamp }
+    func sampleTimestampOrigin() -> RouterTimestampOrigin {
+        .init(wallClock: Date(timeIntervalSince1970: 0), deviceTimestamp: timestamp)
+    }
+    func sleep(for duration: Duration) async throws {
+        try Task.checkCancellation()
+        timestamp += duration
+        await Task.yield()
+    }
+}
+
+private let administrationDevicePairingIdleJSON =
+    #"{"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-57,"paired":false}]}"#
+private let administrationDevicePairingConnectedJSON =
+    #"{"stage":"connected","target":"DC:04:5A:EB:72:2B","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-48,"paired":true}]}"#
 
 private final class AdministrationRouterDiscoverySource: RouterDiscoverySource, @unchecked Sendable {
     private let lock = NSLock()
@@ -3231,6 +3321,8 @@ private func makeFixture(
     credentialBackend: any RouterCredentialBackend = AdministrationMemoryBackend(),
     migrationResults: [Result<(Data, HTTPURLResponse), Error>] = [],
     tlsPromotionResults: [Result<(Data, HTTPURLResponse), Error>] = [],
+    devicePairingResults: [Result<(Data, HTTPURLResponse), Error>] = [],
+    devicePairingGateRequests: Bool = false,
     discovery: RouterDiscovery? = nil
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
@@ -3266,6 +3358,10 @@ private func makeFixture(
         gatedCallNumbers: historyGatedCallNumbers
     )
     let migrationHTTP = AdminScriptedHTTP(results: migrationResults, gateRequests: false)
+    let devicePairingHTTP = AdminScriptedHTTP(
+        results: devicePairingResults,
+        gateRequests: devicePairingGateRequests
+    )
     let adminHTTPFactory = AdminRecordingHTTPFactory(client: http)
     let adminClient = RouterAdministrationClient(
         credentials: credentialStore,
@@ -3289,6 +3385,15 @@ private func makeFixture(
                 credentials: credentialStore,
                 httpFactory: { _ in migrationHTTP }
             ),
+            devicePairingClientFactory: { endpoint in
+                RouterDevicePairingClient(
+                    endpoint: endpoint,
+                    credentials: credentialStore,
+                    http: devicePairingHTTP,
+                    clock: AdministrationPairingClock(),
+                    pollInterval: .milliseconds(1)
+                )
+            },
             now: now,
             pairingExpirySleep: pairingExpirySleep
         )
@@ -3302,6 +3407,15 @@ private func makeFixture(
                 credentials: credentialStore,
                 httpFactory: { _ in migrationHTTP }
             ),
+            devicePairingClientFactory: { endpoint in
+                RouterDevicePairingClient(
+                    endpoint: endpoint,
+                    credentials: credentialStore,
+                    http: devicePairingHTTP,
+                    clock: AdministrationPairingClock(),
+                    pollInterval: .milliseconds(1)
+                )
+            },
             now: now
         )
     }
@@ -3317,7 +3431,8 @@ private func makeFixture(
         historyHTTP: historyHTTP,
         migrationHTTP: migrationHTTP,
         tlsPromotionHTTP: tlsPromotionHTTP,
-        adminHTTPFactory: adminHTTPFactory
+        adminHTTPFactory: adminHTTPFactory,
+        devicePairingHTTP: devicePairingHTTP
     )
 }
 
@@ -3355,11 +3470,15 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     }
 
     static func ok(_ json: String) -> Result<(Data, HTTPURLResponse), Error> {
+        response(status: 200, json)
+    }
+
+    static func response(status: Int, _ json: String) -> Result<(Data, HTTPURLResponse), Error> {
         .success((
             Data(json.utf8),
             HTTPURLResponse(
                 url: URL(string: "https://fixture.invalid")!,
-                statusCode: 200,
+                statusCode: status,
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
             )!

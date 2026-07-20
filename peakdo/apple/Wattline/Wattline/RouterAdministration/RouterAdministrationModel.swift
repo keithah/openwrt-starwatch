@@ -7,6 +7,7 @@ import WattlineUI
 @Observable
 final class RouterAdministrationModel {
     typealias PairingExpirySleep = @MainActor @Sendable (Date) async throws -> Void
+    typealias DevicePairingClientFactory = (RouterEndpoint) throws -> RouterDevicePairingClient
 
     enum AdminAccess: Equatable {
         case locked
@@ -68,6 +69,9 @@ final class RouterAdministrationModel {
     private(set) var isTLSRotationRunning = false
     private(set) var isTLSPromotionRunning = false
     private(set) var tlsPromotionRecoveryAvailable = false
+    private(set) var devicePairingStatus: RouterDevicePairingStatus?
+    private(set) var devicePairingError: String?
+    private(set) var isDevicePairingRunning = false
 
     private let connections: RouterConnectionModel
     private let adminClient: RouterAdministrationClient
@@ -75,6 +79,7 @@ final class RouterAdministrationModel {
     private let endpointMigrationValidator: RouterEndpointMigrationValidator
     private let now: () -> Date
     private let pairingExpirySleep: PairingExpirySleep
+    private let devicePairingClientFactory: DevicePairingClientFactory?
     private var sessionGeneration: UInt64 = 0
     private var adminOperationGeneration: UInt64 = 0
     private var historyRequestGeneration: UInt64 = 0
@@ -86,6 +91,8 @@ final class RouterAdministrationModel {
     private var settingsSaveGeneration: UInt64 = 0
     private var replacementRequestGeneration: UInt64 = 0
     private var tlsRequestGeneration: UInt64 = 0
+    private var devicePairingGeneration: UInt64 = 0
+    private var devicePairingClient: RouterDevicePairingClient?
     private var pairingExpiryTask: Task<Void, Never>?
     private var settingsRestartRequiredHosts: Set<UUID> = []
     private var validatedReplacementLease: ValidatedReplacementLease?
@@ -110,6 +117,7 @@ final class RouterAdministrationModel {
         adminClient: RouterAdministrationClient,
         historyClientFactory: @escaping (RouterEndpoint) throws -> RouterHistoryClient,
         endpointMigrationValidator: RouterEndpointMigrationValidator,
+        devicePairingClientFactory: DevicePairingClientFactory? = nil,
         now: @escaping () -> Date = { Date() },
         pairingExpirySleep: @escaping PairingExpirySleep = { deadline in
             let remaining = max(0, deadline.timeIntervalSinceNow)
@@ -120,6 +128,7 @@ final class RouterAdministrationModel {
         self.adminClient = adminClient
         self.historyClientFactory = historyClientFactory
         self.endpointMigrationValidator = endpointMigrationValidator
+        self.devicePairingClientFactory = devicePairingClientFactory
         self.now = now
         self.pairingExpirySleep = pairingExpirySleep
     }
@@ -147,7 +156,15 @@ final class RouterAdministrationModel {
             endpointMigrationValidator: .production(
                 hostStore: connections.hostStore,
                 credentials: credentials
-            )
+            ),
+            devicePairingClientFactory: { endpoint in
+                RouterDevicePairingClient(
+                    endpoint: endpoint,
+                    credentials: credentials,
+                    http: try httpFactory(endpoint),
+                    clock: SystemRouterConnectionClock()
+                )
+            }
         )
     }
 
@@ -163,6 +180,12 @@ final class RouterAdministrationModel {
 
     private func beginSession(host: RouterHostMetadata) async -> UInt64 {
         sessionGeneration &+= 1
+        devicePairingGeneration &+= 1
+        if let devicePairingClient { await devicePairingClient.cancel() }
+        devicePairingClient = nil
+        devicePairingStatus = nil
+        devicePairingError = nil
+        isDevicePairingRunning = false
         adminOperationGeneration &+= 1
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
@@ -179,6 +202,13 @@ final class RouterAdministrationModel {
         tokens = []
         tokensError = nil
         clearSettingsState()
+        if let devicePairingClientFactory {
+            do {
+                devicePairingClient = try devicePairingClientFactory(host.endpoint)
+            } catch {
+                devicePairingError = "Could not prepare Link-Power pairing."
+            }
+        }
         do {
             try await adminClient.attach(endpoint: host.endpoint)
         } catch {
@@ -209,6 +239,12 @@ final class RouterAdministrationModel {
 
     func end() async {
         sessionGeneration &+= 1
+        devicePairingGeneration &+= 1
+        if let devicePairingClient { await devicePairingClient.cancel() }
+        devicePairingClient = nil
+        devicePairingStatus = nil
+        devicePairingError = nil
+        isDevicePairingRunning = false
         adminOperationGeneration &+= 1
         host = nil
         access = .locked
@@ -224,6 +260,24 @@ final class RouterAdministrationModel {
         clearPairingSecrets()
         pairingError = nil
         await adminClient.detach()
+    }
+
+    func refreshDevicePairing() async {
+        await performDevicePairing { try await $0.status() }
+    }
+
+    func scanForLinkPower() async {
+        await performDevicePairing { try await $0.scan() }
+    }
+
+    func pairLinkPower(mac: String, pin: String) async {
+        // Deliberately capture no PIN in model state; the view clears its local
+        // secure entry before this asynchronous dispatch.
+        await performDevicePairing { try await $0.pair(mac: mac, pin: pin) }
+    }
+
+    func unpairLinkPower(mac: String) async {
+        await performDevicePairing { try await $0.unpair(mac: mac) }
     }
 
     func reloadHistory() async {
@@ -1002,6 +1056,44 @@ final class RouterAdministrationModel {
 
     private static let clientCleanupFailureMessage =
         "Token was revoked, but this device's local client credential could not be removed."
+
+    private func performDevicePairing(
+        _ operation: (RouterDevicePairingClient) async throws -> RouterDevicePairingStatus
+    ) async {
+        guard let client = devicePairingClient, host != nil else { return }
+        let session = sessionGeneration
+        let generation = devicePairingGeneration
+        guard !isDevicePairingRunning else { return }
+        isDevicePairingRunning = true
+        devicePairingError = nil
+        defer {
+            if sessionGeneration == session, devicePairingGeneration == generation {
+                isDevicePairingRunning = false
+            }
+        }
+        do {
+            let status = try await operation(client)
+            guard sessionGeneration == session,
+                  devicePairingGeneration == generation,
+                  devicePairingClient === client
+            else { return }
+            devicePairingStatus = status
+            devicePairingError = status.stage == .failed
+                ? "Link-Power pairing failed."
+                : nil
+        } catch is CancellationError {
+            return
+        } catch RouterDevicePairingError.timedOut {
+            guard sessionGeneration == session, devicePairingGeneration == generation else { return }
+            devicePairingError = "Link-Power pairing timed out."
+        } catch let RouterDevicePairingError.operationInProgress(status) {
+            guard sessionGeneration == session, devicePairingGeneration == generation else { return }
+            devicePairingStatus = status
+        } catch {
+            guard sessionGeneration == session, devicePairingGeneration == generation else { return }
+            devicePairingError = "Could not complete Link-Power pairing."
+        }
+    }
 
     private func performAdmin<Value>(
         _ operation: (RouterAdministrationClient) async throws -> Value,
