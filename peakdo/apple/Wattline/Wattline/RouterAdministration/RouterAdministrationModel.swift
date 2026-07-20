@@ -84,6 +84,7 @@ final class RouterAdministrationModel {
     private let historyClientFactory: (RouterEndpoint) throws -> RouterHistoryClient
     private let endpointMigrationValidator: RouterEndpointMigrationValidator
     private let now: () -> Date
+    private let advancedPostRefreshIsCancelled: @MainActor () -> Bool
     private let pairingExpirySleep: PairingExpirySleep
     private let devicePairingClientFactory: DevicePairingClientFactory?
     private var sessionGeneration: UInt64 = 0
@@ -161,6 +162,9 @@ final class RouterAdministrationModel {
         endpointMigrationValidator: RouterEndpointMigrationValidator,
         devicePairingClientFactory: DevicePairingClientFactory? = nil,
         now: @escaping () -> Date = { Date() },
+        advancedPostRefreshIsCancelled: @escaping @MainActor () -> Bool = {
+            Task.isCancelled
+        },
         pairingExpirySleep: @escaping PairingExpirySleep = { deadline in
             let remaining = max(0, deadline.timeIntervalSinceNow)
             try await Task.sleep(for: .seconds(remaining))
@@ -172,6 +176,7 @@ final class RouterAdministrationModel {
         self.endpointMigrationValidator = endpointMigrationValidator
         self.devicePairingClientFactory = devicePairingClientFactory
         self.now = now
+        self.advancedPostRefreshIsCancelled = advancedPostRefreshIsCancelled
         self.pairingExpirySleep = pairingExpirySleep
     }
 
@@ -1386,7 +1391,8 @@ final class RouterAdministrationModel {
             await reloadSettings()
         case .capabilityUnsupported:
             let refreshed = await reloadAdvanced()
-            guard isCurrentAdvancedMutation(
+            guard !advancedPostRefreshIsCancelled(),
+                  isCurrentAdvancedMutation(
                 session: session,
                 adminOperation: adminOperation,
                 request: request

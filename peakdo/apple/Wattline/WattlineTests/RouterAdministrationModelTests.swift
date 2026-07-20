@@ -98,6 +98,25 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.http.calls.last?.path, "/api/v1/settings")
     }
 
+    func testCancelledCapabilityRefreshCannotCommitUnsupportedQuarantine() async throws {
+        let fixture = try await makeAdvancedFixture(
+            extraResults: [
+                .failure(NetworkError.api(
+                    status: 409,
+                    code: .capabilityUnsupported,
+                    message: "Barrier-free is unsupported"
+                )),
+                AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
+                AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
+            ],
+            advancedPostRefreshIsCancelled: { true }
+        )
+
+        await fixture.model.setAdvancedBarrierFree(true)
+
+        XCTAssertTrue(fixture.model.advancedVisibility.surfaces.contains(.barrierFree))
+    }
+
     func testLateAdvancedMutationAfterHostReplacementPublishesNothing() async throws {
         let fixture = try await makeAdvancedFixture(extraResults: [
             AdminScriptedHTTP.ok(#"{"volts":19.5}"#),
@@ -3616,7 +3635,8 @@ private func makeFixture(
     tlsPromotionResults: [Result<(Data, HTTPURLResponse), Error>] = [],
     devicePairingResults: [Result<(Data, HTTPURLResponse), Error>] = [],
     devicePairingGateRequests: Bool = false,
-    discovery: RouterDiscovery? = nil
+    discovery: RouterDiscovery? = nil,
+    advancedPostRefreshIsCancelled: @escaping @MainActor () -> Bool = { Task.isCancelled }
 ) async throws -> AdministrationFixture {
     let host = try RouterHostValidator.validate(
         "https://router.local:8378",
@@ -3688,6 +3708,7 @@ private func makeFixture(
                 )
             },
             now: now,
+            advancedPostRefreshIsCancelled: advancedPostRefreshIsCancelled,
             pairingExpirySleep: pairingExpirySleep
         )
     } else {
@@ -3709,7 +3730,8 @@ private func makeFixture(
                     pollInterval: .milliseconds(1)
                 )
             },
-            now: now
+            now: now,
+            advancedPostRefreshIsCancelled: advancedPostRefreshIsCancelled
         )
     }
     try await credentialStore.saveToken("wlt_client", for: host.endpoint)
@@ -3731,13 +3753,14 @@ private func makeFixture(
 
 @MainActor
 private func makeAdvancedFixture(
-    extraResults: [Result<(Data, HTTPURLResponse), Error>]
+    extraResults: [Result<(Data, HTTPURLResponse), Error>],
+    advancedPostRefreshIsCancelled: @escaping @MainActor () -> Bool = { Task.isCancelled }
 ) async throws -> AdministrationFixture {
     let fixture = try await makeFixture(results: [
         AdminScriptedHTTP.ok("{}"),
         AdminScriptedHTTP.ok(administrationSettingsJSON(advanced: true, httpPort: 8377)),
         AdminScriptedHTTP.ok(administrationAdvancedIdentityJSON),
-    ] + extraResults)
+    ] + extraResults, advancedPostRefreshIsCancelled: advancedPostRefreshIsCancelled)
     await fixture.model.begin(host: fixture.host)
     await fixture.model.unlock(token: "boot-admin")
     await fixture.model.reloadAdvanced()
