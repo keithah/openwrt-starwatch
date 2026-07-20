@@ -23,11 +23,18 @@ public struct RouterPairingRow: Equatable, Sendable {
 
 public struct RouterDevicePairingActions: Equatable, Sendable {
     public let showsScan: Bool
+    public let showsSelect: Bool
     public let showsPair: Bool
     public let showsUnpair: Bool
 
-    public init(showsScan: Bool, showsPair: Bool, showsUnpair: Bool) {
+    public init(
+        showsScan: Bool,
+        showsSelect: Bool,
+        showsPair: Bool,
+        showsUnpair: Bool
+    ) {
         self.showsScan = showsScan
+        self.showsSelect = showsSelect
         self.showsPair = showsPair
         self.showsUnpair = showsUnpair
     }
@@ -67,11 +74,14 @@ public enum RouterDevicePairingPresentation {
     }
 
     public static func actions(
-        isBusy: Bool,
+        isOperationRunning: Bool,
+        stage: String,
         hasSelection: Bool
     ) -> RouterDevicePairingActions {
-        .init(
+        let isBusy = isOperationRunning || stage == "scanning" || stage == "pairing"
+        return .init(
             showsScan: !isBusy,
+            showsSelect: !isBusy,
             showsPair: !isBusy && hasSelection,
             showsUnpair: !isBusy
         )

@@ -94,6 +94,12 @@ final class RouterAdministrationModel {
     private var devicePairingGeneration: UInt64 = 0
     private var devicePairingClient: RouterDevicePairingClient?
     private var pairingExpiryTask: Task<Void, Never>?
+
+    var isDevicePairingBusy: Bool {
+        isDevicePairingRunning
+            || devicePairingStatus?.stage == .scanning
+            || devicePairingStatus?.stage == .pairing
+    }
     private var settingsRestartRequiredHosts: Set<UUID> = []
     private var validatedReplacementLease: ValidatedReplacementLease?
 
@@ -1119,7 +1125,8 @@ final class RouterAdministrationModel {
         session: UInt64,
         generation: UInt64
     ) {
-        guard sessionGeneration == session,
+        guard !Task.isCancelled,
+              sessionGeneration == session,
               devicePairingGeneration == generation,
               devicePairingClient === client
         else { return }

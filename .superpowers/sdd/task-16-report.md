@@ -102,3 +102,45 @@
 - A DELETE 409 performs exactly one authoritative status reread and never
   retries the DELETE. While any operation is active, scan/pair/remove/select actions
   are structurally absent from the SwiftUI tree rather than disabled.
+
+## Final re-review correction wave
+
+### RED
+
+- Focused Network exited 1: the gated terminal-progress cancellation became
+  false success, and a busy unpair stopped at `pairing` instead of polling the
+  adopted daemon operation to `paired`.
+- Focused UI exited 1 because the pure action policy had no authoritative
+  `stage` input and therefore could not structurally represent daemon-owned
+  busy state.
+- Captured logs:
+  `/tmp/wattline-m4-task16-finalfix-network-red.log` and
+  `/tmp/wattline-m4-task16-finalfix-ui-red.log`.
+
+### GREEN
+
+- Focused Network pairing: 19/19.
+- Full WattlineNetwork: 204/204.
+- Focused UI pairing presentation: 6/6.
+- Full WattlineUI: 51/51.
+- Focused `RouterAdministrationModelTests`: succeeded.
+- Full Wattline iOS scheme: 281/281 passed, zero failed/skipped/expected,
+  on `Wattline-Tests-2` (iPhone 17e, iOS 26.5, arm64, UDID
+  `74C1DA4D-7190-4497-AAD5-9EB140B3A96A`).
+- Captured logs and result summary:
+  `/tmp/wattline-m4-task16-finalfix-network-full.log`,
+  `/tmp/wattline-m4-task16-finalfix-ui-full.log`,
+  `/tmp/wattline-m4-task16-finalfix-app-full.log`, and
+  `/tmp/wattline-m4-task16-finalfix-app-summary.json`.
+
+### Corrections
+
+- Progress publication now checks caller cancellation and the client
+  generation immediately before and after every async callback, preventing a
+  suspended callback from turning cancellation into late progress or success.
+- The app publisher also refuses publication from a cancelled task.
+- UI composition derives structural busy state from both the local operation
+  and authoritative `scanning`/`pairing` status; Select uses the same pure
+  composition as Scan/Pair/Remove.
+- A 409 unpair adopts and polls the daemon-owned operation to a terminal status
+  without retrying DELETE.

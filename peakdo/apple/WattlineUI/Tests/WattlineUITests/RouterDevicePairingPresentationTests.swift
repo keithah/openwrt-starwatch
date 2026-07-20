@@ -28,13 +28,38 @@ final class RouterDevicePairingPresentationTests: XCTestCase {
 
     func testBusyCompositionStructurallyOmitsConflictingActions() {
         XCTAssertEqual(
-            RouterDevicePairingPresentation.actions(isBusy: true, hasSelection: true),
-            .init(showsScan: false, showsPair: false, showsUnpair: false)
+            RouterDevicePairingPresentation.actions(
+                isOperationRunning: true, stage: "idle", hasSelection: true
+            ),
+            .init(
+                showsScan: false, showsSelect: false,
+                showsPair: false, showsUnpair: false
+            )
         )
         XCTAssertEqual(
-            RouterDevicePairingPresentation.actions(isBusy: false, hasSelection: true),
-            .init(showsScan: true, showsPair: true, showsUnpair: true)
+            RouterDevicePairingPresentation.actions(
+                isOperationRunning: false, stage: "idle", hasSelection: true
+            ),
+            .init(
+                showsScan: true, showsSelect: true,
+                showsPair: true, showsUnpair: true
+            )
         )
+    }
+
+    func testAuthoritativeBusyStageStructurallyOmitsEveryConflictingAction() {
+        for stage in ["scanning", "pairing"] {
+            XCTAssertEqual(
+                RouterDevicePairingPresentation.actions(
+                    isOperationRunning: false, stage: stage, hasSelection: true
+                ),
+                .init(
+                    showsScan: false, showsSelect: false,
+                    showsPair: false, showsUnpair: false
+                ),
+                "authoritative \(stage) must remain busy after the local request returns"
+            )
+        }
     }
 
     func testPresentationValuesCannotContainPIN() {

@@ -20,7 +20,8 @@ struct RouterDevicePairingView: View {
 
     private var actions: RouterDevicePairingActions {
         RouterDevicePairingPresentation.actions(
-            isBusy: model.isDevicePairingRunning,
+            isOperationRunning: model.isDevicePairingRunning,
+            stage: model.devicePairingStatus?.stage.rawValue ?? "idle",
             hasSelection: selectedMAC != nil
         )
     }
@@ -48,7 +49,7 @@ struct RouterDevicePairingView: View {
                             pin = ""
                             Task { await model.unpairLinkPower(mac: row.mac) }
                         }
-                    } else if !row.paired, !model.isDevicePairingRunning {
+                    } else if !row.paired, actions.showsSelect {
                         Button("Select") { selectedMAC = row.mac }
                     }
                 }

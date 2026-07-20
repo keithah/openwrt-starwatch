@@ -141,7 +141,6 @@ public actor RouterDevicePairingClient {
         defer { if operationID == operation { operationID = nil } }
         let requestGeneration = generation
         let encoded = Self.percentEncodePathSegment(normalized)
-        var adoptedDaemonOperation = false
         do {
             let (data, response) = try await request(
                 "DELETE", "/api/v1/pairing/device/\(encoded)", body: nil,
@@ -152,11 +151,11 @@ public actor RouterDevicePairingClient {
             else { throw RouterDevicePairingError.invalidResponse }
         } catch NetworkError.api(409, .operationInProgress, _) {
             // Adopt the daemon's operation below. Never retry the mutation.
-            adoptedDaemonOperation = true
         }
         let adopted = try await readStatus(generation: requestGeneration)
-        await progress(adopted)
-        if adoptedDaemonOperation { return adopted }
+        try await publish(
+            adopted, generation: requestGeneration, progress: progress
+        )
         return try await runPolling(
             from: adopted, generation: requestGeneration, progress: progress
         )
@@ -191,7 +190,9 @@ public actor RouterDevicePairingClient {
         defer { if operationID == operation { operationID = nil } }
         let requestGeneration = generation
         let current = try await readStatus(generation: requestGeneration)
-        await progress(current)
+        try await publish(
+            current, generation: requestGeneration, progress: progress
+        )
         if current.stage == .scanning || current.stage == .pairing {
             return try await runPolling(
                 from: current, generation: requestGeneration, progress: progress
@@ -225,7 +226,9 @@ public actor RouterDevicePairingClient {
             // status instead of retrying the mutation.
         }
         let adopted = try await readStatus(generation: requestGeneration)
-        await progress(adopted)
+        try await publish(
+            adopted, generation: requestGeneration, progress: progress
+        )
         return try await runPolling(
             from: adopted, generation: requestGeneration, progress: progress
         )
@@ -272,9 +275,23 @@ public actor RouterDevicePairingClient {
             guard generation == requestGeneration else { throw CancellationError() }
             elapsed += pollInterval
             current = try await readStatus(generation: requestGeneration)
-            await progress(current)
+            try await publish(
+                current, generation: requestGeneration, progress: progress
+            )
         }
         return current
+    }
+
+    private func publish(
+        _ status: RouterDevicePairingStatus,
+        generation requestGeneration: UInt64,
+        progress: @escaping RouterDevicePairingProgress
+    ) async throws {
+        try Task.checkCancellation()
+        guard generation == requestGeneration else { throw CancellationError() }
+        await progress(status)
+        try Task.checkCancellation()
+        guard generation == requestGeneration else { throw CancellationError() }
     }
 
     private func readStatus(generation requestGeneration: UInt64) async throws

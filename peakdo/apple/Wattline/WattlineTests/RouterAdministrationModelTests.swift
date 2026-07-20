@@ -110,6 +110,22 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertNil(fixture.model.devicePairingStatus)
     }
 
+    func testAuthoritativePairingStageRemainsBusyAfterRefreshHasNoLocalOperation() async throws {
+        let fixture = try await makeFixture(
+            results: [],
+            devicePairingResults: [
+                AdminScriptedHTTP.ok(#"{"stage":"scanning","devices":[]}"#),
+            ]
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        await fixture.model.refreshDevicePairing()
+
+        XCTAssertFalse(fixture.model.isDevicePairingRunning)
+        XCTAssertTrue(fixture.model.isDevicePairingBusy)
+        XCTAssertEqual(fixture.model.devicePairingStatus?.stage, .scanning)
+    }
+
     func testRotateStagesReturnedPinWithoutReplacingActivePinAndShowsRestart() async throws {
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),

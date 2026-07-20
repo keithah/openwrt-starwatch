@@ -97,14 +97,15 @@ final class RouterDevicePairingTests: XCTestCase {
         XCTAssertNil(http.calls[0].body)
     }
 
-    func testUnpairOperationInProgressAdoptsOneStatusReadWithoutRetryingDelete() async throws {
+    func testUnpairOperationInProgressAdoptsAndPollsAuthoritativeOperationWithoutRetryingDelete() async throws {
         let (client, http) = try await makeClient(results: [
             .failure(NetworkError.api(status: 409, code: .operationInProgress, message: "busy")),
             ScriptedRouterHTTPClient.ok(pairing),
+            ScriptedRouterHTTPClient.ok(paired),
         ])
         let status = try await client.unpair(mac: "dc045aeb722b")
-        XCTAssertEqual(status.stage, .pairing)
-        XCTAssertEqual(http.calls.map(\.method), ["DELETE", "GET"])
+        XCTAssertEqual(status.stage, .paired)
+        XCTAssertEqual(http.calls.map(\.method), ["DELETE", "GET", "GET"])
     }
 
     func testInvalidMACOrPINFailsBeforeCredentialOrHTTPAccess() async throws {
@@ -259,6 +260,33 @@ final class RouterDevicePairingTests: XCTestCase {
         XCTAssertEqual(terminal.stage, .paired)
     }
 
+    func testCallerCancellationWhileTerminalProgressIsGatedPublishesNoLateStatusOrFalseSuccess() async throws {
+        let (client, _) = try await makeClient(results: [
+            ScriptedRouterHTTPClient.ok(idle),
+            ScriptedRouterHTTPClient.response(status: 202, scanAccepted),
+            ScriptedRouterHTTPClient.ok(paired),
+        ])
+        let recorder = GatedPairingProgressRecorder(gateAt: 2)
+        let operation = Task {
+            try await client.scan { status in
+                await recorder.receive(status)
+            }
+        }
+        await recorder.waitUntilGated()
+
+        operation.cancel()
+        await recorder.release()
+
+        do {
+            _ = try await operation.value
+            XCTFail("cancelled terminal progress must not become false success")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let publishedStages = await recorder.stages
+        XCTAssertEqual(publishedStages, [.idle])
+    }
+
     private func makeClient(
         results: [Result<(Data, HTTPURLResponse), Error>],
         clock: any RouterConnectionClock = ImmediatePairingClock(),
@@ -287,6 +315,41 @@ private actor PairingProgressRecorder {
     private var values: [RouterDevicePairingStage] = []
     var stages: [RouterDevicePairingStage] { values }
     func append(_ status: RouterDevicePairingStatus) { values.append(status.stage) }
+}
+
+private actor GatedPairingProgressRecorder {
+    private let gateAt: Int
+    private var receivedCount = 0
+    private var values: [RouterDevicePairingStage] = []
+    private var gate: CheckedContinuation<Void, Never>?
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(gateAt: Int) { self.gateAt = gateAt }
+
+    var stages: [RouterDevicePairingStage] { values }
+
+    func receive(_ status: RouterDevicePairingStatus) async {
+        receivedCount += 1
+        if receivedCount == gateAt {
+            gateWaiters.forEach { $0.resume() }
+            gateWaiters = []
+            await withCheckedContinuation { gate = $0 }
+        }
+        guard !Task.isCancelled else { return }
+        values.append(status.stage)
+    }
+
+    func waitUntilGated() async {
+        if gate != nil { return }
+        await withCheckedContinuation { continuation in
+            gateWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        gate?.resume()
+        gate = nil
+    }
 }
 
 private actor GatedPairingCredentialBackend: RouterCredentialBackend {
