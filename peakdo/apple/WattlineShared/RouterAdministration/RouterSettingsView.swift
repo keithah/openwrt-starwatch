@@ -178,7 +178,11 @@ struct RouterSettingsView: View {
             isPresented: $confirmsListenerMigration,
             titleVisibility: .visible
         ) {
-            Button("Confirm listener migration") { confirm(.listenerMigration) }
+            Button("Confirm listener migration", role: .destructive) {
+                confirm(.listenerMigration)
+            }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm changing router listeners")
             Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
         } message: {
             Text("Listener changes can interrupt access. Keep a verified endpoint available for reconnection.")

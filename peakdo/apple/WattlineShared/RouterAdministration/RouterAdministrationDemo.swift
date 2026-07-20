@@ -147,6 +147,8 @@ struct RouterAdministrationDemo: Equatable, CustomStringConvertible {
               let update = try JSONSerialization.jsonObject(with: patchData) as? [String: Any]
         else { throw RouterAdministrationDemoError.invalidFixture }
         merge(update, into: &original)
+        // A Demo save acknowledges a PIN change but never retains the submitted secret.
+        original["ble_pin"] = ""
         return try JSONDecoder().decode(
             RouterSettings.self,
             from: JSONSerialization.data(withJSONObject: original, options: [.sortedKeys])

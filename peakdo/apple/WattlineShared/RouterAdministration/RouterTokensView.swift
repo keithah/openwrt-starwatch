@@ -39,6 +39,12 @@ struct RouterTokensView: View {
 
     var body: some View {
         Group {
+            if model.tokens.isEmpty, model.tokensError == nil {
+                Text("No API clients available.")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("state.unavailable")
+                    .accessibilityLabel("No API clients available")
+            }
             ForEach(model.tokens) { token in
                 let presentation = presentation(for: token)
                 VStack(alignment: .leading, spacing: 2) {
@@ -77,7 +83,10 @@ struct RouterTokensView: View {
                 }
             }
             if let message = model.tokensError {
-                Text(message).foregroundStyle(.orange)
+                Text(message)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("state.unavailable")
+                    .accessibilityLabel("API clients unavailable. \(message)")
             }
         }
         .task { await model.reloadTokens() }

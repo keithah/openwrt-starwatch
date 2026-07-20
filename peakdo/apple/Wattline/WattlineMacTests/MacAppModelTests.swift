@@ -18,6 +18,36 @@ final class MacAppModelTests: XCTestCase {
         XCTAssertEqual(constructions, 1)
         XCTAssertTrue(model.started)
     }
+
+    func testRealDeviceActivationReplacesRouterServicesOnceAndAdvancesGeneration() {
+        let initialConnections = RouterConnectionModel.demo()
+        let initialAdministration = RouterAdministrationModel.demo(
+            connections: initialConnections
+        )
+        let realConnections = RouterConnectionModel.demo()
+        let realAdministration = RouterAdministrationModel.demo(
+            connections: realConnections
+        )
+        var serviceConstructions = 0
+        let model = MacAppModel(
+            transportFactory: { TestTransport() },
+            routerConnections: initialConnections,
+            routerAdministration: initialAdministration,
+            routerServicesFactory: {
+                serviceConstructions += 1
+                return (realConnections, realAdministration)
+            }
+        )
+
+        model.connectRealDevice()
+        model.connectRealDevice()
+
+        XCTAssertEqual(serviceConstructions, 1)
+        XCTAssertEqual(model.routerServicesGeneration, 1)
+        XCTAssertTrue(model.routerConnections === realConnections)
+        XCTAssertTrue(model.routerAdministration === realAdministration)
+        XCTAssertFalse(model.isDemo)
+    }
 }
 
 private actor TestTransport: DeviceTransport {

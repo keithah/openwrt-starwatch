@@ -7,13 +7,20 @@ import WattlineNetwork
 @Observable
 final class MacAppModel {
     typealias TransportFactory = @MainActor () -> any DeviceTransport
+    typealias RouterServices = (
+        connections: RouterConnectionModel,
+        administration: RouterAdministrationModel
+    )
+    typealias RouterServicesFactory = @MainActor () -> RouterServices
 
     private let transportFactory: TransportFactory
+    private let routerServicesFactory: RouterServicesFactory
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
 
     private(set) var routerConnections: RouterConnectionModel
     private(set) var routerAdministration: RouterAdministrationModel
+    private(set) var routerServicesGeneration: UInt64 = 0
     let routerEnrollmentRoute: RouterEnrollmentRoute
 
     private(set) var started = false
@@ -23,10 +30,15 @@ final class MacAppModel {
         transportFactory: @escaping TransportFactory,
         routerConnections: RouterConnectionModel? = nil,
         routerAdministration: RouterAdministrationModel? = nil,
-        routerEnrollmentRoute: RouterEnrollmentRoute = RouterEnrollmentRoute()
+        routerEnrollmentRoute: RouterEnrollmentRoute = RouterEnrollmentRoute(),
+        routerServicesFactory: @escaping RouterServicesFactory = {
+            let connections = RouterConnectionModel.production()
+            return (connections, .production(connections: connections))
+        }
     ) {
         let connections = routerConnections ?? .demo()
         self.transportFactory = transportFactory
+        self.routerServicesFactory = routerServicesFactory
         self.routerConnections = connections
         self.routerAdministration = routerAdministration ?? .demo(
             connections: connections
@@ -67,8 +79,9 @@ final class MacAppModel {
 
     private func activateRealDeviceServices() {
         guard isDemo else { return }
-        let connections = RouterConnectionModel.production()
-        routerConnections = connections
-        routerAdministration = .production(connections: connections)
+        let services = routerServicesFactory()
+        routerConnections = services.connections
+        routerAdministration = services.administration
+        routerServicesGeneration &+= 1
     }
 }

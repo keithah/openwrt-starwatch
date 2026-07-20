@@ -58,8 +58,10 @@ struct MacRootView: View {
                 MacRouterAdministrationView(
                     model: model.routerAdministration,
                     connections: model.routerConnections,
-                    enrollmentRoute: model.routerEnrollmentRoute
+                    enrollmentRoute: model.routerEnrollmentRoute,
+                    servicesGeneration: model.routerServicesGeneration
                 )
+                .id(model.routerServicesGeneration)
             }
         }
         .task {

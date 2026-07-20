@@ -245,6 +245,8 @@ struct RouterRulesView: View {
                 if automationDocuments.isEmpty, model.rulesLoadState == .loaded {
                     Text("No additional automation rules.")
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("state.unavailable")
+                        .accessibilityLabel("No additional automation rules available")
                 }
                 ForEach(Array(automationDocuments.enumerated()), id: \.offset) { _, document in
                     switch document {
@@ -271,7 +273,12 @@ struct RouterRulesView: View {
                 }
             }
             if let message = model.rulesError {
-                Section { Text(message).foregroundStyle(.orange) }
+                Section {
+                    Text(message)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("state.unavailable")
+                        .accessibilityLabel("Automation rules unavailable. \(message)")
+                }
             }
         }
         .task(id: model.host?.endpoint.peripheralID) {

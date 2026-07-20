@@ -104,6 +104,94 @@ final class RouterAdministrationDemoTests: XCTestCase {
         })
     }
 
+    func testDemoSettingsAcknowledgesBLEPINWithoutRetainingOrPersistingIt() async throws {
+        let credentials = RecordingDemoCredentialBackend()
+        let hosts = RecordingDemoHostBackend()
+        let model = RouterAdministrationModel.demo(
+            credentials: credentials,
+            hosts: hosts,
+            now: now
+        )
+        let secret = "739204"
+
+        let outcome = await model.saveSettings(RouterSettingsPatch(blePIN: secret))
+
+        XCTAssertEqual(outcome, .accepted)
+        let settings = try XCTUnwrap(model.settings)
+        XCTAssertEqual(settings.blePIN, "")
+        XCTAssertFalse(String(describing: settings).contains(secret))
+        XCTAssertFalse(String(reflecting: settings).contains(secret))
+        let credentialCalls = await credentials.recordedCalls()
+        XCTAssertTrue(credentialCalls.isEmpty)
+        XCTAssertTrue(hosts.recordedCalls().isEmpty)
+    }
+
+    func testDemoUpdateDoesNotReplaceUnknownRawRuleWithKnownRule() async throws {
+        let model = RouterAdministrationModel.demo(now: now)
+        let original = try XCTUnwrap(model.rules.first { document in
+            guard case let .unknown(raw) = document else { return false }
+            return raw.name == "future_telemetry"
+        })
+        let attemptedReplacement = try RouterRule(
+            name: "future_telemetry",
+            enabled: false,
+            condition: .inputPower(state: .absent),
+            hold: RouterRuleDuration(.seconds(60)),
+            hysteresisMargin: 5,
+            actions: [.dcOff],
+            confirmShutdown: false
+        )
+
+        await model.updateRule(
+            named: "future_telemetry",
+            rule: attemptedReplacement,
+            confirmation: nil
+        )
+
+        XCTAssertEqual(
+            model.rules.first { document in
+                switch document {
+                case let .known(rule): rule.name == "future_telemetry"
+                case let .unknown(raw): raw.name == "future_telemetry"
+                }
+            },
+            original
+        )
+    }
+
+    func testDemoDeleteDoesNotRemoveUnknownRawRule() async throws {
+        let model = RouterAdministrationModel.demo(now: now)
+        let original = try XCTUnwrap(model.rules.first { document in
+            guard case let .unknown(raw) = document else { return false }
+            return raw.name == "future_telemetry"
+        })
+
+        await model.deleteRule(named: "future_telemetry")
+
+        XCTAssertEqual(
+            model.rules.first { document in
+                guard case let .unknown(raw) = document else { return false }
+                return raw.name == "future_telemetry"
+            },
+            original
+        )
+    }
+
+    func testDemoPairingReloadRestoresRedactedStateAfterLifecycleClear() async throws {
+        let model = RouterAdministrationModel.demo(now: now)
+        let original = try XCTUnwrap(model.pairingStatus)
+
+        model.pairingDidEnterBackground()
+        XCTAssertNil(model.pairingStatus)
+
+        await model.reloadPairingMode()
+
+        let restored = try XCTUnwrap(model.pairingStatus)
+        XCTAssertEqual(restored.open, original.open)
+        XCTAssertEqual(restored.expiresAt, original.expiresAt)
+        XCTAssertNil(restored.pin)
+    }
+
     func testRequiredAccessibilityIdentifiersAreInSharedAndPlatformViews() throws {
         let sharedPaths = [
             "../WattlineShared/RouterAdministration/RouterAdvancedView.swift",
@@ -149,8 +237,77 @@ final class RouterAdministrationDemoTests: XCTestCase {
         }
     }
 
+    func testAccessibilitySemanticsAreAttachedToConcreteControlsAndStates() throws {
+        let settings = try source("../WattlineShared/RouterAdministration/RouterSettingsView.swift")
+        assertSemanticBlock(
+            settings,
+            anchor: "Button(\"Confirm listener migration\", role: .destructive)",
+            identifier: "action.destructive",
+            label: "Confirm changing router listeners"
+        )
+
+        let advanced = try source("../WattlineShared/RouterAdministration/RouterAdvancedView.swift")
+        assertSemanticBlock(
+            advanced,
+            anchor: "if let error = model.advancedError",
+            identifier: "state.unavailable",
+            label: "Advanced controls unavailable"
+        )
+        assertSemanticBlock(
+            advanced,
+            anchor: "Text(\"No advanced controls available.\")",
+            identifier: "state.unavailable",
+            label: "Advanced controls unavailable"
+        )
+
+        let rules = try source("../WattlineShared/RouterAdministration/RouterRulesView.swift")
+        assertSemanticBlock(
+            rules,
+            anchor: "Text(\"No additional automation rules.\")",
+            identifier: "state.unavailable",
+            label: "No additional automation rules available"
+        )
+        assertSemanticBlock(
+            rules,
+            anchor: "if let message = model.rulesError",
+            identifier: "state.unavailable",
+            label: "Automation rules unavailable"
+        )
+
+        let tokens = try source("../WattlineShared/RouterAdministration/RouterTokensView.swift")
+        assertSemanticBlock(
+            tokens,
+            anchor: "if model.tokens.isEmpty",
+            identifier: "state.unavailable",
+            label: "No API clients available"
+        )
+        assertSemanticBlock(
+            tokens,
+            anchor: "if let message = model.tokensError",
+            identifier: "state.unavailable",
+            label: "API clients unavailable"
+        )
+    }
+
     private func source(_ relativePath: String) throws -> String {
         try String(contentsOf: TestProjectFiles.url(relativePath), encoding: .utf8)
+    }
+
+    private func assertSemanticBlock(
+        _ source: String,
+        anchor: String,
+        identifier: String,
+        label: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let anchorRange = source.range(of: anchor) else {
+            XCTFail("missing semantic anchor \(anchor)", file: file, line: line)
+            return
+        }
+        let block = source[anchorRange.lowerBound...].prefix(600)
+        XCTAssertTrue(block.contains(identifier), "\(anchor) is missing \(identifier)", file: file, line: line)
+        XCTAssertTrue(block.contains(label), "\(anchor) is missing \(label)", file: file, line: line)
     }
 }
 

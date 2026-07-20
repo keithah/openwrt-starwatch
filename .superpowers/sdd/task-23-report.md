@@ -34,3 +34,23 @@ The fixture's first focused run also exposed malformed JSON in the new test data
 - Focused Demo tests: 6 passed, 0 failed. Focused Mac administration tests: 8 passed, 0 failed.
 - `git diff --check`: clean. The project file passes `plutil -lint`.
 - Static audits found exactly one macOS `BLETransport(` and one `DeviceSession(`, both in `MacAppModel`; no Demo crash traps, secret logging/persistence, forbidden endpoints, or Task 24 scope were introduced.
+
+## Review hardening
+
+Five review findings were reproduced with tests before production changes:
+
+- `/tmp/wattline-m5-task23-review-ios-red2.log`: the new Demo tests showed a submitted BLE PIN retained in settings, unknown raw rules overwritten/deleted by name, lifecycle-cleared pairing state not reloaded, and missing concrete accessibility semantics.
+- `/tmp/wattline-m5-task23-review-mac-red.log`: the live Mac administration view lacked a service-generation key, state reset, and generation-driven production-host reload.
+- `/tmp/wattline-m5-task23-review-mac-model-red.log`: the behavioral Mac model regression failed to compile before the injectable router-service boundary existed.
+
+The correction discards every submitted Demo BLE PIN after acknowledging the save, permits Demo update/delete only for matched known rules, republishes redacted fixture pairing state after lifecycle clearing, and keys Mac administration to a single-increment router-service generation. A real-device transition replaces the services exactly once; the visible view is recreated, clears Demo selection/secrets, preserves a newly consumed pairing route, reloads production hosts, and initializes without leave/re-entry. Accessibility checks now target the listener-migration destructive action and actual Advanced, Rules, and API-client empty/error states.
+
+Final evidence:
+
+- Focused Demo/accessibility suite: 11 passed, 0 failed (`/tmp/wattline-m5-task23-review-ios-green.log`).
+- Focused Mac administration suite: 9 passed, 0 failed (`/tmp/wattline-m5-task23-review-mac-green.log`).
+- Focused Mac service-transition behavior: 1 passed, 0 failed (`/tmp/wattline-m5-task23-review-mac-model-green.log`).
+- WattlineUI: 64 passed, 0 failed (`/tmp/wattline-m5-task23-review-ui-green.log`).
+- Full iOS: `/tmp/Wattline-Task23-Review.xcresult` reports 324 total, 324 passed, 0 failed, 0 skipped, and 0 expected failures on Wattline-Tests-2, iPhone 17e, iOS Simulator 26.5 (23F77).
+- Final full macOS: `/tmp/WattlineMac-Task23-Review-Final.xcresult` reports 16 total, 16 passed, 0 failed, 0 skipped, and 0 expected failures on My Mac, arm64 MacBook Pro, macOS 26.5.2 (25F84).
+- Final diff, ownership, crash-trap, secret-log/persistence, forbidden-endpoint, and Task 24 scope audits are clean.

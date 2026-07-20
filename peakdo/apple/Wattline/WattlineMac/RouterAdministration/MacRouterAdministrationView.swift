@@ -11,6 +11,7 @@ struct MacRouterAdministrationView: View {
     let model: RouterAdministrationModel
     let connections: RouterConnectionModel
     let enrollmentRoute: RouterEnrollmentRoute
+    let servicesGeneration: UInt64
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: RouterHostMetadata.ID?
@@ -26,11 +27,13 @@ struct MacRouterAdministrationView: View {
     init(
         model: RouterAdministrationModel,
         connections: RouterConnectionModel,
-        enrollmentRoute: RouterEnrollmentRoute
+        enrollmentRoute: RouterEnrollmentRoute,
+        servicesGeneration: UInt64
     ) {
         self.model = model
         self.connections = connections
         self.enrollmentRoute = enrollmentRoute
+        self.servicesGeneration = servicesGeneration
         _enrollmentAdapter = State(
             initialValue: MacRouterEnrollmentAdapter(route: enrollmentRoute)
         )
@@ -77,7 +80,8 @@ struct MacRouterAdministrationView: View {
                 .frame(minWidth: 520)
         }
         .navigationTitle("Router Administration")
-        .task {
+        .task(id: servicesGeneration) {
+            resetForRouterServicesChange()
             await connections.reloadSavedHosts()
             connections.startDiscovery()
             if enrollmentRoute.payload != nil {
@@ -460,6 +464,14 @@ struct MacRouterAdministrationView: View {
     private func clearLocalEntrySecrets() {
         pin = ""
         administratorToken = ""
+    }
+
+    private func resetForRouterServicesChange() {
+        enrollmentLifecycle.invalidatePreservingRoute()
+        selection = nil
+        selectedDiscoveredRouter = nil
+        enrollmentError = nil
+        clearLocalEntrySecrets()
     }
 
     private func leaveEnrollmentLifecycle() {

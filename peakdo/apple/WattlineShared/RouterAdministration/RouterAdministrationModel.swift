@@ -731,7 +731,8 @@ final class RouterAdministrationModel {
             guard rule.name == name,
                   name != RouterPowerLossPreset.reservedName,
                   ruleConfirmationAllowsMutation(rule, confirmation: confirmation),
-                  let index = demoState.rules.firstIndex(where: { Self.ruleName($0) == name })
+                  let index = demoState.rules.firstIndex(where: { Self.ruleName($0) == name }),
+                  case .known = demoState.rules[index]
             else { return }
             demoState.rules[index] = .known(rule)
             self.demoState = demoState
@@ -757,8 +758,11 @@ final class RouterAdministrationModel {
 
     func deleteRule(named name: String) async {
         if var demoState {
-            guard name != RouterPowerLossPreset.reservedName else { return }
-            demoState.rules.removeAll { Self.ruleName($0) == name }
+            guard name != RouterPowerLossPreset.reservedName,
+                  let index = demoState.rules.firstIndex(where: { Self.ruleName($0) == name }),
+                  case .known = demoState.rules[index]
+            else { return }
+            demoState.rules.remove(at: index)
             self.demoState = demoState
             publishRules(demoState.rules)
             return
@@ -1467,6 +1471,14 @@ final class RouterAdministrationModel {
     }
 
     func reloadPairingMode() async {
+        if let demoState {
+            publishPairingStatus(RouterPairingMode(
+                open: demoState.pairingMode.open,
+                expiresAt: demoState.pairingMode.expiresAt,
+                pin: nil
+            ))
+            return
+        }
         guard !usesDemoServices else { return }
         await performPairingStatusAdmin { client in
             try await client.pairingMode()

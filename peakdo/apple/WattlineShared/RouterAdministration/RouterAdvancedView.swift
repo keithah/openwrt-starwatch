@@ -28,6 +28,13 @@ struct RouterAdvancedView: View {
                         Label("Enable Advanced in Router Configuration", systemImage: "gearshape")
                     }
                 }
+            } else if visibleSurfaces.isEmpty {
+                Section("Advanced device") {
+                    Text("No advanced controls available.")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("state.unavailable")
+                        .accessibilityLabel("Advanced controls unavailable")
+                }
             } else {
                 ForEach(visibleSurfaces, id: \.self) { surface in
                     surfaceSection(surface)
@@ -35,7 +42,12 @@ struct RouterAdvancedView: View {
             }
 
             if let error = model.advancedError {
-                Section { Text(error).foregroundStyle(.orange) }
+                Section {
+                    Text(error)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("state.unavailable")
+                        .accessibilityLabel("Advanced controls unavailable. \(error)")
+                }
             }
         }
         .task { await model.reloadAdvanced() }

@@ -140,4 +140,21 @@ final class MacRouterAdministrationTests: XCTestCase {
             XCTAssertTrue(text.contains(identifier), "missing \(identifier)")
         }
     }
+
+    func testRealDeviceServiceGenerationReinitializesVisibleAdministration() throws {
+        let appModel = try source("WattlineMac/MacAppModel.swift")
+        let root = try source("WattlineMac/MacRootView.swift")
+        let administration = try source(
+            "WattlineMac/RouterAdministration/MacRouterAdministrationView.swift"
+        )
+
+        XCTAssertTrue(appModel.contains("private(set) var routerServicesGeneration"))
+        XCTAssertTrue(appModel.contains("routerServicesGeneration &+= 1"))
+        XCTAssertTrue(root.contains("servicesGeneration: model.routerServicesGeneration"))
+        XCTAssertTrue(root.contains(".id(model.routerServicesGeneration)"))
+        XCTAssertTrue(administration.contains("let servicesGeneration: UInt64"))
+        XCTAssertTrue(administration.contains(".task(id: servicesGeneration)"))
+        XCTAssertTrue(administration.contains("selection = nil"))
+        XCTAssertTrue(administration.contains("await connections.reloadSavedHosts()"))
+    }
 }
