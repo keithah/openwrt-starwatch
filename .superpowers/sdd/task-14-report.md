@@ -6,9 +6,10 @@ Implemented Milestone 3 Task 14 only, starting from reviewed Task 13 head
 `8801d1c094de78a3ca0114792abde25cda62a4e8` on `codex/wattline-phase-2`.
 
 The feature commit subject is exactly `feat: rotate router TLS pins safely`. Independent review
-then identified a restart-recovery reachability issue, addressed in the focused follow-up commit
-`fix: keep staged TLS promotion reachable`. Both SHAs are returned with the task handoff because
-recording the second commit's own SHA inside its contents is self-referential.
+then identified two promotion-control races, addressed in the focused follow-up commits
+`fix: keep staged TLS promotion reachable` and `fix: serialize TLS promotion controls`. All SHAs
+are returned with the task handoff because recording the final commit's own SHA inside its contents
+is self-referential.
 
 ## Behavior delivered
 
@@ -34,6 +35,8 @@ recording the second commit's own SHA inside its contents is self-referential.
 - After a restart makes the old active pin unusable, a reopened locked administration screen still
   offers the explicit staged-pin verification action. Successful promotion reattaches the
   administrator client to the promoted endpoint before a subsequent unlock.
+- Lock and Unlock are both structurally disabled and model-guarded while staged verification is in
+  flight, so neither can invalidate publication after the host-store promotion becomes durable.
 - App publication is scoped to the captured host/session/admin/request generation. A stale
   completion after endpoint replacement does not stage into or publish over the replacement.
 
@@ -89,7 +92,7 @@ remained green.
 
 ### App GREEN
 
-The same focused simulator command passed all 79 `RouterAdministrationModelTests`, including the
+The same focused simulator command passed all 81 `RouterAdministrationModelTests`, including the
 Task 14 app tests and the review regression, exit 0. Evidence:
 `/tmp/wattline-m3-task14-app-green.log`.
 
@@ -105,6 +108,15 @@ verification action while locked, reattaches administration to the atomically pr
 and retains generation checks against the captured access state. The focused regression then
 passed (exit 0; evidence: `/tmp/wattline-m3-task14-review-green.log`).
 
+Re-review then found that Lock or Unlock could begin while the staged `/device` probe was gated,
+invalidate the TLS generation, and suppress publication after the host-store compare-and-swap had
+already promoted and cleared the staged pin. Two gated tests proved both overlaps non-vacuously:
+`testUnlockCannotInvalidateLockedStagedPromotionInFlight` and
+`testLockCannotInvalidateUnlockedStagedPromotionInFlight` both failed before the guard (exit 65;
+evidence: `/tmp/wattline-m3-task14-overlap-red.log`). Model guards plus matching disabled UI states
+were the minimal fix; both focused tests passed afterward (exit 0; evidence:
+`/tmp/wattline-m3-task14-overlap-green.log`).
+
 ## Fresh verification
 
 - `swift test --package-path peakdo/apple/WattlineNetwork --filter RouterTLSRotationTests`:
@@ -114,7 +126,7 @@ passed (exit 0; evidence: `/tmp/wattline-m3-task14-review-green.log`).
 - `swift test --package-path peakdo/apple/WattlineUI`:
   **42 tests, 0 failures**, exit 0. Evidence: `/tmp/wattline-m3-task14-ui.log`.
 - Focused iOS `RouterAdministrationModelTests`:
-  **79 tests passed**, exit 0.
+  **81 tests passed**, exit 0.
 - `xcodebuild build -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline
   -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO`:
   **exit 0**. Evidence: `/tmp/wattline-m3-task14-build.log`.
@@ -156,6 +168,9 @@ and generic build exited 0.
 - Independent review expanded the separate verification action to the locked administration
   surface only when a staged pin exists. Rotation remains HTTPS-only inside unlocked Settings, and
   verification remains explicit: there is still no reconnect-time or automatic promotion.
+- Re-review added model-level Lock/Unlock exclusion during promotion as well as disabled button
+  states. This preserves the exact captured generation through durable compare-and-swap and model
+  publication without broadening TLS authorization.
 - Staging also requires an existing active pin. This enforces the no-TOFU requirement for rotation.
 - Ran the explicitly requested generic iOS build in addition to the brief's focused suites.
 - The pre-existing report at this path described an unrelated earlier widget task; it was replaced

@@ -37,7 +37,11 @@ struct RouterAdministrationView: View {
                             adminToken = ""
                             Task { await admin.unlock(token: token) }
                         }
-                        .disabled(adminToken.isEmpty || admin.access == .verifying)
+                        .disabled(
+                            adminToken.isEmpty
+                                || admin.access == .verifying
+                                || admin.isTLSPromotionRunning
+                        )
                         if admin.host?.stagedCertificateFingerprint != nil {
                             Button(
                                 admin.isTLSPromotionRunning
@@ -63,6 +67,7 @@ struct RouterAdministrationView: View {
                         Button("Lock administration", role: .destructive) {
                             Task { await admin.lock() }
                         }
+                        .disabled(admin.isTLSPromotionRunning)
                     }
                 }
 

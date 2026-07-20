@@ -104,6 +104,61 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.access, .unlocked)
     }
 
+    func testUnlockCannotInvalidateLockedStagedPromotionInFlight() async throws {
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        fixture.tlsPromotionHTTP.gateNextRequest()
+
+        let promotion = Task { await fixture.model.promoteStagedTLSPin() }
+        await fixture.tlsPromotionHTTP.waitForGateRegistration()
+        await fixture.model.unlock(token: "boot-admin")
+
+        XCTAssertEqual(fixture.model.access, .locked)
+        XCTAssertTrue(fixture.http.calls.isEmpty)
+
+        fixture.tlsPromotionHTTP.releaseGates()
+        await promotion.value
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appStagedPin)
+        XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
+    }
+
+    func testLockCannotInvalidateUnlockedStagedPromotionInFlight() async throws {
+        let fixture = try await makeFixture(
+            results: [AdminScriptedHTTP.ok("{}")],
+            tlsPromotionResults: [AdminScriptedHTTP.ok(administrationDeviceJSON(
+                id: "DC:04:5A:EB:72:2B"
+            ))]
+        )
+        let stagedHost = try await fixture.hostStore.stageCertificateFingerprint(
+            appStagedPin,
+            for: fixture.host.id
+        )
+        await fixture.model.begin(host: stagedHost)
+        await fixture.model.unlock(token: "boot-admin")
+        fixture.tlsPromotionHTTP.gateNextRequest()
+
+        let promotion = Task { await fixture.model.promoteStagedTLSPin() }
+        await fixture.tlsPromotionHTTP.waitForGateRegistration()
+        await fixture.model.lock()
+
+        XCTAssertEqual(fixture.model.access, .unlocked)
+
+        fixture.tlsPromotionHTTP.releaseGates()
+        await promotion.value
+        XCTAssertEqual(fixture.model.access, .unlocked)
+        XCTAssertEqual(fixture.model.host?.certificateFingerprint, appStagedPin)
+        XCTAssertNil(fixture.model.host?.stagedCertificateFingerprint)
+    }
+
     func testUnlockedModelLoadsSettingsAndPublishesOnlyCompletePUTReadback() async throws {
         let original = try administrationSettings(advanced: false, httpPort: 8377)
         let readback = try administrationSettings(advanced: true, httpPort: 9000)

@@ -237,7 +237,10 @@ final class RouterAdministrationModel {
     }
 
     func unlock(token: String) async {
-        guard host != nil, access != .verifying else { return }
+        guard host != nil,
+              access != .verifying,
+              !isTLSPromotionRunning
+        else { return }
         adminOperationGeneration &+= 1
         let session = sessionGeneration
         let adminOperation = adminOperationGeneration
@@ -269,7 +272,7 @@ final class RouterAdministrationModel {
     }
 
     func lock() async {
-        guard host != nil else { return }
+        guard host != nil, !isTLSPromotionRunning else { return }
         adminOperationGeneration &+= 1
         access = .locked
         adminError = nil
