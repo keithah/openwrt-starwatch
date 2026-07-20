@@ -36,7 +36,7 @@ set -- "$pages/gl-app-starwatch_${version}_all.ipk"
 [ -f "$1" ]
 glapp_ipk=$(basename "$1")
 
-printf '%s\n' Packages Packages.gz install.sh "$starwatchd_ipk" "$luci_ipk" "$glapp_ipk" | sort >"$tmp/expected-page-files"
+printf '%s\n' Packages Packages.gz install-starwatch.sh "$starwatchd_ipk" "$luci_ipk" "$glapp_ipk" | sort >"$tmp/expected-page-files"
 find "$pages" -type f -exec basename {} \; | sort >"$tmp/page-files"
 cmp -s "$tmp/expected-page-files" "$tmp/page-files"
 
@@ -51,7 +51,7 @@ while IFS= read -r filename; do
 	[ -f "$pages/$filename" ]
 done <"$tmp/filenames"
 
-cmp -s "$root/install.sh" "$pages/install.sh"
+cmp -s "$root/install.sh" "$pages/install-starwatch.sh"
 
 cat >"$tmp/usign" <<EOF
 #!/bin/sh

@@ -2,12 +2,12 @@
 # Install the Starwatch packages from the project-maintained opkg feed.
 set -eu
 
-feed_url='https://keithah.github.io/openwrt-starwatch'
+feed_url="${STARWATCH_FEED_URL:-https://keithah.github.io/openwrt-starwatch}"
 target_root="${STARWATCH_ROOT:-/}"
 feeds_file="$target_root/etc/opkg/customfeeds.conf"
 keys_dir="$target_root/etc/opkg/keys"
 feed_key_file="$keys_dir/f6c72c675c844b91"
-feed_key='untrusted comment: Starwatch opkg feed
+feed_key='untrusted comment: Keith OpenWrt package feed
 RWT2xyxnXIRLkZzbs1HvD+48GPkSqoNPCZVCOw49GUdTg2O7Cv9LzMtx'
 
 fail() {
@@ -40,7 +40,7 @@ fi
 
 feeds_dir=$(dirname "$feeds_file")
 tmp_file=$(mktemp "$feeds_dir/.customfeeds.conf.XXXXXX")
-key_tmp=$(mktemp "$keys_dir/.starwatch-key.XXXXXX")
+key_tmp=$(mktemp "$keys_dir/.keithah-key.XXXXXX")
 trap 'rm -f "$tmp_file" "$key_tmp"' 0 HUP INT TERM
 
 printf '%s\n' "$feed_key" >"$key_tmp"
@@ -49,8 +49,8 @@ mv "$key_tmp" "$feed_key_file"
 
 # This feed is managed exclusively by this installer. Keep every other feed
 # line byte-for-byte while replacing all previous managed entries with one.
-awk '$1 == "src/gz" && $2 == "starwatch" { next } { print }' "$feeds_file" >"$tmp_file"
-printf 'src/gz starwatch %s\n' "$feed_url" >>"$tmp_file"
+awk '$1 == "src/gz" && ($2 == "starwatch" || $2 == "wattline" || $2 == "keithah") { next } { print }' "$feeds_file" >"$tmp_file"
+printf 'src/gz keithah %s\n' "$feed_url" >>"$tmp_file"
 
 # mktemp normally creates mode 0600. Retain the existing file's access mode
 # and owner when the platform's stat format can provide them.

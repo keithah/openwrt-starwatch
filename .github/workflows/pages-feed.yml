@@ -5,6 +5,8 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  schedule:
+    - cron: '17 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -15,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: keithah/openwrt-wattline
+          path: wattline-source
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -25,8 +31,18 @@ jobs:
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
         working-directory: router
       - run: make -C package test feed-artifact
+      - name: Assemble shared Keith OpenWrt feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release download --repo keithah/openwrt-wattline \
+            --pattern '*.ipk' --dir package/out/pages --clobber
+          cp wattline-source/package/install.sh package/out/pages/install-wattline.sh
+          sh package/mkfeed.sh package/out/pages
+          touch package/out/pages/.nojekyll
       - name: Sign deployable opkg feed
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         env:
           STARWATCH_USIGN_PRIVATE_KEY: ${{ secrets.STARWATCH_USIGN_PRIVATE_KEY }}
         run: |
@@ -37,17 +53,22 @@ jobs:
           git -C "$RUNNER_TEMP/usign-src" checkout --detach FETCH_HEAD
           cmake -S "$RUNNER_TEMP/usign-src" -B "$RUNNER_TEMP/usign-build"
           cmake --build "$RUNNER_TEMP/usign-build"
-          printf '%s\n' "$STARWATCH_USIGN_PRIVATE_KEY" > "$RUNNER_TEMP/starwatch-feed.sec"
-          make -C package signed-feed-artifact \
+          printf '%s\n' "$STARWATCH_USIGN_PRIVATE_KEY" > "$RUNNER_TEMP/keithah-feed.sec"
+          SIGN_KEY="$RUNNER_TEMP/keithah-feed.sec" \
             USIGN="$RUNNER_TEMP/usign-build/usign" \
-            SIGNING_KEY="$RUNNER_TEMP/starwatch-feed.sec"
+            sh package/mkfeed.sh package/out/pages
+          cp package/starwatch-feed.pub package/out/pages/keithah-feed.pub
+          "$RUNNER_TEMP/usign-build/usign" -V \
+            -m package/out/pages/Packages \
+            -p package/out/pages/keithah-feed.pub \
+            -x package/out/pages/Packages.sig
       - uses: actions/upload-pages-artifact@v3
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         with:
           path: package/out/pages
 
   deploy:
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     needs: verify
     runs-on: ubuntu-latest
     permissions:

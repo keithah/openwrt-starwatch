@@ -55,7 +55,8 @@ feed: all
 feed-artifact: feed
 	rm -rf $(OUT)/pages
 	mkdir -p $(OUT)/pages
-	cp $(OUT)/Packages $(OUT)/Packages.gz $(STARWATCHD_IPK) $(LUCI_IPK) $(GLAPP_IPK) install.sh $(OUT)/pages/
+	cp $(OUT)/Packages $(OUT)/Packages.gz $(STARWATCHD_IPK) $(LUCI_IPK) $(GLAPP_IPK) $(OUT)/pages/
+	cp install.sh $(OUT)/pages/install-starwatch.sh
 	if [ -f $(OUT)/Packages.sig ]; then cp $(OUT)/Packages.sig $(OUT)/pages/; fi
 
 # Deployable feeds retain OpenWrt's global signature checks. The public key is

@@ -128,18 +128,21 @@ make_case glconfig "$base_feeds"
 mkdir -p "$tmp/glconfig/root/etc/config"
 : >"$tmp/glconfig/root/etc/config/glconfig"
 run_case glconfig MOCK_ARCHES='arch aarch64_cortex-a53 10'
-has_line "$tmp/glconfig/root/etc/opkg/customfeeds.conf" "src/gz starwatch $feed"
+has_line "$tmp/glconfig/root/etc/opkg/customfeeds.conf" "src/gz keithah $feed"
 has_line "$tmp/glconfig/log" 'opkg install starwatchd gl-app-starwatch'
 cmp -s "$root/starwatch-feed.pub" "$tmp/glconfig/root/etc/opkg/keys/f6c72c675c844b91"
 
 ouih_feeds='src/gz old https://old.example
 src/gz starwatch https://old.feed
+src/gz wattline https://old.wattline.feed
 src/gz keep https://keep.example'
 make_case ouih "$ouih_feeds"
 mkdir -p "$tmp/ouih/root/usr/lib/oui-httpd"
 run_case ouih MOCK_ARCHES='arch aarch64_cortex-a53 10'
-[ "$(line_count "$tmp/ouih/root/etc/opkg/customfeeds.conf" '^src/gz starwatch ')" -eq 1 ]
-has_line "$tmp/ouih/root/etc/opkg/customfeeds.conf" "src/gz starwatch $feed"
+[ "$(line_count "$tmp/ouih/root/etc/opkg/customfeeds.conf" '^src/gz keithah ')" -eq 1 ]
+[ "$(line_count "$tmp/ouih/root/etc/opkg/customfeeds.conf" '^src/gz starwatch ')" -eq 0 ]
+[ "$(line_count "$tmp/ouih/root/etc/opkg/customfeeds.conf" '^src/gz wattline ')" -eq 0 ]
+has_line "$tmp/ouih/root/etc/opkg/customfeeds.conf" "src/gz keithah $feed"
 has_line "$tmp/ouih/root/etc/opkg/customfeeds.conf" 'src/gz old https://old.example'
 has_line "$tmp/ouih/root/etc/opkg/customfeeds.conf" 'src/gz keep https://keep.example'
 has_line "$tmp/ouih/log" 'opkg install starwatchd gl-app-starwatch'
@@ -159,7 +162,7 @@ cmp -s "$root/starwatch-feed.pub" "$tmp/generic/root/etc/opkg/keys/f6c72c675c844
 
 # A second run must replace rather than append the managed feed.
 run_case generic MOCK_ARCHES='arch aarch64_cortex-a53 10'
-[ "$(line_count "$tmp/generic/root/etc/opkg/customfeeds.conf" '^src/gz starwatch ')" -eq 1 ]
+[ "$(line_count "$tmp/generic/root/etc/opkg/customfeeds.conf" '^src/gz keithah ')" -eq 1 ]
 has_line "$tmp/generic/root/etc/opkg/customfeeds.conf" 'src/gz core https://downloads.example/core'
 has_line "$tmp/generic/root/etc/opkg/customfeeds.conf" 'src/gz extras https://downloads.example/extras'
 

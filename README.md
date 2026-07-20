@@ -22,15 +22,16 @@ The public 0.1.1 feed currently supports `aarch64_cortex-a53` routers. Connect
 over SSH as root and run:
 
 ```sh
-wget -qO- https://keithah.github.io/openwrt-starwatch/install.sh | sh
+wget -qO- https://keithah.github.io/openwrt-starwatch/install-starwatch.sh | sh
 ```
 
 The installer checks the opkg architecture before changing anything. GL.iNet
 SDK4 routers receive `starwatchd` plus `gl-app-starwatch`; other supported
-OpenWrt routers receive `starwatchd` plus `luci-app-starwatch`. It manages only
-the `starwatch` entry in `/etc/opkg/customfeeds.conf`, preserving every other
-feed and all existing Starwatch configuration. It never forces a downgrade or
-reinstall. The feed index is signed with a dedicated Starwatch key installed
+OpenWrt routers receive `starwatchd` plus `luci-app-starwatch`. It migrates the
+legacy `starwatch`/`wattline` entries to one shared `keithah` entry in
+`/etc/opkg/customfeeds.conf`, preserving every unrelated feed and all existing
+Starwatch configuration. It never forces a downgrade or reinstall. The shared
+feed index is signed with Keith's OpenWrt publisher key installed
 alongside OpenWrt's existing opkg keys; global signature checking stays enabled.
 
 After installation, open `http://<router-address>:9633`, **Services →
@@ -145,7 +146,7 @@ Maintainers can stage the exact static GitHub Pages feed artifact locally:
 
 ```sh
 make -C package feed-artifact
-# unsigned local staging: package/out/pages/{Packages,Packages.gz,install.sh,*.ipk}
+# unsigned local staging: package/out/pages/{Packages,Packages.gz,install-starwatch.sh,*.ipk}
 ```
 
 To sign a local feed when an OpenWrt usign private key is available, pass it
