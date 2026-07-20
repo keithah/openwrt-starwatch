@@ -19,9 +19,9 @@ struct MacRouterAdministrationView: View {
     @State private var pin = ""
     @State private var enrollmentName = "Wattline Router"
     @State private var enrollmentLabel = "Wattline for Mac"
-    @State private var isEnrollmentSubmitting = false
     @State private var enrollmentError: String?
     @State private var enrollmentAdapter: MacRouterEnrollmentAdapter
+    @State private var enrollmentLifecycle: MacRouterEnrollmentLifecycle
 
     init(
         model: RouterAdministrationModel,
@@ -33,6 +33,9 @@ struct MacRouterAdministrationView: View {
         self.enrollmentRoute = enrollmentRoute
         _enrollmentAdapter = State(
             initialValue: MacRouterEnrollmentAdapter(route: enrollmentRoute)
+        )
+        _enrollmentLifecycle = State(
+            initialValue: MacRouterEnrollmentLifecycle(route: enrollmentRoute)
         )
     }
 
@@ -83,13 +86,13 @@ struct MacRouterAdministrationView: View {
             }
             await model.open(host: selectedHost)
         }
-        .onChange(of: enrollmentRoute.payload?.deviceID) { _, deviceID in
-            if deviceID != nil { showPairingPayload() }
+        .onChange(of: enrollmentRoute.payload) { _, payload in
+            if payload != nil { showPairingPayload() }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { clearEnrollmentSecrets() }
+            if phase != .active { leaveEnrollmentLifecycle() }
         }
-        .onDisappear { clearEnrollmentSecrets() }
+        .onDisappear { leaveEnrollmentLifecycle() }
         .onDisappear {
             connections.stopDiscovery()
             Task { await model.end() }
@@ -133,6 +136,7 @@ struct MacRouterAdministrationView: View {
                 }
             }
         }
+        .disabled(enrollmentLifecycle.isSubmitting)
     }
 
     @ViewBuilder
@@ -265,21 +269,29 @@ struct MacRouterAdministrationView: View {
             Section("Router") {
                 LabeledContent("Device", value: enrollmentDeviceID(source))
                 LabeledContent("Address", value: enrollmentAuthority(source))
-                TextField("Router name", text: $enrollmentName)
+                switch source {
+                case let .discovered(router):
+                    LabeledContent("Router name", value: router.serviceName)
+                case .payload:
+                    TextField("Router name", text: $enrollmentName)
+                        .disabled(enrollmentLifecycle.isSubmitting)
+                }
                 TextField("Client label", text: $enrollmentLabel)
+                    .disabled(enrollmentLifecycle.isSubmitting)
             }
             if case .discovered = source {
                 Section("Current pairing PIN") {
                     SecureField("6-digit PIN", text: $pin)
                         .routerNumberInput()
+                        .disabled(enrollmentLifecycle.isSubmitting)
                 }
             }
             Section {
-                Button(isEnrollmentSubmitting ? "Pairing…" : "Pair and connect") {
+                Button(enrollmentLifecycle.isSubmitting ? "Pairing…" : "Pair and connect") {
                     enroll(source)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canEnroll(source) || isEnrollmentSubmitting)
+                .disabled(!canEnroll(source) || enrollmentLifecycle.isSubmitting)
             } footer: {
                 Text("The managed client token is stored in Keychain. Wattline never stores the pairing PIN.")
             }
@@ -308,8 +320,17 @@ struct MacRouterAdministrationView: View {
     }
 
     private func canEnroll(_ source: MacRouterEnrollmentSource) -> Bool {
-        !enrollmentLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !enrollmentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasRouterName: Bool
+        switch source {
+        case .discovered:
+            hasRouterName = true
+        case .payload:
+            hasRouterName = !enrollmentName
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+        }
+        return !enrollmentLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && hasRouterName
             && {
                 if case .discovered = source {
                     return pin.utf8.count == 6
@@ -320,89 +341,115 @@ struct MacRouterAdministrationView: View {
     }
 
     private func beginEnrollment(_ router: DiscoveredRouter) {
-        enrollmentRoute.clear()
+        leaveEnrollmentLifecycle()
         selectedDiscoveredRouter = router
         selection = nil
-        enrollmentName = router.serviceName
-        clearEnrollmentSecrets()
-        enrollmentError = nil
     }
 
     private func showPairingPayload() {
         guard let payload = enrollmentRoute.payload else { return }
+        enrollmentLifecycle.invalidatePreservingRoute()
         selectedDiscoveredRouter = nil
         selection = nil
         enrollmentName = payload.host
-        clearEnrollmentSecrets()
+        clearLocalEntrySecrets()
         enrollmentError = nil
     }
 
     private func pastePairingLink() {
+        enrollmentLifecycle.invalidatePreservingRoute()
         do {
             try enrollmentAdapter.pastePairingLink()
-            showPairingPayload()
         } catch {
             enrollmentError = "The clipboard does not contain a Wattline pairing link."
         }
     }
 
     private func importQRImage() {
-        Task {
+        let generation = enrollmentLifecycle.beginSourceOperation()
+        let task = Task { @MainActor in
             do {
-                try await enrollmentAdapter.importQRImage()
-                showPairingPayload()
+                guard let input = try await enrollmentAdapter.pairingInputFromQRImage() else {
+                    _ = enrollmentLifecycle.finish(generation: generation)
+                    return
+                }
+                guard !Task.isCancelled,
+                      enrollmentLifecycle.finish(generation: generation)
+                else { return }
+                enrollmentRoute.consume(input)
             } catch {
+                guard !Task.isCancelled,
+                      enrollmentLifecycle.finish(generation: generation)
+                else { return }
                 enrollmentError = "The selected image does not contain a Wattline pairing QR code."
             }
         }
+        enrollmentLifecycle.own(task, generation: generation)
     }
 
     private func enroll(_ source: MacRouterEnrollmentSource) {
-        isEnrollmentSubmitting = true
+        let generation = enrollmentLifecycle.beginSubmission()
         enrollmentError = nil
         let submittedPIN = pin
+        let submittedName = enrollmentName
+        let submittedLabel = enrollmentLabel
         pin = ""
-        Task {
+        var connectedHost: RouterHostMetadata?
+        let task = Task { @MainActor in
             let coordinator = RouterEnrollmentCoordinator(
                 connections: connections,
-                connect: { host in selectSavedHost(host.id) }
+                connect: { host in
+                    guard !Task.isCancelled,
+                          enrollmentLifecycle.isCurrent(generation)
+                    else { return }
+                    connectedHost = host
+                }
             )
             do {
+                let enrolledHost: RouterHostMetadata
                 switch source {
                 case let .discovered(router):
-                    try await coordinator.submit(
+                    enrolledHost = try await coordinator.submit(
                         pin: submittedPIN,
-                        label: enrollmentLabel,
+                        label: submittedLabel,
                         router: router
                     )
                 case let .payload(payload):
-                    try await coordinator.submit(
+                    enrolledHost = try await coordinator.submit(
                         payload: payload,
-                        displayName: enrollmentName,
-                        label: enrollmentLabel
+                        displayName: submittedName,
+                        label: submittedLabel
                     )
                 }
-                enrollmentRoute.clear()
-                selectedDiscoveredRouter = nil
+                guard !Task.isCancelled,
+                      enrollmentLifecycle.finish(generation: generation)
+                else { return }
                 enrollmentError = nil
+                selectSavedHost((connectedHost ?? enrolledHost).id)
             } catch {
+                guard !Task.isCancelled,
+                      enrollmentLifecycle.finish(generation: generation)
+                else { return }
                 enrollmentError = coordinator.errorMessage
             }
-            pin = ""
-            isEnrollmentSubmitting = false
         }
+        enrollmentLifecycle.own(task, generation: generation)
     }
 
-    private func clearEnrollmentSecrets() {
+    private func clearLocalEntrySecrets() {
         pin = ""
         administratorToken = ""
     }
 
-    private func selectSavedHost(_ id: RouterHostMetadata.ID) {
-        enrollmentRoute.clear()
+    private func leaveEnrollmentLifecycle() {
+        enrollmentLifecycle.invalidateAndClearRoute()
         selectedDiscoveredRouter = nil
         enrollmentError = nil
-        clearEnrollmentSecrets()
+        clearLocalEntrySecrets()
+    }
+
+    private func selectSavedHost(_ id: RouterHostMetadata.ID) {
+        leaveEnrollmentLifecycle()
         selection = id
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import WattlineNetwork
 
 @MainActor
 protocol MacPasteboardReading {
@@ -35,7 +36,7 @@ final class MacRouterEnrollmentAdapter {
     private let route: RouterEnrollmentRoute
     private let pasteboard: any MacPasteboardReading
     private let imageSelector: any MacImageSelecting
-    private let imageImporter: RouterPairingImageImporter
+    private let recognizer: any QRCodeRecognizer
 
     init(
         route: RouterEnrollmentRoute,
@@ -46,7 +47,7 @@ final class MacRouterEnrollmentAdapter {
         self.route = route
         self.pasteboard = pasteboard
         self.imageSelector = imageSelector
-        imageImporter = RouterPairingImageImporter(recognizer: recognizer, route: route)
+        self.recognizer = recognizer
     }
 
     func pastePairingLink() throws {
@@ -55,9 +56,10 @@ final class MacRouterEnrollmentAdapter {
         }
     }
 
-    func importQRImage() async throws {
-        guard let data = try imageSelector.imageData() else { return }
-        try await imageImporter.importImage(data)
+    func pairingInputFromQRImage() async throws -> RouterPairingInput? {
+        guard let data = try imageSelector.imageData() else { return nil }
+        let value = try await recognizer.payload(from: data)
+        return try RouterPairingInputParser.parse(text: value)
     }
 }
 

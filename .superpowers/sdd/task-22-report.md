@@ -139,3 +139,46 @@ Review-fix audits:
 - No Mac camera capture or camera usage description was added. `WattlineUI` still has no `WattlineNetwork` import or dependency.
 - No forbidden device endpoints were introduced. Searches found no secret logging or persistence; all new PIN and administrator-token state is transient and explicitly cleared.
 - The fix diff is limited to project schemes/configuration, shared administration view relocation/platform adaptation, Mac administration/root navigation, and their regression tests/report.
+
+## Enrollment lifecycle hardening re-review
+
+The second re-review found two lifecycle races in the Mac enrollment composition. Local cleanup did not remove the URL PIN retained by `RouterEnrollmentRoute`, and both enrollment submission and QR-image recognition used unowned tasks whose stale completions could publish after a source change, host selection, scene transition, or disappearance.
+
+The remediation is intentionally Mac-only:
+
+- Added an observable `MacRouterEnrollmentLifecycle` that owns the current submission or image-import task, cancels it on invalidation, and uses a monotonic generation to reject stale coordinator callbacks and success/failure publication.
+- Split local-entry cleanup from destructive lifecycle exit. Replacing a payload clears transient local entry without destroying the new route; background, disappearance, saved-host selection, or a new discovered-router source cancels work and clears the route payload (including its PIN).
+- Observed the complete `RouterPairingPayload` in both the root and administration views, so a replacement link for the same device still navigates and refreshes the enrollment form.
+- Changed image import to return parsed input without mutating the route. Only the current, non-cancelled source generation may publish that input.
+- Disabled source/navigation and editable enrollment controls while a submission is active. The discovered Bonjour service name is now read-only instead of accepting an edit that enrollment ignored.
+
+Lifecycle RED evidence:
+
+- `/tmp/wattline-m5-task22-lifecycle-red.log`: the behavioral suite failed to compile before `MacRouterEnrollmentLifecycle` existed.
+- `/tmp/wattline-m5-task22-image-import-red.log`: the expanded suite failed to compile before source-operation generations and non-publishing image parsing existed.
+
+Focused lifecycle GREEN:
+
+```bash
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineMac -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO -only-testing:WattlineMacTests/MacRouterEnrollmentLifecycleTests
+```
+
+Result: `** TEST SUCCEEDED **`; `/tmp/wattline-m5-task22-lifecycle-green-final.log` records 5 lifecycle tests passed, 0 failed.
+
+Fresh full Mac gate:
+
+```bash
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineMac -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO -resultBundlePath /tmp/WattlineMac-Task22-Lifecycle-Final.xcresult
+```
+
+Result: `** TEST SUCCEEDED **`; the result bundle reports 12 total, 12 passed, 0 failed, 0 skipped, and 0 expected failures on My Mac, arm64, macOS 26.5.2 (25F84). The command output is recorded in `/tmp/wattline-m5-task22-lifecycle-full-green-final.log`.
+
+Fresh generic Mac build:
+
+```bash
+xcodebuild build -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineMac -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO
+```
+
+Result: `** BUILD SUCCEEDED **`; `/tmp/wattline-m5-task22-lifecycle-mac-build-final.log` records the universal arm64/x86_64 app build and embedded widget validation.
+
+This lifecycle diff changes only Mac sources, Mac tests, and this report. Shared, widget, iOS, and project configuration sources are unchanged, so the prior exact `WattlineWidgets` and `Wattline` iOS gates remain applicable at 313/313 each and were not rerun. Final audits remained clean: no Mac camera capture or permission, extra transport/session/broker ownership, forbidden endpoints, PIN/token persistence, or secret logging was introduced.

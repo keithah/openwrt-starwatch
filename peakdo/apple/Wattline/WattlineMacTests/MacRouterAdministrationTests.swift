@@ -83,18 +83,24 @@ final class MacRouterAdministrationTests: XCTestCase {
         XCTAssertTrue(administration.contains("let submittedPIN = pin"))
         XCTAssertTrue(administration.contains("pin: submittedPIN"))
         XCTAssertTrue(administration.contains("router: router"))
-        XCTAssertTrue(administration.contains("connect: { host in selectSavedHost(host.id) }"))
+        XCTAssertTrue(administration.contains("enrollmentLifecycle.isCurrent(generation)"))
+        XCTAssertTrue(administration.contains("enrollmentLifecycle.own(task, generation: generation)"))
         XCTAssertTrue(administration.contains("List(selection: savedHostSelection)"))
+        XCTAssertTrue(administration.contains(".disabled(enrollmentLifecycle.isSubmitting)"))
+        XCTAssertTrue(administration.contains("LabeledContent(\"Router name\", value: router.serviceName)"))
+        XCTAssertFalse(administration.contains("enrollmentName = router.serviceName"))
         XCTAssertTrue(administration.contains("pin = \"\""))
-        XCTAssertTrue(administration.contains(".onDisappear { clearEnrollmentSecrets() }"))
+        XCTAssertTrue(administration.contains(".onDisappear { leaveEnrollmentLifecycle() }"))
     }
 
     func testPairingURLNavigatesToAdministrationAndEnrollmentPrecedesSavedHost() throws {
         let root = try source("WattlineMac/MacRootView.swift")
         let administration = try source("WattlineMac/RouterAdministration/MacRouterAdministrationView.swift")
 
-        XCTAssertTrue(root.contains(".onChange(of: model.routerEnrollmentRoute.payload?.deviceID)"))
+        XCTAssertTrue(root.contains(".onChange(of: model.routerEnrollmentRoute.payload)"))
         XCTAssertTrue(root.contains("selection = .routerAdministration"))
+        XCTAssertTrue(administration.contains(".onChange(of: enrollmentRoute.payload)"))
+        XCTAssertFalse(administration.contains(".onChange(of: enrollmentRoute.payload?.deviceID)"))
         XCTAssertTrue(administration.contains("if let enrollmentSource"))
         XCTAssertTrue(administration.contains("guard enrollmentSource == nil"))
     }

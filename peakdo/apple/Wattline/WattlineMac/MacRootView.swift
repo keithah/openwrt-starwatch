@@ -64,8 +64,8 @@ struct MacRootView: View {
                 selection = .routerAdministration
             }
         }
-        .onChange(of: model.routerEnrollmentRoute.payload?.deviceID) { _, deviceID in
-            if deviceID != nil { selection = .routerAdministration }
+        .onChange(of: model.routerEnrollmentRoute.payload) { _, payload in
+            if payload != nil { selection = .routerAdministration }
         }
     }
 }
