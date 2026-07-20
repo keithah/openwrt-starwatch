@@ -412,9 +412,14 @@ struct RouterRuleEditor: View {
 
     var body: some View {
         Section("Rule") {
-            TextField("Rule name", text: $draft.name)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+            switch mode {
+            case .create:
+                TextField("Rule name", text: $draft.name)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            case let .update(rule):
+                LabeledContent("Rule name", value: rule.name)
+            }
             Toggle("Enabled", isOn: $draft.enabled)
         }
 

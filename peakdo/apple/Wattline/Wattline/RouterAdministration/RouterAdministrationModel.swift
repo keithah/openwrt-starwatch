@@ -533,7 +533,8 @@ final class RouterAdministrationModel {
         rule: RouterRule,
         confirmation: RouterRuleConfirmation?
     ) async {
-        guard name != RouterPowerLossPreset.reservedName,
+        guard rule.name == name,
+              name != RouterPowerLossPreset.reservedName,
               rule.name != RouterPowerLossPreset.reservedName,
               rules.contains(where: {
             guard Self.ruleName($0) == name, case .known = $0 else { return false }

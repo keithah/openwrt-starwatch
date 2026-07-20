@@ -208,6 +208,41 @@ final class RouterAdministrationModelTests: XCTestCase {
         XCTAssertFalse(source.contains("Hold (nanoseconds)"))
     }
 
+    func testUpdateRuleNameIsImmutableAndRenameNeverDispatches() async throws {
+        let existingJSON = administrationKnownRuleJSON(name: "existing")
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(existingJSON)]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+        let priorRules = fixture.model.rules
+        let callCount = fixture.http.calls.count
+        let source = try String(
+            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(
+            "case .create:\n                TextField(\"Rule name\""
+        ))
+        XCTAssertTrue(source.contains(
+            "case let .update(rule):\n                LabeledContent(\"Rule name\", value: rule.name)"
+        ))
+
+        await fixture.model.updateRule(
+            named: "existing",
+            rule: try administrationKnownRule(
+                administrationKnownRuleJSON(name: "renamed")
+            ),
+            confirmation: nil
+        )
+
+        XCTAssertEqual(fixture.http.calls.count, callCount)
+        XCTAssertEqual(fixture.model.rules, priorRules)
+    }
+
     func testInvalidAdminRuleMutationKeepsPriorRulesAndMarksStale() async throws {
         let existingJSON = administrationKnownRuleJSON(name: "existing", enabled: true)
         let fixture = try await makeFixture(results: [
