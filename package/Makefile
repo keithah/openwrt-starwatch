@@ -76,6 +76,7 @@ bin:
 define make_ipk
 	rm -rf $(OUT)/stage-$(1)
 	cp -r $(2) $(OUT)/stage-$(1)
+	if [ "$(1)" = "starwatchd" ]; then chmod 0755 $(OUT)/stage-$(1)/usr/bin/starwatchd; fi
 	mkdir -p $(OUT)/stage-$(1)/CONTROL
 	# Inject VERSION into the control's Version: field so the .ipk filename,
 	# the control metadata, and the feed index all agree — otherwise opkg sees
@@ -86,11 +87,11 @@ define make_ipk
 	# --format ustar: OpenWrt's opkg tar parser rejects pax extended headers
 	#   (typeflag 'x'/0x78), which macOS BSD tar emits by default.
 	# COPYFILE_DISABLE: keep BSD tar from injecting AppleDouble (._*) entries.
-	COPYFILE_DISABLE=1 tar --format ustar --exclude=CONTROL -czf $(OUT)/data.tar.gz -C $(OUT)/stage-$(1) .
-	COPYFILE_DISABLE=1 tar --format ustar -czf $(OUT)/control.tar.gz -C $(OUT)/stage-$(1)/CONTROL .
+	COPYFILE_DISABLE=1 tar --format ustar --owner=0 --group=0 --numeric-owner --exclude=CONTROL -czf $(OUT)/data.tar.gz -C $(OUT)/stage-$(1) .
+	COPYFILE_DISABLE=1 tar --format ustar --owner=0 --group=0 --numeric-owner -czf $(OUT)/control.tar.gz -C $(OUT)/stage-$(1)/CONTROL .
 	echo "2.0" > $(OUT)/debian-binary
 	# Outer wrapper is a gzipped ustar tar (OpenWrt ipk format), NOT ar.
-	( cd $(OUT) && COPYFILE_DISABLE=1 tar --format ustar -czf $(1)_$(VERSION)_$(3).ipk \
+	( cd $(OUT) && COPYFILE_DISABLE=1 tar --format ustar --owner=0 --group=0 --numeric-owner -czf $(1)_$(VERSION)_$(3).ipk \
 		./debian-binary ./control.tar.gz ./data.tar.gz )
 	rm -f $(OUT)/data.tar.gz $(OUT)/control.tar.gz $(OUT)/debian-binary
 endef
@@ -99,6 +100,7 @@ ipk-starwatchd: bin
 	rm -rf $(OUT)/stage
 	mkdir -p $(OUT)/stage/usr/bin
 	cp $(BIN) $(OUT)/stage/usr/bin/starwatchd
+	chmod 0755 $(OUT)/stage/usr/bin/starwatchd
 	cp -r starwatchd/etc $(OUT)/stage/
 	cp -r starwatchd/CONTROL $(OUT)/stage/
 	chmod +x $(OUT)/stage/etc/init.d/starwatch $(OUT)/stage/etc/uci-defaults/99-starwatch $(OUT)/stage/CONTROL/postinst
