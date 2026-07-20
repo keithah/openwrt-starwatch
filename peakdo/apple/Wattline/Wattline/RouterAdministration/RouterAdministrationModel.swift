@@ -24,6 +24,15 @@ final class RouterAdministrationModel {
         case refreshing
     }
 
+    enum RulesLoadState: Equatable {
+        case neverLoaded
+        case initialLoading
+        case loaded
+        case failed
+        case refreshing
+        case stale
+    }
+
     enum PairingDisplayState: Equatable {
         case unknown
         case loading
@@ -50,6 +59,10 @@ final class RouterAdministrationModel {
     private(set) var historyFetchedAt: Date?
     private(set) var historyError: String?
     private(set) var historyLoadState: HistoryLoadState = .neverLoaded
+    private(set) var rules: [RouterRuleDocument] = []
+    private(set) var rulesFetchedAt: Date?
+    private(set) var rulesError: String?
+    private(set) var rulesLoadState: RulesLoadState = .neverLoaded
     private(set) var pairingStatus: RouterPairingMode?
     private(set) var pairingQRPNG: Data?
     private(set) var pairingError: String?
@@ -90,6 +103,7 @@ final class RouterAdministrationModel {
     private var sessionGeneration: UInt64 = 0
     private var adminOperationGeneration: UInt64 = 0
     private var historyRequestGeneration: UInt64 = 0
+    private var rulesRequestGeneration: UInt64 = 0
     private var pairingSecretGeneration: UInt64 = 0
     private var pairingStatusRequestGeneration: UInt64 = 0
     private var pairingQRRequestGeneration: UInt64 = 0
@@ -245,6 +259,7 @@ final class RouterAdministrationModel {
         historyFetchedAt = nil
         historyError = nil
         historyLoadState = .neverLoaded
+        clearRulesState()
         tokenRequestGeneration &+= 1
         tokens = []
         tokensError = nil
@@ -300,6 +315,7 @@ final class RouterAdministrationModel {
         historyFetchedAt = nil
         historyError = nil
         historyLoadState = .neverLoaded
+        clearRulesState()
         tokenRequestGeneration &+= 1
         tokens = []
         tokensError = nil
@@ -472,6 +488,112 @@ final class RouterAdministrationModel {
             else { return }
             historyError = "Could not load router history."
             historyLoadState = .failed
+        }
+    }
+
+    func reloadRules() async {
+        guard host != nil else { return }
+        rulesRequestGeneration &+= 1
+        let request = rulesRequestGeneration
+        let session = sessionGeneration
+        rulesError = nil
+        rulesLoadState = rulesFetchedAt == nil ? .initialLoading : .refreshing
+        do {
+            let authoritativeRules = try await adminClient.rules()
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
+                  rulesRequestGeneration == request
+            else { return }
+            publishRules(authoritativeRules)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled,
+                  sessionGeneration == session,
+                  rulesRequestGeneration == request
+            else { return }
+            rulesError = "Could not load automation rules. Try again."
+            rulesLoadState = rulesFetchedAt == nil ? .failed : .stale
+        }
+    }
+
+    func createRule(
+        _ rule: RouterRule,
+        confirmation: RouterRuleConfirmation?
+    ) async {
+        guard ruleConfirmationAllowsMutation(rule, confirmation: confirmation),
+              !rules.contains(where: { Self.ruleName($0) == rule.name })
+        else { return }
+        await mutateRules { try await $0.createRule(rule) }
+    }
+
+    func updateRule(
+        named name: String,
+        rule: RouterRule,
+        confirmation: RouterRuleConfirmation?
+    ) async {
+        guard rules.contains(where: {
+            guard Self.ruleName($0) == name, case .known = $0 else { return false }
+            return true
+        }),
+        ruleConfirmationAllowsMutation(rule, confirmation: confirmation)
+        else { return }
+        await mutateRules { try await $0.updateRule(named: name, rule: rule) }
+    }
+
+    func deleteRule(named name: String) async {
+        guard rules.contains(where: {
+            guard Self.ruleName($0) == name, case .known = $0 else { return false }
+            return true
+        }) else { return }
+        await mutateRules { try await $0.deleteRule(named: name) }
+    }
+
+    func savePowerLossPreset(
+        enabled: Bool,
+        hold: RouterRuleDuration,
+        confirmShutdown: Bool,
+        confirmation: RouterRuleConfirmation?
+    ) async {
+        guard host != nil, access == .unlocked else { return }
+        let document = rules.first {
+            Self.ruleName($0) == RouterPowerLossPreset.reservedName
+        }
+        let preset = RouterPowerLossPreset(document: document)
+        do {
+            if preset.isCompatible {
+                guard confirmation == .shutdown else { return }
+                let updated = try preset.updating(
+                    enabled: enabled,
+                    hold: hold,
+                    confirmShutdown: confirmShutdown
+                )
+                await mutateRules {
+                    try await $0.updateRule(
+                        named: RouterPowerLossPreset.reservedName,
+                        rule: updated
+                    )
+                }
+            } else {
+                guard confirmation == .resetPowerLossPreset else { return }
+                let reset = try preset.reset(
+                    enabled: enabled,
+                    hold: hold,
+                    confirmed: true
+                )
+                if document == nil {
+                    await mutateRules { try await $0.createRule(reset) }
+                } else {
+                    await mutateRules {
+                        try await $0.updateRule(
+                            named: RouterPowerLossPreset.reservedName,
+                            rule: reset
+                        )
+                    }
+                }
+            }
+        } catch {
+            rulesError = "The rule could not be saved."
         }
     }
 
@@ -1544,6 +1666,49 @@ final class RouterAdministrationModel {
         }
     }
 
+    private func mutateRules(
+        _ operation: (RouterAdministrationClient) async throws -> RouterRuleMutationResult
+    ) async {
+        guard host != nil, access == .unlocked else { return }
+        rulesRequestGeneration &+= 1
+        let request = rulesRequestGeneration
+        rulesError = nil
+        let result = await performAdmin(operation) { [weak self] in
+            self?.rulesRequestGeneration == request
+        }
+        guard rulesRequestGeneration == request else { return }
+        switch result {
+        case let .success(mutation):
+            publishRules(mutation.rules)
+        case let .failure(message):
+            rulesError = message
+            rulesLoadState = .stale
+        case .stale:
+            break
+        }
+    }
+
+    private func publishRules(_ authoritativeRules: [RouterRuleDocument]) {
+        rules = authoritativeRules
+        rulesFetchedAt = now()
+        rulesError = nil
+        rulesLoadState = .loaded
+    }
+
+    private func ruleConfirmationAllowsMutation(
+        _ rule: RouterRule,
+        confirmation: RouterRuleConfirmation?
+    ) -> Bool {
+        !rule.actions.contains(.shutdown) || confirmation == .shutdown
+    }
+
+    private static func ruleName(_ document: RouterRuleDocument) -> String? {
+        switch document {
+        case let .known(rule): rule.name
+        case let .unknown(raw): raw.name
+        }
+    }
+
     private func performPairingAdmin<Value>(
         _ operation: (RouterAdministrationClient) async throws -> Value,
         isCurrent: () -> Bool = { true }
@@ -1652,6 +1817,14 @@ final class RouterAdministrationModel {
         isTLSPromotionRunning = false
         tlsPromotionRecoveryAvailable = false
         clearAdvancedState()
+    }
+
+    private func clearRulesState() {
+        rulesRequestGeneration &+= 1
+        rules = []
+        rulesFetchedAt = nil
+        rulesError = nil
+        rulesLoadState = .neverLoaded
     }
 
     private static func unlockMessage(for error: Error) -> String {

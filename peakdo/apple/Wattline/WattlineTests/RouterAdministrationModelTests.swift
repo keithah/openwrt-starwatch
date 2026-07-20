@@ -7,6 +7,303 @@ import XCTest
 
 @MainActor
 final class RouterAdministrationModelTests: XCTestCase {
+    func testReloadRulesPublishesKnownAndUnknownOnlyForCurrentSession() async throws {
+        let knownJSON = administrationKnownRuleJSON(name: "known")
+        let unknownJSON = administrationUnknownRuleJSON(name: "future")
+        let fixture = try await makeFixture(
+            results: [
+                AdminScriptedHTTP.ok("[\(knownJSON),\(unknownJSON)]"),
+                AdminScriptedHTTP.ok("[\(administrationKnownRuleJSON(name: "stale"))]"),
+            ],
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+        await fixture.model.begin(host: fixture.host)
+
+        await fixture.model.reloadRules()
+
+        XCTAssertEqual(fixture.model.rules.count, 2)
+        guard case let .known(known) = fixture.model.rules[0] else {
+            return XCTFail("Expected a known rule")
+        }
+        guard case let .unknown(unknown) = fixture.model.rules[1] else {
+            return XCTFail("Expected an unknown rule")
+        }
+        XCTAssertEqual(known.name, "known")
+        XCTAssertEqual(unknown.name, "future")
+        XCTAssertTrue(unknown.canonicalJSON.contains(#""future":true"#))
+        XCTAssertEqual(fixture.model.rulesFetchedAt, Date(timeIntervalSince1970: 1_800_000_000))
+        XCTAssertEqual(fixture.model.rulesLoadState, .loaded)
+        XCTAssertEqual(fixture.http.calls.last?.token, "wlt_client")
+
+        fixture.http.gateNextRequest()
+        let obsoleteReload = Task { await fixture.model.reloadRules() }
+        await fixture.http.waitForGateRegistration()
+        let replacement = try RouterHostValidator.validate(
+            "https://replacement.local:8378",
+            displayName: "Replacement router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "AA:BB:CC:DD:EE:FF",
+            certificateFingerprint: String(repeating: "1", count: 64)
+        )
+        await fixture.model.begin(host: replacement)
+        fixture.http.releaseGates()
+        await obsoleteReload.value
+
+        XCTAssertEqual(fixture.model.host, replacement)
+        XCTAssertTrue(fixture.model.rules.isEmpty)
+        XCTAssertNil(fixture.model.rulesFetchedAt)
+        XCTAssertEqual(fixture.model.rulesLoadState, .neverLoaded)
+    }
+
+    func testCreateUpdateDeletePublishOnlyMutationRelist() async throws {
+        let initialJSON = administrationKnownRuleJSON(name: "rule", enabled: true, hold: 1)
+        let createRequestJSON = administrationKnownRuleJSON(name: "created", enabled: true, hold: 2)
+        let createRelistJSON = administrationKnownRuleJSON(name: "created", enabled: false, hold: 3)
+        let updateRequestJSON = administrationKnownRuleJSON(name: "created", enabled: true, hold: 4)
+        let updateRelistJSON = administrationKnownRuleJSON(name: "created", enabled: false, hold: 5)
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(initialJSON)]"),
+            AdminScriptedHTTP.ok(createRequestJSON),
+            AdminScriptedHTTP.ok("[\(createRelistJSON)]"),
+            AdminScriptedHTTP.ok(updateRequestJSON),
+            AdminScriptedHTTP.ok("[\(updateRelistJSON)]"),
+            AdminScriptedHTTP.ok(#"{"deleted":"created"}"#),
+            AdminScriptedHTTP.ok("[]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+
+        await fixture.model.createRule(
+            try administrationKnownRule(createRequestJSON),
+            confirmation: nil
+        )
+        XCTAssertEqual(try administrationOnlyKnownRule(fixture.model.rules).enabled, false)
+        XCTAssertEqual(
+            try administrationOnlyKnownRule(fixture.model.rules).hold.nanoseconds(),
+            3
+        )
+
+        await fixture.model.updateRule(
+            named: "created",
+            rule: try administrationKnownRule(updateRequestJSON),
+            confirmation: nil
+        )
+        XCTAssertEqual(try administrationOnlyKnownRule(fixture.model.rules).enabled, false)
+        XCTAssertEqual(
+            try administrationOnlyKnownRule(fixture.model.rules).hold.nanoseconds(),
+            5
+        )
+
+        await fixture.model.deleteRule(named: "created")
+
+        XCTAssertTrue(fixture.model.rules.isEmpty)
+        XCTAssertEqual(fixture.model.rulesLoadState, .loaded)
+        XCTAssertNil(fixture.model.rulesError)
+        XCTAssertEqual(
+            fixture.http.calls.map { "\($0.method) \($0.path) \($0.token)" },
+            [
+                "GET /api/v1/settings boot-admin",
+                "GET /api/v1/rules wlt_client",
+                "POST /api/v1/rules boot-admin",
+                "GET /api/v1/rules wlt_client",
+                "PUT /api/v1/rules/created boot-admin",
+                "GET /api/v1/rules wlt_client",
+                "DELETE /api/v1/rules/created boot-admin",
+                "GET /api/v1/rules wlt_client",
+            ]
+        )
+    }
+
+    func testMutationFailureKeepsPriorRulesAndMarksThemStale() async throws {
+        let existingJSON = administrationKnownRuleJSON(name: "existing", enabled: true)
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(existingJSON)]"),
+            .failure(NetworkError.timeout),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+        let priorRules = fixture.model.rules
+        let priorFetch = fixture.model.rulesFetchedAt
+
+        await fixture.model.updateRule(
+            named: "existing",
+            rule: try administrationKnownRule(
+                administrationKnownRuleJSON(name: "existing", enabled: false)
+            ),
+            confirmation: nil
+        )
+
+        XCTAssertEqual(fixture.model.rules, priorRules)
+        XCTAssertEqual(fixture.model.rulesFetchedAt, priorFetch)
+        XCTAssertEqual(fixture.model.rulesLoadState, .stale)
+        XCTAssertEqual(fixture.model.rulesError, "The request failed. Try again.")
+    }
+
+    func testCompatiblePowerLossUpdatePreservesExtraWebhookAndFields() async throws {
+        let compatible = administrationCompatiblePowerLossJSON
+        let relisted = administrationCompatiblePowerLossJSON
+            .replacingOccurrences(of: #""enabled":true"#, with: #""enabled":false"#)
+            .replacingOccurrences(of: #""hold":600000000000"#, with: #""hold":720000000000"#)
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(compatible)]"),
+            AdminScriptedHTTP.ok(relisted),
+            AdminScriptedHTTP.ok("[\(relisted)]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+        let countBeforeUnconfirmedSave = fixture.http.calls.count
+
+        await fixture.model.savePowerLossPreset(
+            enabled: false,
+            hold: try RouterRuleDuration(nanoseconds: 720_000_000_000),
+            confirmShutdown: true,
+            confirmation: nil
+        )
+        XCTAssertEqual(fixture.http.calls.count, countBeforeUnconfirmedSave)
+
+        await fixture.model.savePowerLossPreset(
+            enabled: false,
+            hold: try RouterRuleDuration(nanoseconds: 720_000_000_000),
+            confirmShutdown: true,
+            confirmation: .shutdown
+        )
+
+        let body = try XCTUnwrap(fixture.http.requestBodies.compactMap { $0 }.last)
+        let stored = try JSONDecoder().decode(RouterRule.self, from: body)
+        XCTAssertFalse(stored.enabled)
+        XCTAssertEqual(try stored.hold.nanoseconds(), 720_000_000_000)
+        XCTAssertEqual(stored.hysteresisMargin, 9)
+        XCTAssertEqual(try stored.repeatEvery?.nanoseconds(), 30_000_000_000)
+        XCTAssertEqual(stored.actions, [
+            .shutdown,
+            .webhook(try XCTUnwrap(URL(string: "https://example.test/lost"))),
+        ])
+        XCTAssertTrue(stored.confirmShutdown)
+        XCTAssertEqual(fixture.model.rules, [try administrationRuleDocument(relisted)])
+    }
+
+    func testIncompatiblePowerLossCannotSaveUntilConfirmedReset() async throws {
+        let incompatible = #"{"name":"no_input_shutdown","enabled":false,"condition":"battery_level","op":"below","percent":20,"hold":1,"hysteresis_margin":2,"actions":["dc_off"],"confirm_shutdown":false}"#
+        let reset = #"{"name":"no_input_shutdown","enabled":true,"condition":"input_power","state":"absent","hold":600000000000,"hysteresis_margin":5,"actions":["shutdown"],"confirm_shutdown":true}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok("[\(incompatible)]"),
+            AdminScriptedHTTP.ok(reset),
+            AdminScriptedHTTP.ok("[\(reset)]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.reloadRules()
+        let callsBeforeReset = fixture.http.calls.count
+
+        await fixture.model.savePowerLossPreset(
+            enabled: true,
+            hold: try RouterRuleDuration(nanoseconds: 600_000_000_000),
+            confirmShutdown: true,
+            confirmation: nil
+        )
+        await fixture.model.savePowerLossPreset(
+            enabled: true,
+            hold: try RouterRuleDuration(nanoseconds: 600_000_000_000),
+            confirmShutdown: true,
+            confirmation: .shutdown
+        )
+        XCTAssertEqual(fixture.http.calls.count, callsBeforeReset)
+
+        await fixture.model.savePowerLossPreset(
+            enabled: true,
+            hold: try RouterRuleDuration(nanoseconds: 600_000_000_000),
+            confirmShutdown: true,
+            confirmation: .resetPowerLossPreset
+        )
+
+        XCTAssertEqual(fixture.http.calls.suffix(2).map(\.method), ["PUT", "GET"])
+        let resetBody = try XCTUnwrap(fixture.http.requestBodies.compactMap { $0 }.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RouterRule.self, from: resetBody),
+            try administrationKnownRule(reset)
+        )
+        XCTAssertEqual(fixture.model.rules, [try administrationRuleDocument(reset)])
+    }
+
+    func testWebhookRuleRequiresUnlockedAdminAndViewContainsRouterWarning() async throws {
+        let webhook = #"{"name":"notify","enabled":true,"condition":"input_power","state":"absent","hold":1,"hysteresis_margin":5,"actions":["webhook:https://example.test/lost"],"confirm_shutdown":false}"#
+        let fixture = try await makeFixture(results: [
+            AdminScriptedHTTP.ok("{}"),
+            AdminScriptedHTTP.ok(webhook),
+            AdminScriptedHTTP.ok("[\(webhook)]"),
+        ])
+        await fixture.model.begin(host: fixture.host)
+        let rule = try administrationKnownRule(webhook)
+
+        await fixture.model.createRule(rule, confirmation: nil)
+        XCTAssertTrue(fixture.http.calls.isEmpty)
+
+        await fixture.model.unlock(token: "boot-admin")
+        await fixture.model.createRule(rule, confirmation: nil)
+
+        XCTAssertEqual(fixture.http.calls.map(\.method), ["GET", "POST", "GET"])
+        let source = try String(
+            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(
+            RouterRulesPresentation.webhookWarning,
+            "The router—not the Wattline app—makes this outbound request."
+        )
+        XCTAssertTrue(source.contains("Text(RouterRulesPresentation.webhookWarning)"))
+        XCTAssertTrue(source.contains("model.access == .unlocked"))
+    }
+
+    func testShutdownAndResetButtonsAreDestructiveAndConfirmed() throws {
+        let source = try String(
+            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(#"Button("Save shutdown rule", role: .destructive)"#))
+        XCTAssertTrue(source.contains(#"Button("Reset power-loss preset", role: .destructive)"#))
+        XCTAssertTrue(source.contains("confirmation: .shutdown"))
+        XCTAssertTrue(source.contains("confirmation: .resetPowerLossPreset"))
+    }
+
+    func testUnknownRuleViewHasJSONSummaryAndNoEditControl() throws {
+        let rulesSource = try String(
+            contentsOf: TestProjectFiles.url("Wattline/RouterAdministration/RouterRulesView.swift"),
+            encoding: .utf8
+        )
+        let administrationSource = try String(
+            contentsOf: TestProjectFiles.url(
+                "Wattline/RouterAdministration/RouterAdministrationView.swift"
+            ),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(rulesSource.range(of: "private func unknownRuleRow"))
+        let end = try XCTUnwrap(
+            rulesSource.range(of: "private func knownRuleRow", range: start.upperBound..<rulesSource.endIndex)
+        )
+        let unknownBranch = String(rulesSource[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(unknownBranch.contains("Text(raw.canonicalJSON)"))
+        XCTAssertTrue(unknownBranch.contains(".font(.system(.caption, design: .monospaced))"))
+        XCTAssertFalse(unknownBranch.contains("Button("))
+        XCTAssertFalse(unknownBranch.contains("Binding("))
+        let deviceAdministration = try XCTUnwrap(
+            administrationSource.range(of: "RouterAdvancedView(model: admin)")
+        )
+        let automationRules = try XCTUnwrap(
+            administrationSource.range(of: "RouterRulesView(model: admin)")
+        )
+        XCTAssertLessThan(deviceAdministration.lowerBound, automationRules.lowerBound)
+    }
+
     func testAdvancedStateAppearsOnlyAfterAdminSettingsIdentityGates() async throws {
         let fixture = try await makeFixture(results: [
             AdminScriptedHTTP.ok("{}"),
@@ -3444,6 +3741,40 @@ final class RouterAdministrationModelTests: XCTestCase {
     }
 }
 
+private let administrationCompatiblePowerLossJSON = #"{"name":"no_input_shutdown","enabled":true,"condition":"input_power","state":"absent","hold":600000000000,"hysteresis_margin":9,"repeat_every":30000000000,"actions":["shutdown","webhook:https://example.test/lost"],"confirm_shutdown":true}"#
+
+private func administrationKnownRuleJSON(
+    name: String,
+    enabled: Bool = true,
+    hold: Int64 = 1
+) -> String {
+    #"{"name":"\#(name)","enabled":\#(enabled),"condition":"input_power","state":"present","hold":\#(hold),"hysteresis_margin":5,"actions":["dc_on"],"confirm_shutdown":false}"#
+}
+
+private func administrationUnknownRuleJSON(name: String) -> String {
+    #"{"name":"\#(name)","enabled":true,"condition":"input_power","state":"present","hold":1,"hysteresis_margin":5,"actions":["dc_on"],"confirm_shutdown":false,"future":true}"#
+}
+
+private func administrationRuleDocument(_ json: String) throws -> RouterRuleDocument {
+    try JSONDecoder().decode(RouterRuleDocument.self, from: Data(json.utf8))
+}
+
+private func administrationKnownRule(_ json: String) throws -> RouterRule {
+    guard case let .known(rule) = try administrationRuleDocument(json) else {
+        throw RouterRuleValidationError.unknownRuleCannotMutate
+    }
+    return rule
+}
+
+private func administrationOnlyKnownRule(
+    _ documents: [RouterRuleDocument]
+) throws -> RouterRule {
+    guard documents.count == 1, case let .known(rule) = documents[0] else {
+        throw RouterRuleValidationError.invalidRule
+    }
+    return rule
+}
+
 private func tokenMetadata(
     id: String,
     label: String,
@@ -3808,6 +4139,7 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
     private let lock = NSLock()
     private var scripted: [Result<(Data, HTTPURLResponse), Error>]
     private var recorded: [Call] = []
+    private var recordedRequestBodies: [Data?] = []
     private var gates: [CheckedContinuation<Void, Never>] = []
     private var pendingGateReleases = 0
     private var gateRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -3829,6 +4161,10 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
 
     var calls: [Call] {
         lock.withLock { recorded }
+    }
+
+    var requestBodies: [Data?] {
+        lock.withLock { recordedRequestBodies }
     }
 
     static func ok(_ json: String) -> Result<(Data, HTTPURLResponse), Error> {
@@ -3883,6 +4219,7 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
             await withCheckedContinuation { gate in
                 let (shouldResumeGate, gateWaiters, callWaiters) = lock.withLock {
                     recorded.append(Call(method: method, path: path, token: token))
+                    recordedRequestBodies.append(body)
                     let shouldResumeGate = pendingGateReleases > 0
                     if shouldResumeGate {
                         pendingGateReleases -= 1
@@ -3901,6 +4238,7 @@ private final class AdminScriptedHTTP: RouterHTTPClient, @unchecked Sendable {
         } else {
             let callWaiters = lock.withLock {
                 recorded.append(Call(method: method, path: path, token: token))
+                recordedRequestBodies.append(body)
                 return removeSatisfiedCallCountWaiters()
             }
             callWaiters.forEach { $0.resume() }

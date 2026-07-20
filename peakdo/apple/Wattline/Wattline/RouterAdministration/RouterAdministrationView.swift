@@ -112,6 +112,10 @@ struct RouterAdministrationView: View {
                     RouterAdvancedView(model: admin)
                 }
 
+                if presentation.showsClientSections {
+                    RouterRulesView(model: admin)
+                }
+
                 if let message = admin.adminError {
                     Section { Text(message).foregroundStyle(.orange) }
                 }
