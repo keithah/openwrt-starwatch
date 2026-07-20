@@ -43,7 +43,7 @@ Five review findings were reproduced with tests before production changes:
 - `/tmp/wattline-m5-task23-review-mac-red.log`: the live Mac administration view lacked a service-generation key, state reset, and generation-driven production-host reload.
 - `/tmp/wattline-m5-task23-review-mac-model-red.log`: the behavioral Mac model regression failed to compile before the injectable router-service boundary existed.
 
-The correction discards every submitted Demo BLE PIN after acknowledging the save, permits Demo update/delete only for matched known rules, republishes redacted fixture pairing state after lifecycle clearing, and keys Mac administration to a single-increment router-service generation. A real-device transition replaces the services exactly once; the visible view is recreated, clears Demo selection/secrets, preserves a newly consumed pairing route, reloads production hosts, and initializes without leave/re-entry. Accessibility checks now target the listener-migration destructive action and actual Advanced, Rules, and API-client empty/error states.
+The correction discards every submitted Demo BLE PIN after acknowledging the save, permits Demo update/delete only for matched known rules, republishes redacted fixture pairing state after lifecycle clearing, and keys Mac administration to a single-increment router-service generation. A real-device transition replaces the services exactly once; the visible view refreshes in place, clears Demo selection/secrets, preserves a newly consumed pairing route, reloads production hosts, and initializes without leave/re-entry. Accessibility checks now target the listener-migration destructive action and actual Advanced, Rules, and API-client empty/error states.
 
 Final evidence:
 
@@ -54,3 +54,11 @@ Final evidence:
 - Full iOS: `/tmp/Wattline-Task23-Review.xcresult` reports 324 total, 324 passed, 0 failed, 0 skipped, and 0 expected failures on Wattline-Tests-2, iPhone 17e, iOS Simulator 26.5 (23F77).
 - Final full macOS: `/tmp/WattlineMac-Task23-Review-Final.xcresult` reports 16 total, 16 passed, 0 failed, 0 skipped, and 0 expected failures on My Mac, arm64 MacBook Pro, macOS 26.5.2 (25F84).
 - Final diff, ownership, crash-trap, secret-log/persistence, forbidden-endpoint, and Task 24 scope audits are clean.
+
+## Pairing-route re-review
+
+- `/tmp/wattline-m5-task23-route-red.log`: the focused Mac regression failed because `MacRootView` identity-keyed administration to the service generation, so a deep-link service switch tore down the old view and its disappearance cleanup cleared the newly accepted pairing route.
+- The fix removes only that identity teardown. The existing generation-driven task still resets transient administration state through `invalidatePreservingRoute()`, reloads production hosts, and presents the accepted payload; genuine view disappearance retains its destructive route cleanup.
+- `/tmp/wattline-m5-task23-route-green.log`: the focused regression passed after the fix.
+- `/tmp/WattlineMac-Task23-Route-Final.xcresult`: 16 total, 16 passed, 0 failed, 0 skipped, and 0 expected failures on My Mac, arm64 MacBook Pro, macOS 26.5.2 (25F84).
+- Final diff, whitespace, transport/session ownership, and Task 24 scope audits are clean.

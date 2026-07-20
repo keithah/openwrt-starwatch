@@ -61,7 +61,6 @@ struct MacRootView: View {
                     enrollmentRoute: model.routerEnrollmentRoute,
                     servicesGeneration: model.routerServicesGeneration
                 )
-                .id(model.routerServicesGeneration)
             }
         }
         .task {

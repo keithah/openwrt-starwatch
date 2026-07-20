@@ -141,7 +141,7 @@ final class MacRouterAdministrationTests: XCTestCase {
         }
     }
 
-    func testRealDeviceServiceGenerationReinitializesVisibleAdministration() throws {
+    func testDeepLinkServiceGenerationRefreshesVisibleAdministrationInPlace() throws {
         let appModel = try source("WattlineMac/MacAppModel.swift")
         let root = try source("WattlineMac/MacRootView.swift")
         let administration = try source(
@@ -151,10 +151,14 @@ final class MacRouterAdministrationTests: XCTestCase {
         XCTAssertTrue(appModel.contains("private(set) var routerServicesGeneration"))
         XCTAssertTrue(appModel.contains("routerServicesGeneration &+= 1"))
         XCTAssertTrue(root.contains("servicesGeneration: model.routerServicesGeneration"))
-        XCTAssertTrue(root.contains(".id(model.routerServicesGeneration)"))
+        XCTAssertFalse(root.contains(".id(model.routerServicesGeneration)"))
+        XCTAssertTrue(root.contains(".onChange(of: model.routerEnrollmentRoute.payload)"))
         XCTAssertTrue(administration.contains("let servicesGeneration: UInt64"))
         XCTAssertTrue(administration.contains(".task(id: servicesGeneration)"))
         XCTAssertTrue(administration.contains("selection = nil"))
+        XCTAssertTrue(administration.contains("enrollmentLifecycle.invalidatePreservingRoute()"))
+        XCTAssertTrue(administration.contains("if enrollmentRoute.payload != nil"))
+        XCTAssertTrue(administration.contains("showPairingPayload()"))
         XCTAssertTrue(administration.contains("await connections.reloadSavedHosts()"))
     }
 }

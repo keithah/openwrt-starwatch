@@ -60,4 +60,4 @@ M5 Step 0: complete (commit 35d8b321; 731-line detailed Tasks 20–24 plan; fres
 M5 Task 20: complete (commits 35d8b321..58b13633; review clean after exact-number/future-condition fix; RouterRules 23/23, Network 240/240)
 M5 Task 21: complete (commits 58b13633..2068f4aa; review clean after complete-editor, human-duration, stale-state, and immutable-name fixes; UI 64/64, model 132/132, iOS 309/309)
 M5 Task 22: complete (commits 2068f4aa..6a3049e2; review clean after functional shared-admin, scheme, enrollment navigation, and lifecycle hardening; Mac 12/12, iOS 313/313, Widgets 313/313, generic Mac build green)
-M5 Task 23: complete after review hardening (base 6a3049e2; UI 64/64, iOS 324/324, Mac 16/16; Demo secret/unknown-rule/pairing lifecycle, Mac live service transition, concrete accessibility semantics, and audits green; Task 24 not started)
+M5 Task 23: complete after review hardening and pairing-route re-review (base 6a3049e2; UI 64/64, iOS 324/324, Mac 16/16; Demo secret/unknown-rule/pairing lifecycle, in-place Mac live-service transition preserving accepted pairing routes, concrete accessibility semantics, and audits green; Task 24 not started)
