@@ -105,4 +105,27 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         XCTAssertTrue(app.contains("A10000000000000000000095"), "Wattline must explicitly depend on WattlineWidgets")
         XCTAssertTrue(project.contains("A10000000000000000000095 = {isa = PBXTargetDependency; target = A10000000000000000000078"))
     }
+
+    func testMacTargetsDeploymentBundlePackagesAndWidgetEmbedding() throws {
+        let project = try projectText()
+        let app = try target("A100000000000000000000A0", in: project)
+        let tests = try target("A100000000000000000000A1", in: project)
+        XCTAssertTrue(app.contains("name = WattlineMac;"))
+        XCTAssertTrue(tests.contains("name = WattlineMacTests;"))
+        for configuration in try configurations(for: app, in: project) {
+            XCTAssertTrue(configuration.contains("MACOSX_DEPLOYMENT_TARGET = 14.0;"))
+            XCTAssertTrue(configuration.contains("PRODUCT_BUNDLE_IDENTIFIER = com.keithah.wattline.mac;"))
+            XCTAssertTrue(configuration.contains("CODE_SIGN_ENTITLEMENTS = WattlineMac/WattlineMac.entitlements;"))
+        }
+        XCTAssertTrue(app.contains("WattlineCore"))
+        XCTAssertTrue(app.contains("WattlineUI"))
+        XCTAssertTrue(app.contains("WattlineNetwork"))
+        XCTAssertTrue(app.contains("Embed Foundation Extensions"))
+    }
+
+    func testMacPlistHasBonjourAndNoCameraPermission() throws {
+        let plist = try NSDictionary(contentsOf: TestProjectFiles.url("WattlineMac/Info.plist"), error: ())
+        XCTAssertEqual(plist["NSBonjourServices"] as? [String], ["_wattline._tcp"])
+        XCTAssertNil(plist["NSCameraUsageDescription"])
+    }
 }

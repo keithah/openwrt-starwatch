@@ -427,6 +427,7 @@ final class RouterConnectionModel {
         return records
     }
 
+    #if os(iOS)
     func scanRecords(
         bluetooth devices: [DiscoveredDevice],
         identities: [UUID: AppModel.CachedIdentity]
@@ -518,6 +519,7 @@ final class RouterConnectionModel {
                 .localizedCaseInsensitiveCompare(Self.displayName(for: rhs)) == .orderedAscending
         }
     }
+    #endif
 
     private func availability(for host: RouterHostMetadata) -> RouterClientCredentialAvailability {
         clientCredentialAvailability[host.endpoint.peripheralID] ?? .unknown
@@ -597,6 +599,7 @@ final class RouterConnectionModel {
         }
     }
 
+    #if os(iOS)
     private static func snapshot(
         for device: DiscoveredDevice,
         cached: AppModel.CachedIdentity
@@ -620,6 +623,7 @@ final class RouterConnectionModel {
             )
         )
     }
+    #endif
 
     private static func snapshot(for router: DiscoveredRouter) -> DeviceIdentitySnapshot {
         let features = router.features.map(FeatureFlags.init(rawValue:))

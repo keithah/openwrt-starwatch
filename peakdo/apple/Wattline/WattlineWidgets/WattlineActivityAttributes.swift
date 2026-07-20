@@ -1,3 +1,4 @@
+#if os(iOS)
 import ActivityKit
 import Foundation
 
@@ -15,3 +16,4 @@ public struct WattlineActivityAttributes: ActivityAttributes {
     }
     public init() {}
 }
+#endif

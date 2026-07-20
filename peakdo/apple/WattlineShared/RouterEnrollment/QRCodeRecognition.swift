@@ -1,4 +1,6 @@
+#if os(iOS)
 import AVFoundation
+#endif
 import Foundation
 import Vision
 import WattlineNetwork
@@ -44,6 +46,7 @@ final class RouterPairingImageImporter {
     }
 }
 
+#if os(iOS)
 enum CameraAuthorizationStatus: Equatable, Sendable {
     case authorized
     case denied
@@ -84,3 +87,4 @@ struct RouterCameraAccessController: Sendable {
         }
     }
 }
+#endif

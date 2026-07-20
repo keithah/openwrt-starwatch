@@ -1,3 +1,4 @@
+#if os(iOS)
 import ActivityKit
 import SwiftUI
 import WidgetKit
@@ -21,3 +22,4 @@ struct WattlineLiveActivity: Widget {
         return "\(direction): \(seconds / 3600)h \((seconds % 3600) / 60)m"
     }
 }
+#endif

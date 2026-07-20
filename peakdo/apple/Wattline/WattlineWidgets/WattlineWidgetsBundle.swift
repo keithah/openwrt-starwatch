@@ -14,5 +14,10 @@ struct WattlineWidget: Widget {
 
 @main
 struct WattlineWidgetsBundle: WidgetBundle {
-    var body: some Widget { WattlineWidget(); WattlineLiveActivity() }
+    var body: some Widget {
+        WattlineWidget()
+        #if os(iOS)
+        WattlineLiveActivity()
+        #endif
+    }
 }
