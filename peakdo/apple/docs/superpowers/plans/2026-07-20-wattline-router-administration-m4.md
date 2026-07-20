@@ -1,427 +1,481 @@
 # Wattline Router Administration Milestone 4 Implementation Plan
 
-> **Execution requirement:** Use `superpowers:subagent-driven-development` task by task. Each production behavior starts with a non-vacuous failing test, then the smallest implementation, a focused GREEN run, a task-wide GREEN run, review, and the exact commit named below.
+> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development` (preferred) or `superpowers:executing-plans`. Execute Tasks 16–19 in order, RED→GREEN, and stop before Milestone 5.
 
-**Goal:** Add HTTP-only router-to-Link-Power pairing and structurally gated advanced Link-Power administration without creating another BLE owner, widening `DeviceCommand`, or weakening M3's attachment/generation/credential guarantees.
+**Goal:** Pair the router with Link-Power through the documented client-role BlueZ API, add exact administrator/advanced device controls, and expose only structurally supported controls with authoritative readback.
 
-**Authorities:**
+**Architecture:** `WattlineNetwork` owns an HTTP-only client-token pairing actor and advanced extensions on the existing administrator actor. Pairing polling reuses `RouterConnectionClock`; no second clock or BLE stack is added. `WattlineUI` owns Foundation-only values/policies. The iOS administration model maps DTOs, owns request/session generations, and publishes only current authoritative results.
 
-- `peakdo/apple/docs/superpowers/specs/2026-07-18-wattline-router-administration-design.md` §§2.3, 3, 8, 9, 11
-- `/Users/keith/src/openwrt-wattline/docs/api.md`, especially “BLE-device pairing” and “OTA, clock, and advanced”
-- Approved source base `d983528a`
+**Approved base:** `d983528a`.
 
-**Scope:** Tasks 16–19 only. No rules, macOS work, Demo fixtures, OTA/firmware transfer, or timers.
+## Binding constraints
 
-## Existing interfaces retained
+- Contract: `/Users/keith/src/openwrt-wattline/docs/api.md`. Never edit it, `peakdo/Wattline-SPEC.md`, `peakdo/API.md`, `peakdo/src/*`, `scan.py`, or `verify*.py`.
+- Scope is Tasks 16–19 only. No rules, macOS, Demo fixtures, OTA, firmware transfer, Timers, App Intents, or notification work.
+- Pairing uses the managed **client** token. Advanced controls use the **administrator** token and existing privileged-mutation FIFO.
+- One BLE owner per process. Pairing/administration code performs HTTP only and never constructs `BLETransport`, `DeviceSession`, or `DeviceOperationBroker`; do not widen `DeviceCommand`.
+- Core remains unchanged. UI has no Network/Security import and no `WattlineNetwork` dependency.
+- No PIN/token/private key in logs, errors, descriptions, reflection, snapshots, UserDefaults, or persistence. Empty pairing PIN is sent explicitly as `"pin":""`; advanced BLE PIN is exactly six ASCII digits and is never echoed.
+- Router response/readback is truth. Threshold/barrier publish decoded response only. Running mode/BLE PIN never optimistically publish submitted values.
+- Reuse existing `RouterConnectionClock.now/sleep` and existing `RouterConnection` `/device/clock` decode. No duplicate clock path or transaction owner.
+- Strict TDD: non-vacuous RED, minimal GREEN, full affected suites, exact requested commit per task.
 
-- `RouterAdministrationClient.attach(endpoint:)`, `attachmentLease()`, `validate(attachment:)`, `send`, `sendDurableMutation`, and its privileged-mutation FIFO remain the single administrator request boundary.
-- `RouterCredentialStore` retains the bare endpoint UUID account for `.client` and the `.administrator` suffix for administrator credentials.
-- Pairing routes authenticate with the managed **client** credential. They do not use `RouterAdministrationClient`'s administrator token.
-- `RouterConnectionClock` is the injected clock used for bounded pairing sleeps. No second clock abstraction is introduced.
-- `RouterConnection.readDeviceTime()` and `RouterTransport.synchronizeDeviceTime()` already implement `/api/v1/device/clock` and `/api/v1/device/clock/sync`; Task 17 factors the shared DTO/decoder without changing their behavior.
-- `RouterAdministrationModel` remains `@MainActor`; publication uses endpoint/session/request generations and `performAdmin`/`handleAdminFailure`.
-- `RouterDeviceDTO` and `RouterAvailabilityDTO` remain the authoritative identity/availability inputs.
+## Grounded interfaces at the approved base
 
-## Global invariants and test discipline
+```swift
+public protocol RouterConnectionClock: Sendable {
+    var now: DeviceTimestamp { get async }
+    func sampleTimestampOrigin() async -> RouterTimestampOrigin
+    func sleep(for duration: Duration) async throws
+}
+public actor RouterAdministrationClient {
+    public func attach(endpoint: RouterEndpoint) throws
+    public func detach()
+    public func attachmentLease() throws -> RouterAdministrationAttachmentLease
+    func validate(attachment: RouterAdministrationAttachmentLease) throws
+    func send(_ method: String, _ path: String, body: Data? = nil)
+        async throws -> (Data, HTTPURLResponse)
+    func sendDurableMutation(
+        _ method: String, _ path: String, body: Data? = nil,
+        attachment: RouterAdministrationAttachmentLease
+    ) async throws -> (Data, HTTPURLResponse)
+    func acquirePrivilegedMutation() async
+    func releasePrivilegedMutation()
+}
+public actor RouterCredentialStore {
+    public func readToken(for endpoint: RouterEndpoint, role: RouterCredentialRole = .client)
+        async throws -> String?
+}
+@MainActor @Observable final class RouterAdministrationModel {
+    private var sessionGeneration: UInt64
+    private var adminOperationGeneration: UInt64
+    private func performAdmin<Value>(
+        _ operation: (RouterAdministrationClient) async throws -> Value,
+        isCurrent: () -> Bool = { true }
+    ) async -> AdminResult<Value>
+    private func handleAdminFailure(_ error: Error) -> Bool
+}
+```
 
-1. Pairing and administration issue HTTP only. No `BLETransport`, `DeviceSession`, `DeviceOperationBroker`, second `DeviceTransport`, or new `DeviceCommand` case.
-2. Core/UI remain networking- and Security-free; WattlineUI does not depend on WattlineNetwork.
-3. PIN/token/private-key bytes never enter persistence, snapshots, descriptions, mirrors, logs, or error strings. Empty pairing PIN is encoded as `"pin":""`.
-4. Readback is truth. Bypass and barrier-free return decoded observed values. Running mode and BLE PIN publish only validated server responses.
-5. Every async completion is quarantined by the attachment/session/request generation captured before dispatch.
-6. Tests use `ScriptedRouterHTTPClient`, injected credential stores/clocks, and bounded waits only.
+Existing `RouterTransport.synchronizeDeviceTime`, `readDeviceTimeIfSupported`, and `RouterConnection.readDeviceTime/executeBodyless` remain authoritative.
 
 ---
 
-## Task 16: Pair Link-Power through the router
+### Task 16: Pair Link-Power through the router
 
 **Files**
+- Create `WattlineNetwork/Sources/WattlineNetwork/RouterDevicePairing.swift`
+- Create `WattlineNetwork/Tests/WattlineNetworkTests/RouterDevicePairingTests.swift`
+- Create `WattlineUI/Sources/WattlineUI/RouterDevicePairingPresentation.swift`
+- Create `WattlineUI/Tests/WattlineUITests/RouterDevicePairingPresentationTests.swift`
+- Create `Wattline/Wattline/RouterAdministration/RouterDevicePairingView.swift`
+- Modify `RouterAdministrationModel.swift`, `RouterAdministrationView.swift`, and app model tests
 
-- Create `peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterDevicePairing.swift`
-- Create `peakdo/apple/WattlineNetwork/Tests/WattlineNetworkTests/RouterDevicePairingTests.swift`
-- Create `peakdo/apple/WattlineUI/Sources/WattlineUI/RouterDevicePairingPresentation.swift`
-- Create `peakdo/apple/WattlineUI/Tests/WattlineUITests/RouterDevicePairingPresentationTests.swift`
-- Create `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterDevicePairingView.swift`
-- Modify `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterAdministrationModel.swift`
-- Modify `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterAdministrationView.swift`
-- Modify `peakdo/apple/Wattline/WattlineTests/RouterAdministrationModelTests.swift`
+**Produces:** an HTTP-only `RouterDevicePairingClient` sharing `RouterCredentialStore` and `RouterConnectionClock`; status/progress values; model scan/pair/unpair state.
 
-### Interfaces produced
+- [ ] Write Network RED tests with `ScriptedRouterHTTPClient` and deterministic `RouterConnectionClock`:
 
 ```swift
-public enum RouterDevicePairingStage: String, Codable, Sendable {
-    case idle, scanning, pairing, connected, failed
+func testStatusDecodesDocumentedFixture() async throws {
+    let f = try await fixture([.ok(#"{"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}]}"#)])
+    let value = try await f.client.status()
+    XCTAssertEqual(value.stage, .idle)
+    XCTAssertEqual(value.devices.first, .init(mac: "DC:04:5A:EB:72:2B", name: "Link-Power-2", rssi: -60, paired: false))
+    XCTAssertEqual(f.http.calls.map(\.path), ["/api/v1/pairing/status"])
+    XCTAssertNil(f.http.calls[0].body)
 }
-
-public struct RouterPairableDevice: Codable, Equatable, Sendable {
-    public let mac: String
-    public let name: String
-    public let rssi: Int
-    public let paired: Bool
+func testScanUsesBodyless202ThenBoundedPollToTerminal() async throws {
+    let f = try await fixture([
+        .ok(#"{"stage":"idle","devices":[]}"#),
+        .response(status: 202, #"{"status":"scanning"}"#),
+        .ok(#"{"stage":"scanning","devices":[]}"#),
+        .ok(#"{"stage":"idle","devices":[]}"#),
+    ])
+    XCTAssertEqual(try await f.client.scan(timeout: .seconds(10)) { _ in }.stage, .idle)
+    XCTAssertEqual(f.http.calls.map { ($0.method, $0.path) }, [
+        ("GET", "/api/v1/pairing/status"), ("POST", "/api/v1/pairing/scan"),
+        ("GET", "/api/v1/pairing/status"), ("GET", "/api/v1/pairing/status"),
+    ])
+    XCTAssertNil(f.http.calls[1].body)
 }
+func testAlreadyScanningDoesNotStartSecondOperation() async throws {
+    let f = try await fixture([.ok(#"{"stage":"scanning","devices":[]}"#), .ok(#"{"stage":"idle","devices":[]}"#)])
+    _ = try await f.client.scan(timeout: .seconds(10)) { _ in }
+    XCTAssertFalse(f.http.calls.contains { $0.method == "POST" })
+}
+func testPairNormalizesMACAndPreservesEmptyPIN() async throws {
+    let f = try await fixture([
+        .ok(#"{"stage":"idle","devices":[]}"#),
+        .response(status: 202, #"{"status":"pairing"}"#),
+        .ok(#"{"stage":"idle","target":"DC:04:5A:EB:72:2B","devices":[]}"#),
+    ])
+    _ = try await f.client.pair(mac: "dc-04-5a-eb-72-2b", pin: "", timeout: .seconds(10)) { _ in }
+    XCTAssertEqual(try json(f.http.calls[1].body), ["mac":"DC:04:5A:EB:72:2B", "pin":""])
+}
+func testUnpairHasNoBodyAndRefetchesStatus() async throws {
+    let f = try await fixture([.response(status: 200, #"{"status":"removed"}"#), .ok(#"{"stage":"idle","devices":[]}"#)])
+    XCTAssertEqual(try await f.client.unpair(mac: "dc:04:5a:eb:72:2b").devices, [])
+    XCTAssertEqual(f.http.calls[0].path, "/api/v1/pairing/device/DC%3A04%3A5A%3AEB%3A72%3A2B")
+    XCTAssertNil(f.http.calls[0].body)
+}
+func testTimeoutCancellationReplacementAndClientRole() async throws {
+    // Clock advances only through injected sleep: impossible terminal status -> NetworkError.timeout.
+    // Gate a poll, attach replacement, release -> CancellationError and no progress publication.
+    // Save both roles; assert every pairing call token == client-token and never admin-token.
+}
+```
 
+Also test malformed status, async `error`, invalid MAC, empty/1–6 router-contract PIN validation, non-ASCII digits, `URLError.cancelled -> CancellationError`, and `409 operation_in_progress` continuing current polling without another POST.
+
+- [ ] RED:
+
+```bash
+swift test --package-path peakdo/apple/WattlineNetwork --filter RouterDevicePairingTests 2>&1 | tee /tmp/wattline-m4-task16-network-red.log
+```
+
+Expected: missing pairing actor/types, not a fixture syntax failure.
+
+- [ ] Implement these complete interface shapes:
+
+```swift
+public enum RouterPairingStage: String, Codable, Sendable { case idle, scanning, pairing }
+public struct RouterPairingDevice: Codable, Equatable, Sendable {
+    public let mac: String; public let name: String; public let rssi: Int; public let paired: Bool
+}
 public struct RouterDevicePairingStatus: Codable, Equatable, Sendable {
-    public let stage: RouterDevicePairingStage
-    public let target: String?
-    public let devices: [RouterPairableDevice]
+    public let stage: RouterPairingStage
+    public let devices: [RouterPairingDevice]
     public let error: String?
+    public let target: String?
 }
-
-public enum RouterDevicePairingError: Error, Equatable, Sendable {
-    case invalidMAC
-    case invalidPIN
-    case operationInProgress(RouterDevicePairingStatus)
-    case timedOut
-    case invalidResponse
-}
-
 public actor RouterDevicePairingClient {
-    public init(
-        endpoint: RouterEndpoint,
-        credentials: RouterCredentialStore,
-        http: any RouterHTTPClient,
-        clock: any RouterConnectionClock,
-        timeout: Duration = .seconds(30),
-        pollInterval: Duration = .milliseconds(500)
-    )
+    public typealias HTTPFactory = @Sendable (RouterEndpoint) throws -> any RouterHTTPClient
+    public typealias Progress = @Sendable (RouterDevicePairingStatus) async -> Void
+    public init(credentials: RouterCredentialStore, clock: any RouterConnectionClock,
+                pollInterval: Duration = .milliseconds(250), httpFactory: @escaping HTTPFactory)
+    public func attach(endpoint: RouterEndpoint) throws
+    public func detach()
     public func status() async throws -> RouterDevicePairingStatus
-    public func scan() async throws -> RouterDevicePairingStatus
-    public func pair(mac: String, pin: String) async throws -> RouterDevicePairingStatus
+    public func scan(timeout: Duration, progress: @escaping Progress) async throws -> RouterDevicePairingStatus
+    public func pair(mac: String, pin: String, timeout: Duration,
+                     progress: @escaping Progress) async throws -> RouterDevicePairingStatus
     public func unpair(mac: String) async throws -> RouterDevicePairingStatus
-    public func cancel()
 }
 ```
 
-`RouterDevicePairingClient` owns no transport. It captures an operation generation, reads `.client` credentials for every request, permits exactly one scan/pair poll loop, and increments the generation on `cancel`/replacement. `scan` and `pair` first GET status; if already scanning/pairing, they adopt and poll that activity rather than POST a second operation. A mapped 409 `operation_in_progress` also becomes an adopted status/poll, never a retrying POST. Terminal stages are idle/connected/failed; timeout is measured by injected sleeps, not wall-clock polling.
+Implementation requirements:
+1. `attach/detach` increment generation before replacing HTTP context.
+2. A Boolean operation lease permits exactly one scan/pair/unpair; actor reentrancy cannot dispatch a second operation.
+3. Initial GET: if already scanning/pairing, poll it and do not POST. Treat `409 operation_in_progress` from start as current activity and poll.
+4. Use `clock.now` and `clock.sleep`; elapsed >= injected timeout throws `.timeout`. Check Task cancellation and generation before/after every await/publication.
+5. All requests read `.client` token. Exact success statuses: status 200, scan/pair 202, unpair 200. Convert URL cancellation. Error strings published to UI are generic/redacted.
+6. Normalize MAC to uppercase colon form; unpair uses strict RFC3986 path-segment percent encoding. Pair JSON always contains both `mac` and `pin`, including empty PIN.
+7. Unpair re-GETs status before returning.
 
-### Exact fixtures
+- [ ] Write UI/app RED tests:
 
 ```swift
-let idle = #"{"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-57,"paired":false}]}"#
-let scanning = #"{"stage":"scanning","target":null,"devices":[]}"#
-let pairing = #"{"stage":"pairing","target":"DC:04:5A:EB:72:2B","devices":[]}"#
-let connected = #"{"stage":"connected","target":"DC:04:5A:EB:72:2B","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"PeakDo","rssi":-48,"paired":true}]}"#
-let failed = #"{"stage":"failed","target":"DC:04:5A:EB:72:2B","devices":[],"error":"pair_failed"}"#
-let scanAccepted = #"{"status":"scanning"}"#
-let pairAccepted = #"{"status":"pairing"}"#
-let removed = #"{"status":"removed"}"#
+func testPresentationSortsPairedThenRSSIAndNeverCarriesPIN()
+func testStageTargetDeviceAndAsyncErrorPresentation()
+func testProgressFromReplacedHostIsIgnored()
+func testOperationInProgressDoesNotEnableSecondAction()
+func testUnpairPublishesOnlyAuthoritativeRefetch()
+func testViewClearsLocalPINBeforeAwaitAndModelHasNoPINProperty()
 ```
 
-### RED tests
-
-Add complete XCTest cases that:
+- [ ] Implement Foundation-only UI types:
 
 ```swift
-func testStatusDecodesExactDeviceFieldsAndUsesClientCredential() async throws
-func testScanUsesGETThenBodyless202POSTAndPollsToTerminal() async throws
-func testPairNormalizesMACAndSendsExactSixDigitPIN() async throws
-func testPairSendsExplicitEmptyPINToRetainRouterConfiguration() async throws
-func testExistingOr409ActivityIsAdoptedWithoutSecondPOST() async throws
-func testPollingTimesOutOnInjectedClockAndStopsIssuingRequests() async throws
-func testCancellationStopsPollingAndLateResponsePublishesNothing() async throws
-func testEndpointReplacementQuarantinesOldPollCompletion() async throws
-func testUnpairPercentEncodesNormalizedMACUsesBodylessDeleteAndRefetchesStatus() async throws
-func testInvalidMACOrPINFailsBeforeCredentialOrHTTPAccess() async throws
-func testAsyncFailedStagePreservesSanitizedErrorWithoutSecretMaterial() async throws
-```
-
-Use the existing scripted HTTP double and a `PairingTestClock: RouterConnectionClock` whose `sleep(for:)` records bounded continuations. Assert exact call sequences:
-
-```swift
-XCTAssertEqual(http.calls.map { ($0.method, $0.path) }, [
-    ("GET", "/api/v1/pairing/status"),
-    ("POST", "/api/v1/pairing/pair"),
-    ("GET", "/api/v1/pairing/status"),
-])
-XCTAssertEqual(http.calls[1].body, Data(#"{"mac":"DC:04:5A:EB:72:2B","pin":""}"#.utf8))
-XCTAssertEqual(http.calls.map(\.token), ["managed-client", "managed-client", "managed-client"])
-```
-
-UI-local presentation contains no network DTO:
-
-```swift
-public struct RouterPairableDeviceValue: Equatable, Sendable { /* mac/name/rssi/paired */ }
-public enum RouterDevicePairingPresentation {
-    public static func rows(stage: String, devices: [RouterPairableDeviceValue]) -> [RouterPairingRow]
-    public static func statusText(stage: String, target: String?, error: String?) -> String
+public enum RouterDevicePairingStageValue: Equatable, Sendable { case idle, scanning, pairing }
+public struct RouterDevicePairingDeviceValue: Equatable, Sendable, Identifiable {
+    public var id: String { mac }
+    public let mac: String; public let name: String; public let rssi: Int; public let paired: Bool
+}
+public struct RouterDevicePairingStatusValue: Equatable, Sendable {
+    public let stage: RouterDevicePairingStageValue; public let target: String?
+    public let devices: [RouterDevicePairingDeviceValue]; public let error: String?
+}
+public struct RouterDevicePairingPresentation: Equatable, Sendable {
+    public let stageLabel: String; public let devices: [RouterDevicePairingDeviceValue]; public let error: String?
+    public init(status: RouterDevicePairingStatusValue) {
+        stageLabel = switch status.stage { case .idle: "Idle"; case .scanning: "Scanning…"; case .pairing: "Pairing…" }
+        devices = status.devices.sorted { $0.paired != $1.paired ? $0.paired : $0.rssi > $1.rssi }
+        error = status.error
+    }
 }
 ```
 
-Test RSSI labels, paired markers, busy/terminal/error text, deterministic ordering, and that the optional PIN is never present in presentation values/reflection.
+Inject/attach the pairing actor in `RouterAdministrationModel.production/beginSession`; detach and increment `devicePairingGeneration` on end/replacement. Each progress/final publication checks session, operation generation, request generation, endpoint, and cancellation. `RouterDevicePairingView` owns the secure PIN field, copies then clears it synchronously before dispatch. It displays stage/target/devices/RSSI/paired/error and structurally removes conflicting actions while busy.
 
-App-model tests prove one operation, endpoint replacement/cancellation quarantine, no PIN retention after dispatch, 409 adoption, timeout error, and authoritative unpair refetch. `RouterDevicePairingView` shows discovered rows and RSSI, secure optional six-digit PIN entry, Scan/Pair/Unpair actions, and clears PIN on submit/disappear/background.
-
-### RED command and expected failure
+- [ ] GREEN and commit:
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter RouterDevicePairingTests
 swift test --package-path peakdo/apple/WattlineUI --filter RouterDevicePairingPresentationTests
-xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline \
-  -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME:-Wattline-Tests-2}" \
-  -only-testing:WattlineTests/RouterAdministrationModelTests CODE_SIGNING_ALLOWED=NO
-```
-
-Expected RED: missing `RouterDevicePairingClient`, pairing DTO/presentation types, model state/methods, and view composition.
-
-### GREEN implementation
-
-Implement the interfaces exactly, decode only documented shapes, require exact 200/202 response codes, normalize MAC via `DeviceIdentityDeduplicator.normalizedMAC`, encode JSON through a private redacted payload with custom mirror, and sanitize asynchronous error to a finite enum/presentation string. Pairing client replacement is explicit (`cancel`, then construct/attach the new endpoint client in the app model); late generations throw `CancellationError`.
-
-Run focused tests, then full Network/UI/iOS suites. Review for secret reflection, bounded polling, exactly one operation, and client-role auth.
-
-Commit:
-
-```bash
+swift test --package-path peakdo/apple/WattlineNetwork
+swift test --package-path peakdo/apple/WattlineUI
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME:-Wattline-Tests-2}" CODE_SIGNING_ALLOWED=NO
+git diff --check
+git add peakdo/apple/WattlineNetwork peakdo/apple/WattlineUI peakdo/apple/Wattline/Wattline/RouterAdministration peakdo/apple/Wattline/WattlineTests/RouterAdministrationModelTests.swift
 git commit -m "feat: pair Link-Power through router"
 ```
 
 ---
 
-## Task 17: Add exact router advanced-device APIs
+### Task 17: Exact advanced device APIs
 
 **Files**
+- Create `WattlineNetwork/Sources/WattlineNetwork/RouterAdvancedControls.swift`
+- Create `WattlineNetwork/Tests/WattlineNetworkTests/RouterAdvancedControlsTests.swift`
+- Reuse/minimally modify `RouterConnection.swift` only to share the clock response decoder
 
-- Create `peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterAdvancedControls.swift`
-- Create `peakdo/apple/WattlineNetwork/Tests/WattlineNetworkTests/RouterAdvancedControlsTests.swift`
-- Modify `peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterConnection.swift` only to reuse the shared clock DTO/decoder
-- Modify `peakdo/apple/WattlineNetwork/Tests/WattlineNetworkTests/RouterCommandTests.swift` only to prove existing clock behavior is unchanged
+**Produces:** typed threshold/clock/running-mode/barrier/USB-firmware/BLE-PIN results and allow-listed administrator methods. No `DeviceCommand` additions.
 
-### Interfaces produced
+- [ ] Write RED tests:
+
+```swift
+func testBypassUsesCanonicalGETPUTAndPublishesObservedResponse() async throws {
+    let f = try await fixture([.ok(#"{"volts":19.6}"#), .ok(#"{"volts":19.5}"#)])
+    XCTAssertEqual(try await f.client.bypassThreshold().volts, 19.6)
+    XCTAssertEqual(try await f.client.setBypassThreshold(volts: 19.6).volts, 19.5)
+    XCTAssertEqual(f.http.calls.map { ($0.method,$0.path) }, [
+        ("GET","/api/v1/device/dc/bypass/threshold"),
+        ("PUT","/api/v1/device/dc/bypass/threshold"),
+    ])
+}
+func testClockUnavailableAvailableAndBodylessSync() async throws {
+    let f = try await fixture([
+        .ok(#"{"available":false,"device_time":null,"system_time":"2026-07-17T20:00:02Z","drift_seconds":null}"#),
+        .ok(#"{"available":true,"device_time":"2026-07-17T20:00:00Z","system_time":"2026-07-17T20:00:02Z","drift_seconds":-2}"#),
+        .ok(#"{"synced":true,"system_time":"2026-07-17T20:00:02Z"}"#),
+    ])
+    XCTAssertFalse(try await f.client.deviceClock().available)
+    XCTAssertEqual(try await f.client.deviceClock().driftSeconds, -2)
+    XCTAssertTrue(try await f.client.syncDeviceClock().synced)
+    XCTAssertNil(f.http.calls[2].body)
+}
+func testRunningModePUTOnlyUnsignedAndExactBody()
+func testBarrierPUTPublishesObservedFalseWhenRequestedTrue()
+func testUSBFirmwareDecodesRawMajorMinorPatch()
+func testBLEPINRequiresSixASCIIDigitsAndResultNeverEchoesPIN()
+func testAdvancedDisabledAndCapabilityUnsupportedPropagatePrecisely()
+func testReplacementCancelsLateCompletionAndAllRequestsUseAdminToken()
+func testAdvancedIdentityDecodesCompleteDocumentedDeviceFixture()
+```
+
+RED:
+
+```bash
+swift test --package-path peakdo/apple/WattlineNetwork --filter RouterAdvancedControlsTests 2>&1 | tee /tmp/wattline-m4-task17-red.log
+```
+
+- [ ] Implement:
 
 ```swift
 public struct RouterBypassThreshold: Codable, Equatable, Sendable { public let volts: Double }
-public struct RouterDeviceClock: Equatable, Sendable {
-    public let available: Bool
-    public let deviceTime: Date?
-    public let systemTime: Date
-    public let driftSeconds: Double?
+public struct RouterDeviceClockStatus: Codable, Equatable, Sendable {
+    public let available: Bool; public let deviceTime: String?; public let systemTime: String
+    public let driftSeconds: Int?
+    enum CodingKeys: String, CodingKey {
+        case available; case deviceTime = "device_time"; case systemTime = "system_time"
+        case driftSeconds = "drift_seconds"
+    }
 }
-public struct RouterClockSyncResult: Equatable, Sendable { public let synced: Bool; public let systemTime: Date }
-public struct RouterRunningMode: Codable, Equatable, Sendable { public let mode: UInt8 }
-public struct RouterBarrierFree: Codable, Equatable, Sendable { public let enabled: Bool }
+public struct RouterClockSyncResult: Codable, Equatable, Sendable {
+    public let synced: Bool; public let systemTime: String
+    enum CodingKeys: String, CodingKey { case synced; case systemTime = "system_time" }
+}
+public struct RouterRunningModeResult: Codable, Equatable, Sendable { public let mode: UInt8 }
+public struct RouterBarrierFreeResult: Codable, Equatable, Sendable { public let enabled: Bool }
 public struct RouterUSBFirmwareVersion: Codable, Equatable, Sendable {
-    public let raw: String; public let major: Int; public let minor: Int; public let patch: Int
+    public let raw: String; public let major: UInt8; public let minor: UInt8; public let patch: UInt8
 }
-public struct RouterBLEPINUpdate: Equatable, Sendable { public let updated: Bool }
-
+public struct RouterBLEPINUpdateResult: Codable, Equatable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public let updated: Bool
+    public var description: String { "RouterBLEPINUpdateResult(updated: \(updated))" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["updated": updated]) }
+}
 extension RouterAdministrationClient {
+    public func advancedIdentity() async throws -> RouterDeviceDTO
     public func bypassThreshold() async throws -> RouterBypassThreshold
     public func setBypassThreshold(volts: Double) async throws -> RouterBypassThreshold
-    public func deviceClock() async throws -> RouterDeviceClock
-    public func synchronizeDeviceClock() async throws -> RouterClockSyncResult
-    public func setRunningMode(_ mode: UInt8) async throws -> RouterRunningMode
-    public func barrierFree() async throws -> RouterBarrierFree
-    public func setBarrierFree(_ enabled: Bool) async throws -> RouterBarrierFree
+    public func deviceClock() async throws -> RouterDeviceClockStatus
+    public func syncDeviceClock() async throws -> RouterClockSyncResult
+    public func setRunningMode(_ mode: UInt8) async throws -> RouterRunningModeResult
+    public func barrierFree() async throws -> RouterBarrierFreeResult
+    public func setBarrierFree(_ enabled: Bool) async throws -> RouterBarrierFreeResult
     public func usbFirmwareVersion() async throws -> RouterUSBFirmwareVersion
-    public func updateBLEPIN(_ pin: String) async throws -> RouterBLEPINUpdate
+    public func setBLEPIN(_ pin: String) async throws -> RouterBLEPINUpdateResult
 }
 ```
 
-Every method captures an attachment lease before joining the existing privileged FIFO, checks cancellation and attachment after acquiring it, uses `send`, validates exact status/response shape, then revalidates before returning. Mutations are serialized with settings/TLS/admin reads. PIN validation occurs before credential access. The PIN request payload is reflection-redacted.
+Use private concrete `Encodable` request structs (not `[String:Any]`). GET helper: lease → privileged FIFO only where mutation serialization requires it → `send` → validate → decode. Mutations: acquire existing privileged FIFO, validate before/after every await, exact sorted JSON, exact canonical routes. Validate volts finite and `0 < volts <= 60`; BLE PIN exactly six ASCII digits; require `updated == true`. Never include PIN/value in thrown text.
 
-### Exact fixtures and RED assertions
+Reuse `RouterDeviceClockStatus` in `RouterConnection.readDeviceTime` (or share one internal decoder) while preserving existing `Date?` semantics, `available:false -> nil`, and existing `RouterCommandTests.testCanonicalClockReadUnavailableAndManualSync`. Do not add a clock, route, or transaction owner.
 
-```swift
-let threshold = #"{"volts":19.6}"#
-let clockAvailable = #"{"available":true,"device_time":"2026-07-20T03:04:05Z","system_time":"2026-07-20T03:04:08Z","drift_seconds":-3}"#
-let clockUnavailable = #"{"available":false,"device_time":null,"system_time":"2026-07-20T03:04:08Z","drift_seconds":null}"#
-let sync = #"{"synced":true,"system_time":"2026-07-20T03:04:08Z"}"#
-let running = #"{"mode":1}"#
-let barrier = #"{"enabled":true}"#
-let usb = #"{"raw":"010409","major":1,"minor":4,"patch":9}"#
-let pinUpdated = #"{"updated":true}"#
-```
-
-Add tests:
-
-```swift
-func testBypassGETAndPUTUseCanonicalRouteAndReturnObservedBodies() async throws
-func testBypassPUTRejectsMalformedObservedReadbackRatherThanEchoingRequest() async throws
-func testClockAvailableAndUnavailableDecodeExactlyAndUnavailableRequiresNoSecondRequest() async throws
-func testClockSyncUsesBodylessPOSTAndExistingTransportClockTestsStayGreen() async throws
-func testRunningModeUsesUnsignedJSONAndReturnsValidatedServerMode() async throws
-func testBarrierGETAndPUTReturnOnlyObservedResponses() async throws
-func testUSBFirmwareIsReadOnlyAndDecodesRawAndComponents() async throws
-func testBLEPINRequiresSixDigitsSendsExactBodyAndNeverEchoesPIN() async throws
-func testAdvancedDisabledAndCapabilityUnsupportedRemainTypedNetworkErrors() async throws
-func testQueuedAdvancedRequestCancelledByAttachmentReplacementNeverDispatches() async throws
-func testURLErrorCancelledMapsToCancellationError() async throws
-func testAdvancedRequestsSharePrivilegedFIFOWithSettingsAndTLS() async throws
-```
-
-Exact routes/bodies:
-
-```swift
-("GET", "/api/v1/device/dc/bypass/threshold", nil)
-("PUT", "/api/v1/device/dc/bypass/threshold", Data(#"{"volts":19.6}"#.utf8))
-("GET", "/api/v1/device/clock", nil)
-("POST", "/api/v1/device/clock/sync", nil)
-("PUT", "/api/v1/device/advanced/running-mode", Data(#"{"mode":1}"#.utf8))
-("GET", "/api/v1/device/advanced/barrier-free", nil)
-("PUT", "/api/v1/device/advanced/barrier-free", Data(#"{"enabled":true}"#.utf8))
-("GET", "/api/v1/device/advanced/usb-fw-version", nil)
-("PUT", "/api/v1/device/advanced/ble-pin", Data(#"{"pin":"020555"}"#.utf8))
-```
-
-### Clock reconciliation
-
-Move the private `RouterConnection.ClockResponse` representation into a shared internal decoder in `RouterAdvancedControls.swift`. `RouterConnection.readDeviceTime()` continues to call the same route and returns nil for `available:false`; `RouterTransport.synchronizeDeviceTime()` remains bodyless POST. No duplicate request path or public transport behavior is added.
-
-### RED/GREEN commands
+- [ ] GREEN and commit:
 
 ```bash
 swift test --package-path peakdo/apple/WattlineNetwork --filter RouterAdvancedControlsTests
-swift test --package-path peakdo/apple/WattlineNetwork --filter RouterCommandTests
-```
-
-Expected RED: missing advanced DTOs/client methods. GREEN requires both focused suites and the full  Network suite.
-
-Commit:
-
-```bash
+swift test --package-path peakdo/apple/WattlineNetwork --filter RouterCommandTests.testCanonicalClockReadUnavailableAndManualSync
+swift test --package-path peakdo/apple/WattlineNetwork
+git diff --check
+git add peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterAdvancedControls.swift peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterConnection.swift peakdo/apple/WattlineNetwork/Tests/WattlineNetworkTests/RouterAdvancedControlsTests.swift
 git commit -m "feat: add router advanced device controls"
 ```
 
 ---
 
-## Task 18: Present structurally gated advanced administration
+### Task 18: Structurally gated advanced administration UI
 
 **Files**
+- Create `WattlineUI/Sources/WattlineUI/RouterAdvancedPresentation.swift`
+- Create `WattlineUI/Tests/WattlineUITests/RouterAdvancedPresentationTests.swift`
+- Create `Wattline/Wattline/RouterAdministration/RouterAdvancedView.swift`
+- Modify real app path `Wattline/Wattline/RouterAdministration/RouterAdministrationModel.swift`, view, and app model tests
 
-- Create `peakdo/apple/WattlineUI/Sources/WattlineUI/RouterAdvancedPresentation.swift`
-- Create `peakdo/apple/WattlineUI/Tests/WattlineUITests/RouterAdvancedPresentationTests.swift`
-- Create `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterAdvancedView.swift`
-- Modify `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterAdministrationModel.swift`
-- Modify `peakdo/apple/Wattline/Wattline/RouterAdministration/RouterAdministrationView.swift`
-- Modify `peakdo/apple/Wattline/WattlineTests/RouterAdministrationModelTests.swift`
-
-### Pure UI interface
+- [ ] Write UI RED tests:
 
 ```swift
-public enum RouterAdvancedSurface: String, CaseIterable, Sendable {
+func testEveryOuterGateMakesAllSurfacesAbsent() {
+    // admin false; advanced false; OTA mode: each yields empty surfaces.
+}
+func testFeatureAndInventoryIntersectPerSurface() {
+    // bypass requires dc + dcBypassControl; clock current_time; factory controls factoryMode;
+    // USB firmware also requires USB availability.
+}
+func testCapabilityUnsupportedRemovesOnlyAffectedSurface()
+func testAdvancedDisabledShowsEnableAffordanceAndNoControls()
+func testRunningModeAndBLEPINRequirePurposeSpecificConfirmation()
+```
+
+Implement Foundation-only policy:
+
+```swift
+public enum RouterAdvancedSurface: String, CaseIterable, Hashable, Sendable {
     case bypassThreshold, clock, runningMode, barrierFree, usbFirmware, blePIN
 }
-public struct RouterAdvancedGate: Equatable, Sendable {
-    public let administratorVerified: Bool
-    public let advancedEnabled: Bool
-    public let applicationMode: Bool
-    public let supported: Set<RouterAdvancedSurface>
-    public func visibleSurfaces() -> Set<RouterAdvancedSurface>
+public enum RouterAdvancedApplicationMode: Sendable { case application, ota }
+public enum RouterAdvancedServerGate: Sendable { case allowed, advancedDisabled }
+public struct RouterAdvancedVisibilityInput: Sendable {
+    public let adminVerified: Bool; public let advanced: Bool
+    public let mode: RouterAdvancedApplicationMode
+    public let hasFactoryMode, hasBypassControl, currentTimeAvailable, dcAvailable, usbAvailable: Bool
+    public let unsupported: Set<RouterAdvancedSurface>
+    public let serverGate: RouterAdvancedServerGate
 }
-public enum RouterAdvancedFailurePresentation: Equatable, Sendable {
-    case enableAdvanced
-    case removeSurface(RouterAdvancedSurface)
-    case retry(String)
+public struct RouterAdvancedVisibility: Equatable, Sendable {
+    public let surfaces: Set<RouterAdvancedSurface>
+    public let showsEnableAdvancedAffordance: Bool
+    public static func evaluate(_ x: RouterAdvancedVisibilityInput) -> Self {
+        guard x.adminVerified else { return .init(surfaces: [], showsEnableAdvancedAffordance: false) }
+        guard x.advanced, x.serverGate == .allowed else {
+            return .init(surfaces: [], showsEnableAdvancedAffordance: true)
+        }
+        guard x.mode == .application else { return .init(surfaces: [], showsEnableAdvancedAffordance: false) }
+        var s: Set<RouterAdvancedSurface> = []
+        if x.hasBypassControl && x.dcAvailable { s.insert(.bypassThreshold) }
+        if x.currentTimeAvailable { s.insert(.clock) }
+        if x.hasFactoryMode { s.formUnion([.runningMode, .barrierFree, .blePIN]) }
+        if x.hasFactoryMode && x.usbAvailable { s.insert(.usbFirmware) }
+        s.subtract(x.unsupported)
+        return .init(surfaces: s, showsEnableAdvancedAffordance: false)
+    }
+}
+public enum RouterAdvancedConfirmation: Equatable, Sendable {
+    case runningMode, blePIN
+    public static func required(for x: RouterAdvancedSurface) -> Self? {
+        switch x { case .runningMode: .runningMode; case .blePIN: .blePIN; default: nil }
+    }
 }
 ```
 
-`visibleSurfaces` returns empty unless administrator verification, settings advanced, and application mode all pass. It intersects the authoritative support set. There is no disabled representation for unsupported controls.
+Use additional UI-local value types for threshold/clock/mode/barrier/USB; no Network DTO imports.
 
-### Capability mapping
-
-The app maps identity/availability to support:
-
-- bypass threshold: DC available plus bypass-control feature
-- clock: `available.currentTime`
-- running mode, barrier-free, USB firmware, BLE PIN: application mode plus the daemon/API support advertised by authoritative identity/settings; a 409 `capability_unsupported` removes only that surface after an identity/settings refresh
-
-Do not infer support from a successful button tap and do not mutate FEATURES locally. A 403 `advanced_disabled` clears advanced presentation and provides a navigation affordance to M3's settings editor.
-
-### RED tests
-
-UI tests enumerate every missing gate and assert structural absence:
+- [ ] Add app RED tests:
 
 ```swift
-func testNoSurfaceExistsWhileLockedAdvancedOffOrNotApplicationMode()
-func testVisibleSurfacesAreExactIntersectionOfAuthoritativeSupport()
-func testAdvancedDisabledPresentsEnableAdvancedAffordance()
-func testCapabilityUnsupportedRemovesOnlyAffectedSurface()
-func testRunningModeAndBLEPINRequirePurposeSpecificConfirmation()
-func testNumericalPresentationIsDeterministicAndPINNeverAppears()
+func testAdvancedStateAppearsOnlyAfterAdminSettingsIdentityGates()
+func testThresholdAndBarrierPublishOnlyObservedResponse()
+func testAdvancedDisabledPublishesSettingsEditorAffordance()
+func testCapabilityUnsupportedRemovesOnlyAffectedSurfaceAfterRefresh()
+func testLateMutationAfterHostReplacementPublishesNothing()
+func testBLEPINClearsBeforeAwaitAndIsNotRetainedOrReflected()
+func testRunningModeAndBLEPINDoNotDispatchBeforeConfirmation()
 ```
 
-App-model tests:
+RED commands:
 
-```swift
-func testAdvancedLoadsPublishOnlyAuthoritativeReadbacks() async throws
-func testBypassAndBarrierMutationsPublishServerResponseNotRequestedValue() async throws
-func testRunningModeRequiresConfirmationAndPublishesValidatedResponse() async throws
-func testBLEPINClearsBeforeAwaitAndNeverEntersModelState() async throws
-func testAdvancedDisabledRoutesToSettingsWithoutDeadControl() async throws
-func testCapabilityUnsupportedRefreshesIdentityAndRemovesOnlySurface() async throws
-func testEndpointReplacementSuppressesLateAdvancedCompletion() async throws
-func testLockAndSessionEndClearAdvancedState() async throws
+```bash
+swift test --package-path peakdo/apple/WattlineUI --filter RouterAdvancedPresentationTests 2>&1 | tee /tmp/wattline-m4-task18-ui-red.log
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME:-Wattline-Tests-2}" CODE_SIGNING_ALLOWED=NO -only-testing:WattlineTests/RouterAdministrationModelTests 2>&1 | tee /tmp/wattline-m4-task18-app-red.log
 ```
 
-Use request/operation generations parallel to M3's settings/TLS patterns. `handleAdminFailure` still handles invalid administrator credentials. Add typed handling for `NetworkError.api(403,.advancedDisabled,...)` and `(409,.capabilityUnsupported,...)` without storing the router message. `RouterAdvancedView` conditionally constructs controls from `visibleSurfaces`; uses secure six-digit PIN entry; requires confirmation dialogs for running-mode and PIN mutations; and says “router/wattlined” for router operations.
+- [ ] Implement model/view:
+  1. Load `settings` plus `advancedIdentity()` only after verified admin. Derive application/OTA, feature bits, and availability. Publish only under session/admin/request/endpoint guards.
+  2. Every action uses `performAdmin`; store only observed response values.
+  3. `403 advanced_disabled`: clear controls and expose “Enable Advanced in Router Configuration”.
+  4. `409 capability_unsupported`: mark only attempted surface unsupported, refresh authoritative identity/settings, recompute.
+  5. Clear all advanced state on lock/end/replacement or advanced=false.
+  6. `RouterAdvancedView` iterates only `visibility.surfaces`; absence is structural. Purpose-specific dialogs precede running mode/BLE PIN. BLE PIN lives only in a local `SecureField`, copied and cleared synchronously before await. USB firmware is read-only. Enable affordance goes to the existing M3 Advanced settings toggle, never fabricates settings.
+  7. Because `RouterDeviceDTO.available` has no individual advanced bits, initial visibility uses documented feature/inventory proxies: threshold = `dc && dcBypassControl`; clock = `current_time`; running/barrier/PIN = application + factory feature; USB version adds USB availability. The server’s authoritative 409 then removes only the affected surface.
 
-### RED/GREEN commands
+- [ ] GREEN and commit:
 
 ```bash
 swift test --package-path peakdo/apple/WattlineUI --filter RouterAdvancedPresentationTests
-xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline \
-  -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME:-Wattline-Tests-2}" \
-  -only-testing:WattlineTests/RouterAdministrationModelTests CODE_SIGNING_ALLOWED=NO
-```
-
-Expected RED: missing presentation/model/view APIs. GREEN requires focused tests followed by full UI, Network, app, and widget suites.
-
-Commit:
-
-```bash
+swift test --package-path peakdo/apple/WattlineUI
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME:-Wattline-Tests-2}" CODE_SIGNING_ALLOWED=NO
+git diff --check
+git add peakdo/apple/WattlineUI peakdo/apple/Wattline/Wattline/RouterAdministration peakdo/apple/Wattline/WattlineTests/RouterAdministrationModelTests.swift
 git commit -m "feat: present router device administration"
 ```
 
 ---
 
-## Task 19: Verification and handoff
+### Task 19: Verification and handoff
 
-Run from `/Users/keith/.codex/worktrees/wattline-phase-2` and save complete logs under `/tmp/wattline-m4-*`:
+- [ ] Run actual gates:
 
 ```bash
-swift test --package-path peakdo/apple/WattlineCore
-swift test --package-path peakdo/apple/WattlineUI
-swift test --package-path peakdo/apple/WattlineNetwork
+cd /Users/keith/.codex/worktrees/wattline-phase-2
+swift test --package-path peakdo/apple/WattlineCore 2>&1 | tee /tmp/wattline-m4-core.log
+swift test --package-path peakdo/apple/WattlineUI 2>&1 | tee /tmp/wattline-m4-ui.log
+swift test --package-path peakdo/apple/WattlineNetwork 2>&1 | tee /tmp/wattline-m4-network.log
 WATTLINE_SIMULATOR_NAME=${WATTLINE_SIMULATOR_NAME:-Wattline-Tests-2}
-xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline \
-  -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME}" CODE_SIGNING_ALLOWED=NO
-xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineWidgets \
-  -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME}" CODE_SIGNING_ALLOWED=NO
-xcodebuild build -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline \
-  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME}" CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/wattline-m4-ios.log
+xcodebuild test -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme WattlineWidgets -destination "platform=iOS Simulator,name=${WATTLINE_SIMULATOR_NAME}" CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/wattline-m4-widgets.log
+xcodebuild build -project peakdo/apple/Wattline/Wattline.xcodeproj -scheme Wattline -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/wattline-m4-build.log
 ```
 
-Extract exact executed counts and simulator identity from both xcresults. Require Core exactly 156 and zero failed/skipped/expected failures everywhere.
+Baselines: Core 156 (must remain exactly 156), UI 45, Network 185, iOS 276, Widgets 276. Report exact grown counts from xcresult, simulator identity, and zero failed/skipped/expected failures.
 
-Run and record exit codes for:
+- [ ] Audits with exit codes:
 
 ```bash
-rg -n 'URLSession|NWBrowser|NWConnection|import Network|import Security' \
-  peakdo/apple/WattlineCore/Sources peakdo/apple/WattlineUI/Sources
-rg -n 'import WattlineNetwork' peakdo/apple/WattlineUI/Sources
-rg -n 'WattlineNetwork' peakdo/apple/WattlineUI/Package.swift
-rg -n '/device/action|/device/usbc-limit|/device/bypass-threshold|/device/schedules' \
-  peakdo/apple/WattlineCore/Sources peakdo/apple/WattlineUI/Sources \
-  peakdo/apple/WattlineNetwork/Sources peakdo/apple/Wattline/Wattline
-rg -n 'BLETransport|DeviceSession\(|DeviceOperationBroker' \
-  peakdo/apple/WattlineNetwork/Sources \
-  peakdo/apple/Wattline/Wattline/RouterAdministration
-rg -n 'api/v1/rules|api/v1/device/ota' \
-  peakdo/apple/WattlineNetwork/Sources peakdo/apple/Wattline/Wattline
-rg -n 'print\(|debugPrint\(|dump\(|Logger\(|os_log\(|NSLog\(' \
-  peakdo/apple/WattlineNetwork/Sources peakdo/apple/Wattline/Wattline
+rg -n 'URLSession|NWBrowser|NWConnection|import Network|import Security' peakdo/apple/WattlineCore/Sources peakdo/apple/WattlineUI/Sources; echo "boundary=$?"
+rg -n 'import WattlineNetwork' peakdo/apple/WattlineUI/Sources; echo "ui_source_dependency=$?"
+rg -n 'WattlineNetwork' peakdo/apple/WattlineUI/Package.swift; echo "ui_manifest_dependency=$?"
+rg -n '/device/action|/device/usbc-limit|/device/bypass-threshold|/device/schedules' peakdo/apple/WattlineCore/Sources peakdo/apple/WattlineUI/Sources peakdo/apple/WattlineNetwork/Sources peakdo/apple/Wattline/Wattline; echo "deprecated_routes=$?"
+rg -n 'BLETransport|DeviceSession\(|DeviceOperationBroker' peakdo/apple/WattlineNetwork/Sources peakdo/apple/Wattline/Wattline/RouterAdministration; echo "admin_ble_owner=$?"
+rg -n 'api/v1/rules|api/v1/device/ota' peakdo/apple/WattlineNetwork/Sources peakdo/apple/Wattline/Wattline; echo "m5_scope=$?"
+rg -n 'print\(|debugPrint\(|dump\(|Logger\(|os_log|NSLog' peakdo/apple/WattlineNetwork/Sources peakdo/apple/Wattline/Wattline; echo "logging=$?"
+rg -n 'DeviceCommand' peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterDevicePairing.swift peakdo/apple/WattlineNetwork/Sources/WattlineNetwork/RouterAdvancedControls.swift; echo "device_command_widening=$?"
 git diff --check d983528a..HEAD
 git status --short
 ```
 
-Also inspect the diff to prove `DeviceCommand`, the six-argument `RouterTransport` initializer, `RouterCredentialProvider.credential(for:)`, and client Keychain account string are unchanged; contracts/OEM/router repo are untouched; no secret-bearing field has a default synthesized reflection.
+No-match audits should exit 1. Inspect semantic false positives rather than hiding them. Confirm `git diff --name-only d983528a..HEAD` has no contract/OEM/router/M5 edits.
 
-Record per-task RED/GREEN commands and exact outputs in `.superpowers/sdd/task-16-report.md`, `task-17-report.md`, `task-18-report.md`, and `task-19-report.md`. The final report lists commits, deviations from this plan, counts, audit transcript, and these external checks:
+- [ ] Handoff: commits, per-task actual RED/GREEN logs, exact suite counts, audit transcript, every deviation, and external checks unit tests cannot prove: physical BlueZ scan/pair/unpair; empty-PIN retention; real threshold/barrier readback; clock drift/sync and unavailable zero BLE I/O; running-mode/BLE-PIN hardware effect; live advanced-disabled vs capability-unsupported.
 
-1. Physical BlueZ scan/pair/unpair.
-2. Real bypass/barrier authoritative readback.
-3. Real clock drift and sync.
-4. Running-mode and BLE-PIN effects on hardware.
-5. Live daemon distinction between `advanced_disabled` and `capability_unsupported`.
+Stop after Task 19.
 
-Stop after Task 19. Do not start Milestone 5.
+## Explicit deviations from the compressed master plan
+
+1. Pairing is a separate HTTP-only **client-role** actor rather than an extension of the admin-token actor. This follows the normative role table and still creates no BLE owner.
+2. The real app model path is `Wattline/Wattline/RouterAdministration/RouterAdministrationModel.swift`, not the master sketch’s nonexistent M5 `WattlineShared` path.
+3. Clock GET/sync already exists. Task 17 shares/extracts its DTO decoder and adds admin-surface access without duplicating routes, clocks, or transaction ownership.
+4. Network accepts the router contract’s empty or up-to-six-digit pairing PIN; UI accepts empty or exactly six digits to avoid ambiguous short user entries.
