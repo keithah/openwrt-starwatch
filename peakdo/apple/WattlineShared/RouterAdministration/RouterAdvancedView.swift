@@ -70,6 +70,8 @@ struct RouterAdvancedView: View {
                 let mode = selectedRunningMode
                 Task { await model.setAdvancedRunningMode(mode, confirmation: .runningMode) }
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm changing Link-Power running mode")
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Changing running mode can interrupt the station's current operation.")
@@ -84,6 +86,8 @@ struct RouterAdvancedView: View {
                 blePIN = ""
                 Task { await model.setAdvancedBLEPIN(pin, confirmation: .blePIN) }
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm changing Link-Power BLE PIN")
             Button("Cancel", role: .cancel) { blePIN = "" }
         } message: {
             Text("Existing BLE clients may need the new six-digit PIN to reconnect.")
@@ -130,6 +134,8 @@ struct RouterAdvancedView: View {
                 Button("Change running mode", role: .destructive) {
                     confirmsRunningMode = true
                 }
+                .accessibilityIdentifier("action.destructive")
+                .accessibilityLabel("Change Link-Power running mode")
             }
         case .barrierFree:
             Section("Barrier-free mode") {
@@ -154,9 +160,13 @@ struct RouterAdvancedView: View {
             Section("Link-Power BLE PIN") {
                 SecureField("Six-digit PIN", text: $blePIN)
                     .routerPINInput()
+                    .accessibilityIdentifier("admin.secret")
+                    .accessibilityLabel("New Link-Power BLE PIN")
                 Button("Change BLE PIN", role: .destructive) {
                     confirmsBLEPIN = true
                 }
+                .accessibilityIdentifier("action.destructive")
+                .accessibilityLabel("Change Link-Power BLE PIN")
                 .disabled(!isValidBLEPIN)
                 if model.advancedValues.blePINUpdated == true {
                     Text("PIN updated on the Link-Power.").foregroundStyle(.secondary)

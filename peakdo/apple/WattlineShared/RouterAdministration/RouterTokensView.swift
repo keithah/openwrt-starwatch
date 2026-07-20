@@ -71,6 +71,8 @@ struct RouterTokensView: View {
                         Button("Revoke", role: .destructive) {
                             tokenPendingRevocation = token
                         }
+                        .accessibilityIdentifier("action.destructive")
+                        .accessibilityLabel("Revoke API client \(token.label)")
                     }
                 }
             }
@@ -91,6 +93,8 @@ struct RouterTokensView: View {
                 Button(confirmation.actionTitle, role: .destructive) {
                     Task { await model.revoke(token) }
                 }
+                .accessibilityIdentifier("action.destructive")
+                .accessibilityLabel("Confirm revoking API client \(token.label)")
             }
         } message: { token in
             Text(presentation(for: token).confirmation?.message ?? "")

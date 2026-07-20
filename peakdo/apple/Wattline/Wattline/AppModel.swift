@@ -220,7 +220,7 @@ final class AppModel {
     private let widgetReloadAdapter: WidgetReloadAdapter?
     private let liveActivityCoordinator: LiveActivityCoordinator
     let routerConnections: RouterConnectionModel
-    let routerAdministration: RouterAdministrationModel
+    private(set) var routerAdministration: RouterAdministrationModel
     let routerEnrollmentRoute: RouterEnrollmentRoute
     private var snapshotFlushTask: Task<Void, Never>?
     private var transport: (any DeviceTransport)?
@@ -382,6 +382,7 @@ final class AppModel {
     func enterDemo() {
         let demo = DemoTransport(seed: 0x57415454)
         demoTransport = demo
+        routerAdministration = .demo()
         isDemo = true
         activeTransportKind = .demo
         activeRouterEndpoints = nil
@@ -428,6 +429,7 @@ final class AppModel {
         demoTransport = nil
         activeTransportKind = .bluetooth
         activeRouterEndpoints = nil
+        routerAdministration = .production(connections: routerConnections)
         capabilities = DeviceCapabilities(features: [])
         bluetoothIssue = nil
 
@@ -443,6 +445,7 @@ final class AppModel {
     ) {
         do {
             let routerTransport = try routerConnections.makeTransport(for: host)
+            routerAdministration = .production(connections: routerConnections)
             isDemo = false
             demoTransport = nil
             snapshotCoordinator?.setDemo(false)

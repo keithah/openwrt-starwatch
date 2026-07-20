@@ -47,6 +47,8 @@ struct RouterHistoryView: View {
                 } description: {
                     Text(message)
                 }
+                .accessibilityIdentifier("state.unavailable")
+                .accessibilityLabel("Router history unavailable. \(message)")
             } else if presentation.showsSuccessfulEmpty {
                 ContentUnavailableView {
                     Label("No history yet", systemImage: "chart.xyaxis.line")
@@ -73,6 +75,7 @@ struct RouterHistoryView: View {
                     }
                     .chartYScale(domain: 0...100)
                     .frame(minHeight: 160)
+                    .accessibilityLabel("Battery level history chart")
 
                     Chart {
                         ForEach(presentation.history.powerSeriesPoints) { point in
@@ -102,6 +105,7 @@ struct RouterHistoryView: View {
                         }
                     }
                     .frame(minHeight: 120)
+                    .accessibilityLabel("DC and USB-C power history chart")
 
                     if let fetchedAt = presentation.history.fetchedAt {
                         Text("Fetched \(fetchedAt.formatted(date: .omitted, time: .standard))")
@@ -111,9 +115,14 @@ struct RouterHistoryView: View {
                     }
 
                     if let message = presentation.failureMessage {
-                        Text(message).foregroundStyle(.orange)
+                        Text(message)
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier("state.stale")
+                            .accessibilityLabel("History may be stale. \(message)")
                     }
                 }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("history.chart")
             }
         }
     }

@@ -104,4 +104,40 @@ final class MacRouterAdministrationTests: XCTestCase {
         XCTAssertTrue(administration.contains("if let enrollmentSource"))
         XCTAssertTrue(administration.contains("guard enrollmentSource == nil"))
     }
+
+    func testMacNavigatesEveryAdministrationSection() throws {
+        let administration = try source(
+            "WattlineMac/RouterAdministration/MacRouterAdministrationView.swift"
+        )
+
+        for label in [
+            "History", "Client enrollment", "API clients", "Router Configuration",
+            "Link-Power pairing", "Advanced device", "Automation Rules",
+        ] {
+            XCTAssertTrue(administration.contains(label), "missing \(label)")
+        }
+    }
+
+    func testMacDemoAndAdministrationExposeRequiredAccessibilityIdentifiers() throws {
+        let paths = [
+            "WattlineMac/MacMenuBarView.swift",
+            "WattlineMac/MacRootView.swift",
+            "WattlineMac/RouterAdministration/MacRouterAdministrationView.swift",
+            "../WattlineShared/RouterAdministration/RouterAdvancedView.swift",
+            "../WattlineShared/RouterAdministration/RouterDevicePairingView.swift",
+            "../WattlineShared/RouterAdministration/RouterHistoryView.swift",
+            "../WattlineShared/RouterAdministration/RouterPairingModeView.swift",
+            "../WattlineShared/RouterAdministration/RouterRulesView.swift",
+            "../WattlineShared/RouterAdministration/RouterSettingsView.swift",
+            "../WattlineShared/RouterAdministration/RouterTokensView.swift",
+        ]
+        let text = try paths.map(source).joined(separator: "\n")
+
+        for identifier in [
+            "admin.secret", "history.chart", "rule.toggle", "action.destructive",
+            "state.stale", "state.unavailable", "demo.badge", "connect.real-device",
+        ] {
+            XCTAssertTrue(text.contains(identifier), "missing \(identifier)")
+        }
+    }
 }

@@ -58,6 +58,8 @@ struct RouterSettingsView: View {
                             if model.tlsPromotionRecoveryAvailable {
                                 SecureField("Administrator token", text: $tlsRecoveryToken)
                                     .routerLiteralInput()
+                                    .accessibilityIdentifier("admin.secret")
+                                    .accessibilityLabel("Administrator token for certificate verification")
                                 Button("Verify with administrator token") {
                                     let token = tlsRecoveryToken
                                     tlsRecoveryToken = ""
@@ -120,6 +122,8 @@ struct RouterSettingsView: View {
                     SecureField("BLE PIN", text: binding(\.blePIN, fallback: current.blePIN))
                         .routerOneTimeCodeInput()
                         .monospacedDigit()
+                        .accessibilityIdentifier("admin.secret")
+                        .accessibilityLabel("Router Bluetooth pairing PIN")
                 }
 
                 saveSection(original: original, draft: current)
@@ -130,7 +134,10 @@ struct RouterSettingsView: View {
             } else {
                 Section("Router configuration") {
                     if let message = model.settingsError {
-                        Text(message).foregroundStyle(.orange)
+                        Text(message)
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier("state.unavailable")
+                            .accessibilityLabel("Router configuration unavailable. \(message)")
                     } else {
                         ProgressView()
                     }
@@ -160,6 +167,8 @@ struct RouterSettingsView: View {
             Button("Rotate certificate", role: .destructive) {
                 Task { await model.rotateTLS() }
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm rotating router certificate")
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The current certificate remains active until wattlined on the router restarts. After restart, verify the new certificate before its pin is promoted.")
@@ -182,6 +191,8 @@ struct RouterSettingsView: View {
             Button("Allow insecure WAN HTTP", role: .destructive) {
                 confirm(.insecureWANHTTP)
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm allowing insecure WAN HTTP")
             Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
         } message: {
             Text("HTTP traffic on WAN links is not encrypted.")
@@ -194,6 +205,8 @@ struct RouterSettingsView: View {
             Button("Confirm token-store cutover", role: .destructive) {
                 confirm(.tokenStoreCutover)
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm changing router token storage")
             Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
         } message: {
             Text(RouterSettingsCopy.tokenStoreCutover)
@@ -206,6 +219,8 @@ struct RouterSettingsView: View {
             Button("Confirm Bluetooth PIN change", role: .destructive) {
                 confirm(.blePINChange)
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm changing router Bluetooth pairing PIN")
             Button("Cancel", role: .cancel) { invalidateEditAuthorization() }
         } message: {
             Text("Existing Bluetooth pairing credentials may need to be updated.")

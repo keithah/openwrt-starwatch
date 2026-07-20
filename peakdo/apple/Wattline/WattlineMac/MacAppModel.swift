@@ -12,8 +12,8 @@ final class MacAppModel {
     private var transport: (any DeviceTransport)?
     private var session: DeviceSession?
 
-    let routerConnections: RouterConnectionModel
-    let routerAdministration: RouterAdministrationModel
+    private(set) var routerConnections: RouterConnectionModel
+    private(set) var routerAdministration: RouterAdministrationModel
     let routerEnrollmentRoute: RouterEnrollmentRoute
 
     private(set) var started = false
@@ -25,10 +25,10 @@ final class MacAppModel {
         routerAdministration: RouterAdministrationModel? = nil,
         routerEnrollmentRoute: RouterEnrollmentRoute = RouterEnrollmentRoute()
     ) {
-        let connections = routerConnections ?? .production()
+        let connections = routerConnections ?? .demo()
         self.transportFactory = transportFactory
         self.routerConnections = connections
-        self.routerAdministration = routerAdministration ?? .production(
+        self.routerAdministration = routerAdministration ?? .demo(
             connections: connections
         )
         self.routerEnrollmentRoute = routerEnrollmentRoute
@@ -49,6 +49,7 @@ final class MacAppModel {
     }
 
     func connectRealDevice() {
+        activateRealDeviceServices()
         start()
         isDemo = false
         routerConnections.startDiscovery()
@@ -58,6 +59,16 @@ final class MacAppModel {
 
     func acceptPairingURL(_ url: URL) {
         guard routerEnrollmentRoute.consume(url) else { return }
+        activateRealDeviceServices()
+        start()
         isDemo = false
+        routerConnections.startDiscovery()
+    }
+
+    private func activateRealDeviceServices() {
+        guard isDemo else { return }
+        let connections = RouterConnectionModel.production()
+        routerConnections = connections
+        routerAdministration = .production(connections: connections)
     }
 }

@@ -22,6 +22,8 @@ struct RouterPairingModeView: View {
                             Text(pin)
                                 .monospacedDigit()
                                 .textSelection(.enabled)
+                                .accessibilityIdentifier("admin.secret")
+                                .accessibilityLabel("Pairing PIN")
                         }
                     }
                     Text("Expires \(status.expiresAt.formatted(date: .omitted, time: .standard))")
@@ -40,6 +42,8 @@ struct RouterPairingModeView: View {
                     Button("Close pairing", role: .destructive) {
                         Task { await model.closePairing() }
                     }
+                    .accessibilityIdentifier("action.destructive")
+                    .accessibilityLabel("Close client enrollment pairing")
                 }
             case .closed:
                 Text("Pairing is closed. Opening it shows a six-digit PIN and QR for about five minutes.")
@@ -62,6 +66,8 @@ struct RouterPairingModeView: View {
                 Text("Pairing status is unavailable.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("state.unavailable")
+                    .accessibilityLabel("Client enrollment pairing status unavailable")
                 Button("Refresh pairing status") {
                     Task { await model.reloadPairingMode() }
                 }

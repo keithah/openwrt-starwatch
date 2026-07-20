@@ -266,6 +266,8 @@ struct RouterRulesView: View {
                 Section {
                     Text("These rules may be out of date.")
                         .foregroundStyle(.orange)
+                        .accessibilityIdentifier("state.stale")
+                        .accessibilityLabel("Automation rules may be stale")
                 }
             }
             if let message = model.rulesError {
@@ -292,6 +294,8 @@ struct RouterRulesView: View {
                 pendingDeletionName = nil
                 Task { await model.deleteRule(named: name) }
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm deleting automation rule")
             Button("Cancel", role: .cancel) { pendingDeletionName = nil }
         } message: {
             Text("Deleting a rule stops that automation immediately.")
@@ -373,6 +377,8 @@ struct RouterRulesView: View {
                 Button("Delete \(rule.name)", role: .destructive) {
                     pendingDeletionName = rule.name
                 }
+                .accessibilityIdentifier("action.destructive")
+                .accessibilityLabel("Delete automation rule \(rule.name)")
             }
         }
     }
@@ -420,6 +426,8 @@ struct RouterRuleEditor: View {
                 LabeledContent("Rule name", value: rule.name)
             }
             Toggle("Enabled", isOn: $draft.enabled)
+                .accessibilityIdentifier("rule.toggle")
+                .accessibilityLabel("Automation rule enabled")
         }
 
         Section("Condition") {
@@ -462,6 +470,8 @@ struct RouterRuleEditor: View {
             TextField("Hysteresis margin", text: $draft.hysteresisMargin)
                 .routerDecimalInput()
             Toggle("Repeat", isOn: $draft.hasRepeatEvery)
+                .accessibilityIdentifier("rule.toggle")
+                .accessibilityLabel("Repeat automation rule")
             if draft.hasRepeatEvery {
                 TextField("Repeat every", text: $draft.repeatEvery.value)
                     .routerDecimalInput()
@@ -493,6 +503,8 @@ struct RouterRuleEditor: View {
                 }
             }
             Toggle("Confirm shutdown", isOn: $draft.confirmShutdown)
+                .accessibilityIdentifier("rule.toggle")
+                .accessibilityLabel("Confirm shutdown action")
         }
 
         if hasWebhook {
@@ -506,6 +518,8 @@ struct RouterRuleEditor: View {
                 Button("Save shutdown rule", role: .destructive) {
                     confirmsShutdownSave = true
                 }
+                .accessibilityIdentifier("action.destructive")
+                .accessibilityLabel("Review saving shutdown automation rule")
                 .disabled(validatedRule == nil || !canSave)
             } else {
                 Button("Save rule") { save(confirmation: nil) }
@@ -523,6 +537,8 @@ struct RouterRuleEditor: View {
             Button("Save shutdown rule", role: .destructive) {
                 save(confirmation: .shutdown)
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm saving shutdown automation rule")
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("A matching rule can shut down the connected power bank. Reconnect input power or use the hardware button to wake it.")
@@ -610,6 +626,8 @@ private struct RouterPowerLossEditor: View {
 
     var body: some View {
         Toggle("Enabled", isOn: $enabled)
+            .accessibilityIdentifier("rule.toggle")
+            .accessibilityLabel("Power-loss shutdown enabled")
         TextField("Hold", text: $hold.value)
             .routerDecimalInput()
             .monospacedDigit()
@@ -619,6 +637,8 @@ private struct RouterPowerLossEditor: View {
             }
         }
         Toggle("Confirm shutdown", isOn: $confirmShutdown)
+            .accessibilityIdentifier("rule.toggle")
+            .accessibilityLabel("Confirm power-loss shutdown")
         if rule.actions.contains(where: {
             if case .webhook = $0 { return true }
             return false
@@ -629,6 +649,8 @@ private struct RouterPowerLossEditor: View {
         Button("Review shutdown change", role: .destructive) {
             confirmsSave = true
         }
+        .accessibilityIdentifier("action.destructive")
+        .accessibilityLabel("Review power-loss shutdown change")
         .disabled(validatedHold == nil || !confirmShutdown || model.access != .unlocked)
         .confirmationDialog(
             "Save the power-loss shutdown preset?",
@@ -646,6 +668,8 @@ private struct RouterPowerLossEditor: View {
                     )
                 }
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm saving power-loss shutdown preset")
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("When input power remains absent for the hold duration, the router can shut down the connected power bank.")
@@ -668,6 +692,8 @@ private struct RouterPowerLossReset: View {
         Button("Reset power-loss preset", role: .destructive) {
             confirmsReset = true
         }
+        .accessibilityIdentifier("action.destructive")
+        .accessibilityLabel("Reset power-loss shutdown preset")
         .confirmationDialog(
             "Reset the power-loss shutdown preset?",
             isPresented: $confirmsReset,
@@ -683,6 +709,8 @@ private struct RouterPowerLossReset: View {
                     )
                 }
             }
+            .accessibilityIdentifier("action.destructive")
+            .accessibilityLabel("Confirm resetting power-loss shutdown preset")
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Reset replaces every field and action in the reserved preset with a ten-minute input-loss shutdown rule.")

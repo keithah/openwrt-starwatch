@@ -100,6 +100,8 @@ final class RouterAdministrationModel {
     private let advancedPostRefreshIsCancelled: @MainActor () -> Bool
     private let pairingExpirySleep: PairingExpirySleep
     private let devicePairingClientFactory: DevicePairingClientFactory?
+    private let usesDemoServices: Bool
+    private var demoState: RouterAdministrationDemo?
     private var sessionGeneration: UInt64 = 0
     private var adminOperationGeneration: UInt64 = 0
     private var historyRequestGeneration: UInt64 = 0
@@ -182,7 +184,9 @@ final class RouterAdministrationModel {
         pairingExpirySleep: @escaping PairingExpirySleep = { deadline in
             let remaining = max(0, deadline.timeIntervalSinceNow)
             try await Task.sleep(for: .seconds(remaining))
-        }
+        },
+        demoState: RouterAdministrationDemo? = nil,
+        usesDemoServices: Bool = false
     ) {
         self.connections = connections
         self.adminClient = adminClient
@@ -192,6 +196,9 @@ final class RouterAdministrationModel {
         self.now = now
         self.advancedPostRefreshIsCancelled = advancedPostRefreshIsCancelled
         self.pairingExpirySleep = pairingExpirySleep
+        self.demoState = demoState
+        self.usesDemoServices = usesDemoServices
+        if let demoState { publishDemo(demoState) }
     }
 
     static func production(
@@ -229,11 +236,56 @@ final class RouterAdministrationModel {
         )
     }
 
+    static func demo(
+        credentials: any RouterCredentialBackend = RouterAdministrationDemoCredentialBackend(),
+        hosts: any RouterHostKeyValueStore = RouterAdministrationDemoHostBackend(),
+        now: Date = Date(timeIntervalSince1970: 1_721_260_800)
+    ) -> RouterAdministrationModel {
+        let connections = RouterConnectionModel.demo(credentials: credentials, hosts: hosts)
+        return demo(connections: connections, now: now)
+    }
+
+    static func demo(
+        connections: RouterConnectionModel,
+        now: Date = Date(timeIntervalSince1970: 1_721_260_800)
+    ) -> RouterAdministrationModel {
+        let fixture = try? RouterAdministrationDemo.fixture(now: now)
+        let unavailable: @Sendable (RouterEndpoint) throws -> any RouterHTTPClient = { _ in
+            throw RouterAdministrationDemoError.externalAccess
+        }
+        return RouterAdministrationModel(
+            connections: connections,
+            adminClient: RouterAdministrationClient(
+                credentials: connections.credentialStore,
+                httpFactory: unavailable
+            ),
+            historyClientFactory: { _ in
+                throw RouterAdministrationDemoError.externalAccess
+            },
+            endpointMigrationValidator: RouterEndpointMigrationValidator(
+                hostStore: connections.hostStore,
+                credentials: connections.credentialStore,
+                httpFactory: unavailable
+            ),
+            now: { now },
+            demoState: fixture,
+            usesDemoServices: true
+        )
+    }
+
     func begin(host: RouterHostMetadata) async {
+        if usesDemoServices {
+            if let demoState { publishDemo(demoState) }
+            return
+        }
         _ = await beginSession(host: host)
     }
 
     func open(host: RouterHostMetadata) async {
+        if usesDemoServices {
+            if let demoState { publishDemo(demoState) }
+            return
+        }
         let generation = await beginSession(host: host)
         guard !Task.isCancelled, sessionGeneration == generation else { return }
         await reloadHistory()
@@ -300,6 +352,10 @@ final class RouterAdministrationModel {
     }
 
     func end() async {
+        if usesDemoServices {
+            clearPairingSecrets()
+            return
+        }
         sessionGeneration &+= 1
         devicePairingGeneration &+= 1
         if let devicePairingClient { await devicePairingClient.cancel() }
@@ -326,16 +382,37 @@ final class RouterAdministrationModel {
     }
 
     func refreshDevicePairing() async {
+        guard !usesDemoServices else { return }
         await performDevicePairing { client, _ in try await client.status() }
     }
 
     func scanForLinkPower() async {
+        guard !usesDemoServices else { return }
         await performDevicePairing { client, progress in
             try await client.scan(progress: progress)
         }
     }
 
     func pairLinkPower(mac: String, pin: String) async {
+        if var demoState {
+            demoState.devicePairingStatus = RouterDevicePairingStatus(
+                stage: .paired,
+                target: mac,
+                devices: demoState.devicePairingStatus.devices.map {
+                    RouterPairableDevice(
+                        mac: $0.mac,
+                        name: $0.name,
+                        rssi: $0.rssi,
+                        paired: $0.mac == mac || $0.paired
+                    )
+                },
+                error: nil
+            )
+            self.demoState = demoState
+            devicePairingStatus = demoState.devicePairingStatus
+            return
+        }
+        guard !usesDemoServices else { return }
         // Deliberately capture no PIN in model state; the view clears its local
         // secure entry before this asynchronous dispatch.
         await performDevicePairing { client, progress in
@@ -344,6 +421,25 @@ final class RouterAdministrationModel {
     }
 
     func unpairLinkPower(mac: String) async {
+        if var demoState {
+            demoState.devicePairingStatus = RouterDevicePairingStatus(
+                stage: .idle,
+                target: nil,
+                devices: demoState.devicePairingStatus.devices.map {
+                    RouterPairableDevice(
+                        mac: $0.mac,
+                        name: $0.name,
+                        rssi: $0.rssi,
+                        paired: $0.mac == mac ? false : $0.paired
+                    )
+                },
+                error: nil
+            )
+            self.demoState = demoState
+            devicePairingStatus = demoState.devicePairingStatus
+            return
+        }
+        guard !usesDemoServices else { return }
         await performDevicePairing { client, progress in
             try await client.unpair(mac: mac, progress: progress)
         }
@@ -351,6 +447,12 @@ final class RouterAdministrationModel {
 
     @discardableResult
     func reloadAdvanced() async -> Bool {
+        if let demoState {
+            advancedIdentity = demoState.identity
+            advancedValues = demoState.advancedValues
+            return true
+        }
+        guard !usesDemoServices else { return false }
         guard host != nil, access == .unlocked else { return false }
         advancedLoadGeneration &+= 1
         let request = advancedLoadGeneration
@@ -391,12 +493,27 @@ final class RouterAdministrationModel {
     }
 
     func loadAdvancedBypassThreshold() async {
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.bypassThreshold) { try await $0.bypassThreshold() } publish: {
             self.publishAdvancedValue(.bypassThreshold($0.volts))
         }
     }
 
     func setAdvancedBypassThreshold(volts: Double) async {
+        if var demoState {
+            demoState.advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: volts,
+                clock: demoState.advancedValues.clock,
+                runningMode: demoState.advancedValues.runningMode,
+                barrierFreeEnabled: demoState.advancedValues.barrierFreeEnabled,
+                usbFirmware: demoState.advancedValues.usbFirmware,
+                blePINUpdated: demoState.advancedValues.blePINUpdated
+            )
+            self.demoState = demoState
+            advancedValues = demoState.advancedValues
+            return
+        }
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.bypassThreshold) {
             try await $0.setBypassThreshold(volts: volts)
         } publish: {
@@ -405,12 +522,32 @@ final class RouterAdministrationModel {
     }
 
     func loadAdvancedClock() async {
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.clock) { try await $0.deviceClock() } publish: {
             self.publishAdvancedValue(.clock(Self.clockValue($0)))
         }
     }
 
     func syncAdvancedClock() async {
+        if var demoState {
+            demoState.advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: demoState.advancedValues.bypassThresholdVolts,
+                clock: RouterAdvancedClockValue(
+                    available: true,
+                    deviceTime: ISO8601DateFormatter().string(from: now()),
+                    systemTime: ISO8601DateFormatter().string(from: now()),
+                    driftSeconds: 0
+                ),
+                runningMode: demoState.advancedValues.runningMode,
+                barrierFreeEnabled: demoState.advancedValues.barrierFreeEnabled,
+                usbFirmware: demoState.advancedValues.usbFirmware,
+                blePINUpdated: demoState.advancedValues.blePINUpdated
+            )
+            self.demoState = demoState
+            advancedValues = demoState.advancedValues
+            return
+        }
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.clock) { client in
             _ = try await client.syncDeviceClock()
             return try await client.deviceClock()
@@ -424,18 +561,47 @@ final class RouterAdministrationModel {
         confirmation: RouterAdvancedConfirmation?
     ) async {
         guard confirmation == .runningMode else { return }
+        if var demoState {
+            demoState.advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: demoState.advancedValues.bypassThresholdVolts,
+                clock: demoState.advancedValues.clock,
+                runningMode: mode,
+                barrierFreeEnabled: demoState.advancedValues.barrierFreeEnabled,
+                usbFirmware: demoState.advancedValues.usbFirmware,
+                blePINUpdated: demoState.advancedValues.blePINUpdated
+            )
+            self.demoState = demoState
+            advancedValues = demoState.advancedValues
+            return
+        }
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.runningMode) { try await $0.setRunningMode(mode) } publish: {
             self.publishAdvancedValue(.runningMode($0.mode))
         }
     }
 
     func loadAdvancedBarrierFree() async {
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.barrierFree) { try await $0.barrierFree() } publish: {
             self.publishAdvancedValue(.barrierFree($0.enabled))
         }
     }
 
     func setAdvancedBarrierFree(_ enabled: Bool) async {
+        if var demoState {
+            demoState.advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: demoState.advancedValues.bypassThresholdVolts,
+                clock: demoState.advancedValues.clock,
+                runningMode: demoState.advancedValues.runningMode,
+                barrierFreeEnabled: enabled,
+                usbFirmware: demoState.advancedValues.usbFirmware,
+                blePINUpdated: demoState.advancedValues.blePINUpdated
+            )
+            self.demoState = demoState
+            advancedValues = demoState.advancedValues
+            return
+        }
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.barrierFree) {
             try await $0.setBarrierFree(enabled)
         } publish: {
@@ -444,6 +610,7 @@ final class RouterAdministrationModel {
     }
 
     func loadAdvancedUSBFirmware() async {
+        guard !usesDemoServices else { return }
         await performAdvancedSurface(.usbFirmware) { try await $0.usbFirmwareVersion() } publish: {
             self.publishAdvancedValue(.usbFirmware(RouterAdvancedUSBFirmwareValue(
                 raw: $0.raw,
@@ -459,6 +626,20 @@ final class RouterAdministrationModel {
         confirmation: RouterAdvancedConfirmation?
     ) async {
         guard confirmation == .blePIN else { return }
+        if var demoState {
+            demoState.advancedValues = RouterAdvancedValues(
+                bypassThresholdVolts: demoState.advancedValues.bypassThresholdVolts,
+                clock: demoState.advancedValues.clock,
+                runningMode: demoState.advancedValues.runningMode,
+                barrierFreeEnabled: demoState.advancedValues.barrierFreeEnabled,
+                usbFirmware: demoState.advancedValues.usbFirmware,
+                blePINUpdated: true
+            )
+            self.demoState = demoState
+            advancedValues = demoState.advancedValues
+            return
+        }
+        guard !usesDemoServices else { return }
         // The secret is captured only by this call and is never assigned to model state.
         await performAdvancedSurface(.blePIN) { try await $0.setBLEPIN(pin) } publish: {
             self.publishAdvancedValue(.blePINUpdated($0.updated))
@@ -466,6 +647,7 @@ final class RouterAdministrationModel {
     }
 
     func reloadHistory() async {
+        guard !usesDemoServices else { return }
         guard let host else { return }
         let generation = sessionGeneration
         historyRequestGeneration &+= 1
@@ -492,6 +674,7 @@ final class RouterAdministrationModel {
     }
 
     func reloadRules() async {
+        guard !usesDemoServices else { return }
         guard host != nil else { return }
         rulesRequestGeneration &+= 1
         let request = rulesRequestGeneration
@@ -521,6 +704,17 @@ final class RouterAdministrationModel {
         _ rule: RouterRule,
         confirmation: RouterRuleConfirmation?
     ) async {
+        if var demoState {
+            guard rule.name != RouterPowerLossPreset.reservedName,
+                  ruleConfirmationAllowsMutation(rule, confirmation: confirmation),
+                  !demoState.rules.contains(where: { Self.ruleName($0) == rule.name })
+            else { return }
+            demoState.rules.append(.known(rule))
+            self.demoState = demoState
+            publishRules(demoState.rules)
+            return
+        }
+        guard !usesDemoServices else { return }
         guard rule.name != RouterPowerLossPreset.reservedName,
               ruleConfirmationAllowsMutation(rule, confirmation: confirmation),
               !rules.contains(where: { Self.ruleName($0) == rule.name })
@@ -533,6 +727,18 @@ final class RouterAdministrationModel {
         rule: RouterRule,
         confirmation: RouterRuleConfirmation?
     ) async {
+        if var demoState {
+            guard rule.name == name,
+                  name != RouterPowerLossPreset.reservedName,
+                  ruleConfirmationAllowsMutation(rule, confirmation: confirmation),
+                  let index = demoState.rules.firstIndex(where: { Self.ruleName($0) == name })
+            else { return }
+            demoState.rules[index] = .known(rule)
+            self.demoState = demoState
+            publishRules(demoState.rules)
+            return
+        }
+        guard !usesDemoServices else { return }
         guard rule.name == name,
               name != RouterPowerLossPreset.reservedName,
               rule.name != RouterPowerLossPreset.reservedName,
@@ -550,6 +756,14 @@ final class RouterAdministrationModel {
     }
 
     func deleteRule(named name: String) async {
+        if var demoState {
+            guard name != RouterPowerLossPreset.reservedName else { return }
+            demoState.rules.removeAll { Self.ruleName($0) == name }
+            self.demoState = demoState
+            publishRules(demoState.rules)
+            return
+        }
+        guard !usesDemoServices else { return }
         guard name != RouterPowerLossPreset.reservedName,
               rules.contains(where: {
             guard Self.ruleName($0) == name, case .known = $0 else { return false }
@@ -570,6 +784,32 @@ final class RouterAdministrationModel {
         }
         let preset = RouterPowerLossPreset(document: document)
         do {
+            if var demoState {
+                let updated: RouterRule
+                if preset.isCompatible {
+                    guard confirmation == .shutdown else { return }
+                    updated = try preset.updating(
+                        enabled: enabled,
+                        hold: hold,
+                        confirmShutdown: confirmShutdown
+                    )
+                } else {
+                    guard confirmation == .resetPowerLossPreset else { return }
+                    updated = try preset.reset(
+                        enabled: enabled,
+                        hold: hold,
+                        confirmed: true
+                    )
+                }
+                demoState.rules.removeAll {
+                    Self.ruleName($0) == RouterPowerLossPreset.reservedName
+                }
+                demoState.rules.insert(.known(updated), at: 0)
+                self.demoState = demoState
+                publishRules(demoState.rules)
+                return
+            }
+            guard !usesDemoServices else { return }
             if preset.isCompatible {
                 guard confirmation == .shutdown else { return }
                 let updated = try preset.updating(
@@ -607,6 +847,11 @@ final class RouterAdministrationModel {
     }
 
     func unlock(token: String) async {
+        if usesDemoServices {
+            access = .unlocked
+            adminError = nil
+            return
+        }
         guard let host,
               access != .verifying,
               !isTLSRotationRunning,
@@ -643,6 +888,10 @@ final class RouterAdministrationModel {
     }
 
     func lock() async {
+        if usesDemoServices {
+            access = .locked
+            return
+        }
         guard host != nil,
               !isTLSRotationRunning,
               !isTLSPromotionRunning
@@ -656,6 +905,7 @@ final class RouterAdministrationModel {
     }
 
     func reloadSettings() async {
+        guard !usesDemoServices else { return }
         settingsLoadGeneration &+= 1
         let request = settingsLoadGeneration
         isSettingsLoading = true
@@ -690,6 +940,25 @@ final class RouterAdministrationModel {
         replacement: RouterHostMetadata? = nil,
         requiresValidatedReplacement: Bool = false
     ) async -> SettingsSaveOutcome {
+        if var demoState {
+            guard access == .unlocked, !isSettingsSaving else { return .stale }
+            do {
+                demoState.settings = try RouterAdministrationDemo.applying(
+                    patch,
+                    to: demoState.settings
+                )
+                self.demoState = demoState
+                settings = demoState.settings
+                settingsError = nil
+                settingsRestartRequired = false
+                invalidateReplacementValidation()
+                return .accepted
+            } catch {
+                settingsError = "The demo configuration could not be updated."
+                return .failed
+            }
+        }
+        guard !usesDemoServices else { return .stale }
         guard let source = host,
               access == .unlocked,
               !isSettingsSaving
@@ -811,6 +1080,12 @@ final class RouterAdministrationModel {
     }
 
     func rotateTLS() async {
+        if usesDemoServices {
+            guard host?.scheme == "https", access == .unlocked else { return }
+            tlsError = nil
+            tlsRestartRequired = true
+            return
+        }
         guard let source = host,
               source.scheme == "https",
               source.certificateFingerprint != nil,
@@ -865,6 +1140,12 @@ final class RouterAdministrationModel {
     }
 
     func promoteStagedTLSPin(administratorToken: String? = nil) async {
+        if usesDemoServices {
+            tlsError = nil
+            tlsRestartRequired = false
+            tlsPromotionRecoveryAvailable = false
+            return
+        }
         guard let source = host,
               source.scheme == "https",
               source.stagedCertificateFingerprint != nil,
@@ -959,6 +1240,11 @@ final class RouterAdministrationModel {
         draftPatch: RouterSettingsDraftPatch,
         patch: RouterSettingsPatch
     ) async {
+        if usesDemoServices {
+            invalidateReplacementValidation()
+            replacementValidationError = "Demo mode does not migrate real router endpoints."
+            return
+        }
         guard let source = host,
               access == .unlocked,
               let expectedDeviceID = source.deviceID,
@@ -1038,6 +1324,7 @@ final class RouterAdministrationModel {
     }
 
     func reloadTokens() async {
+        guard !usesDemoServices else { return }
         guard host != nil, access == .unlocked else { return }
         tokenRequestGeneration &+= 1
         let requestGeneration = tokenRequestGeneration
@@ -1057,6 +1344,14 @@ final class RouterAdministrationModel {
     }
 
     func revoke(_ token: RouterTokenMetadata) async {
+        if var demoState {
+            guard !token.bootstrap else { return }
+            demoState.tokens.removeAll { $0.id == token.id }
+            self.demoState = demoState
+            tokens = demoState.tokens
+            return
+        }
+        guard !usesDemoServices else { return }
         guard !token.bootstrap, host != nil, access == .unlocked else { return }
         let wasCurrentClient = isCurrentClient(token)
         let revokedHost = host
@@ -1172,6 +1467,7 @@ final class RouterAdministrationModel {
     }
 
     func reloadPairingMode() async {
+        guard !usesDemoServices else { return }
         await performPairingStatusAdmin { client in
             try await client.pairingMode()
         } apply: { [weak self] status in
@@ -1180,6 +1476,18 @@ final class RouterAdministrationModel {
     }
 
     func openPairing() async {
+        if var demoState {
+            let status = RouterPairingMode(
+                open: true,
+                expiresAt: now().addingTimeInterval(300),
+                pin: nil
+            )
+            demoState.pairingMode = status
+            self.demoState = demoState
+            publishPairingStatus(status)
+            return
+        }
+        guard !usesDemoServices else { return }
         await performPairingStatusAdmin { client in
             try await client.openPairingMode()
         } apply: { [weak self] status in
@@ -1188,6 +1496,14 @@ final class RouterAdministrationModel {
     }
 
     func closePairing() async {
+        if var demoState {
+            let status = RouterPairingMode(open: false, expiresAt: .distantPast, pin: nil)
+            demoState.pairingMode = status
+            self.demoState = demoState
+            publishPairingStatus(status)
+            return
+        }
+        guard !usesDemoServices else { return }
         await performPairingStatusAdmin { client in
             try await client.closePairingMode()
         } apply: { [weak self] in
@@ -1200,6 +1516,7 @@ final class RouterAdministrationModel {
     }
 
     func loadPairingQR() async {
+        guard !usesDemoServices else { return }
         guard pairingStatus?.open == true else { return }
         pairingQRRequestGeneration &+= 1
         let requestGeneration = pairingQRRequestGeneration
@@ -1853,6 +2170,33 @@ final class RouterAdministrationModel {
         rulesFetchedAt = nil
         rulesError = nil
         rulesLoadState = .neverLoaded
+    }
+
+    private func publishDemo(_ demo: RouterAdministrationDemo) {
+        host = demo.host
+        access = .unlocked
+        adminError = nil
+        history = demo.history
+        historyFetchedAt = now()
+        historyError = nil
+        historyLoadState = .loaded
+        rules = demo.rules
+        rulesFetchedAt = now()
+        rulesError = nil
+        rulesLoadState = .loaded
+        pairingStatus = demo.pairingMode
+        pairingDisplayState = demo.pairingMode.open ? .open : .closed
+        pairingQRPNG = nil
+        pairingError = nil
+        tokens = demo.tokens
+        tokensError = nil
+        settings = demo.settings
+        settingsError = nil
+        devicePairingStatus = demo.devicePairingStatus
+        devicePairingError = nil
+        advancedIdentity = demo.identity
+        advancedValues = demo.advancedValues
+        advancedError = nil
     }
 
     private static func unlockMessage(for error: Error) -> String {

@@ -72,9 +72,18 @@ struct SettingsView: View {
 
             if model.isDemo {
                 Section {
+                    if let host = model.routerAdministration.host {
+                        NavigationLink {
+                            RouterAdministrationView(host: host)
+                        } label: {
+                            Label("Router Administration", systemImage: "network")
+                        }
+                    }
                     Button("Connect a real device") {
                         model.requestBluetoothAfterPriming()
                     }
+                    .accessibilityIdentifier("connect.real-device")
+                    .accessibilityLabel("Connect a real device")
                 }
             }
         }

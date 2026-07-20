@@ -40,7 +40,14 @@ struct MacRouterAdministrationView: View {
     }
 
     private var selectedHost: RouterHostMetadata? {
-        connections.savedHosts.first { $0.id == selection }
+        availableHosts.first { $0.id == selection }
+    }
+
+    private var availableHosts: [RouterHostMetadata] {
+        guard let active = model.host,
+              !connections.savedHosts.contains(where: { $0.id == active.id })
+        else { return connections.savedHosts }
+        return [active] + connections.savedHosts
     }
 
     private var savedHostSelection: Binding<RouterHostMetadata.ID?> {
@@ -77,7 +84,7 @@ struct MacRouterAdministrationView: View {
                 showPairingPayload()
             }
             guard enrollmentSource == nil, selection == nil else { return }
-            selection = connections.savedHosts.first?.id
+            selection = availableHosts.first?.id
         }
         .task(id: selection) {
             guard enrollmentSource == nil, let selectedHost else {
@@ -102,7 +109,7 @@ struct MacRouterAdministrationView: View {
     private var routerList: some View {
         List(selection: savedHostSelection) {
             Section("Saved routers") {
-                ForEach(connections.savedHosts) { host in
+                ForEach(availableHosts) { host in
                     VStack(alignment: .leading) {
                         Text(host.displayName)
                         Text("\(host.host):\(host.port)")
@@ -151,6 +158,8 @@ struct MacRouterAdministrationView: View {
                 systemImage: "network",
                 description: Text("Select a saved router or import a pairing link.")
             )
+            .accessibilityIdentifier("state.unavailable")
+            .accessibilityLabel("Router administration unavailable. No router selected")
         }
     }
 
@@ -183,6 +192,8 @@ struct MacRouterAdministrationView: View {
                     Button("Lock administration", role: .destructive) {
                         Task { await model.lock() }
                     }
+                    .accessibilityIdentifier("action.destructive")
+                    .accessibilityLabel("Lock router administration")
                     .disabled(model.isTLSRotationRunning || model.isTLSPromotionRunning)
                 }
             }
@@ -201,11 +212,17 @@ struct MacRouterAdministrationView: View {
 
             if presentation.visibleSections.contains(.routerConfiguration) {
                 RouterSettingsView(model: model)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Router Configuration")
                 RouterAdvancedView(model: model)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Advanced device")
             }
 
             if presentation.showsClientSections {
                 RouterRulesView(model: model)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Automation Rules")
             }
 
             if let message = model.adminError {
@@ -218,6 +235,8 @@ struct MacRouterAdministrationView: View {
     private var administrationUnlockSection: some View {
         Section {
             SecureField("Administrator token", text: $administratorToken)
+                .accessibilityIdentifier("admin.secret")
+                .accessibilityLabel("Router administrator token")
             Button(model.access == .verifying ? "Verifying…" : "Unlock administration") {
                 let token = administratorToken
                 administratorToken = ""
@@ -284,6 +303,8 @@ struct MacRouterAdministrationView: View {
                     SecureField("6-digit PIN", text: $pin)
                         .routerNumberInput()
                         .disabled(enrollmentLifecycle.isSubmitting)
+                        .accessibilityIdentifier("admin.secret")
+                        .accessibilityLabel("Current router pairing PIN")
                 }
             }
             Section {

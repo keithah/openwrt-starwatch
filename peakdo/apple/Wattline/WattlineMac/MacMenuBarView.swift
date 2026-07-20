@@ -12,7 +12,11 @@ struct MacMenuBarView: View {
                 Label("Wattline", systemImage: "bolt.fill")
                     .font(.headline)
                 Spacer()
-                if model.isDemo { DemoBadge() }
+                if model.isDemo {
+                    DemoBadge()
+                        .accessibilityIdentifier("demo.badge")
+                        .accessibilityLabel("Demo mode")
+                }
             }
 
             Text(model.isDemo ? "Demo device" : "Looking for devices…")
@@ -22,6 +26,8 @@ struct MacMenuBarView: View {
                 Button("Connect a real device") {
                     model.connectRealDevice()
                 }
+                .accessibilityIdentifier("connect.real-device")
+                .accessibilityLabel("Connect a real device")
             }
 
             Divider()
@@ -39,6 +45,5 @@ struct MacMenuBarView: View {
         }
         .padding()
         .frame(width: 280)
-        .task { model.start() }
     }
 }

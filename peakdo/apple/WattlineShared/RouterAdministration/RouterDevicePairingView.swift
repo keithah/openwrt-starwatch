@@ -49,6 +49,8 @@ struct RouterDevicePairingView: View {
                             pin = ""
                             Task { await model.unpairLinkPower(mac: row.mac) }
                         }
+                        .accessibilityIdentifier("action.destructive")
+                        .accessibilityLabel("Remove \(row.title) pairing")
                     } else if !row.paired, actions.showsSelect {
                         Button("Select") { selectedMAC = row.mac }
                     }
@@ -58,6 +60,8 @@ struct RouterDevicePairingView: View {
             if let selectedMAC, actions.showsPair {
                 SecureField("Optional BLE PIN (up to six digits)", text: $pin)
                     .routerNumberInput()
+                    .accessibilityIdentifier("admin.secret")
+                    .accessibilityLabel("Optional Link-Power BLE PIN")
                 Button("Pair selected device") {
                     let submittedPIN = pin
                     pin = ""
@@ -74,7 +78,10 @@ struct RouterDevicePairingView: View {
             }
 
             if let error = model.devicePairingError {
-                Text(error).foregroundStyle(.orange)
+                Text(error)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("state.unavailable")
+                    .accessibilityLabel("Link-Power pairing unavailable. \(error)")
             }
         }
         .task { await model.refreshDevicePairing() }

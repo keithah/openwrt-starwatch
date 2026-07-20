@@ -38,6 +38,8 @@ struct RouterAdministrationView: View {
                         SecureField("Administrator token", text: $adminToken)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                            .accessibilityIdentifier("admin.secret")
+                            .accessibilityLabel("Router administrator token")
                         Button(admin.access == .verifying ? "Verifying…" : "Unlock administration") {
                             let token = adminToken
                             adminToken = ""
@@ -91,6 +93,8 @@ struct RouterAdministrationView: View {
                         Button("Lock administration", role: .destructive) {
                             Task { await admin.lock() }
                         }
+                        .accessibilityIdentifier("action.destructive")
+                        .accessibilityLabel("Lock router administration")
                         .disabled(admin.isTLSRotationRunning || admin.isTLSPromotionRunning)
                     }
                 }
@@ -109,11 +113,17 @@ struct RouterAdministrationView: View {
 
                 if presentation.visibleSections.contains(.routerConfiguration) {
                     RouterSettingsView(model: admin)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Router Configuration")
                     RouterAdvancedView(model: admin)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Advanced device")
                 }
 
                 if presentation.showsClientSections {
                     RouterRulesView(model: admin)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Automation Rules")
                 }
 
                 if let message = admin.adminError {

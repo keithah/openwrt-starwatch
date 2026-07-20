@@ -63,6 +63,7 @@ private struct ConnectedShellView: View {
                 if model.isDemo {
                     DemoBadge()
                         .accessibilityLabel("DEMO")
+                        .accessibilityIdentifier("demo.badge")
                         .padding(.top, 8)
                         .padding(.trailing, 12)
                 }

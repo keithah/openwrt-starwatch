@@ -34,9 +34,13 @@ struct MacRootView: View {
                 if model.isDemo {
                     VStack(alignment: .leading, spacing: 8) {
                         DemoBadge()
+                            .accessibilityIdentifier("demo.badge")
+                            .accessibilityLabel("Demo mode")
                         Button("Connect a real device") {
                             model.connectRealDevice()
                         }
+                        .accessibilityIdentifier("connect.real-device")
+                        .accessibilityLabel("Connect a real device")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
@@ -59,7 +63,6 @@ struct MacRootView: View {
             }
         }
         .task {
-            model.start()
             if model.routerEnrollmentRoute.payload != nil {
                 selection = .routerAdministration
             }
@@ -84,6 +87,8 @@ private struct MacHomeView: View {
             if model.isDemo {
                 Button("Connect a real device") { model.connectRealDevice() }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("connect.real-device")
+                    .accessibilityLabel("Connect a real device")
             }
         }
         .navigationTitle("Home")
@@ -110,6 +115,8 @@ private struct MacSettingsView: View {
                 LabeledContent("Mode", value: model.isDemo ? "Demo" : "Real device")
                 if model.isDemo {
                     Button("Connect a real device") { model.connectRealDevice() }
+                        .accessibilityIdentifier("connect.real-device")
+                        .accessibilityLabel("Connect a real device")
                 }
             }
         }
