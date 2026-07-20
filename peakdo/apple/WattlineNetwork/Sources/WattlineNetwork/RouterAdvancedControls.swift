@@ -130,7 +130,8 @@ extension RouterAdministrationClient {
     }
 
     public func setRunningMode(_ mode: UInt8) async throws -> RouterRunningModeResult {
-        try await advancedMutation(
+        guard mode <= 1 else { throw RouterAdministrationError.invalidResponse }
+        return try await advancedMutation(
             "PUT",
             "/api/v1/device/advanced/running-mode",
             request: RouterRunningModeRequest(mode: mode),

@@ -56,15 +56,25 @@ final class RouterAdvancedControlsTests: XCTestCase {
         XCTAssertNil(fixture.http.calls[2].body)
     }
 
-    func testRunningModeIsPUTOnlyUnsignedAndUsesExactBody() async throws {
-        let fixture = try await makeFixture(results: [ScriptedRouterHTTPClient.ok(#"{"mode":255}"#)])
+    func testRunningModeAcceptsOnlyDocumentedZeroAndOneWithoutDispatchingTwo() async throws {
+        let fixture = try await makeFixture(results: [
+            ScriptedRouterHTTPClient.ok(#"{"mode":0}"#),
+            ScriptedRouterHTTPClient.ok(#"{"mode":1}"#),
+        ])
 
-        let result = try await fixture.client.setRunningMode(255)
-        XCTAssertEqual(result.mode, 255)
+        for mode: UInt8 in [0, 1] {
+            let result = try await fixture.client.setRunningMode(mode)
+            XCTAssertEqual(result.mode, mode)
+        }
+        await XCTAssertAdvancedThrowsError(try await fixture.client.setRunningMode(2)) {
+            XCTAssertEqual($0 as? RouterAdministrationError, .invalidResponse)
+        }
         XCTAssertEqual(fixture.http.calls.map { "\($0.method) \($0.path)" }, [
             "PUT /api/v1/device/advanced/running-mode",
+            "PUT /api/v1/device/advanced/running-mode",
         ])
-        XCTAssertEqual(try bodyObject(fixture.http.calls[0]), ["mode": 255])
+        XCTAssertEqual(try bodyObject(fixture.http.calls[0]), ["mode": 0])
+        XCTAssertEqual(try bodyObject(fixture.http.calls[1]), ["mode": 1])
     }
 
     func testBarrierPUTPublishesObservedFalseWhenRequestedTrue() async throws {
