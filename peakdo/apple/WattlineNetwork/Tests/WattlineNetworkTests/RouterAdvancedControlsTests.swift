@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import WattlineCore
 @testable import WattlineNetwork
 
 final class RouterAdvancedControlsTests: XCTestCase {
@@ -56,18 +57,24 @@ final class RouterAdvancedControlsTests: XCTestCase {
         XCTAssertNil(fixture.http.calls[2].body)
     }
 
-    func testRunningModeAcceptsOnlyDocumentedZeroAndOneWithoutDispatchingTwo() async throws {
+    func testRunningModeAcceptsOnlyDocumentedZeroAndOneWithoutDispatchingUnsupportedValues() async throws {
         let fixture = try await makeFixture(results: [
             ScriptedRouterHTTPClient.ok(#"{"mode":0}"#),
             ScriptedRouterHTTPClient.ok(#"{"mode":1}"#),
         ])
 
-        for mode: UInt8 in [0, 1] {
+        let supportedModes = [RunningMode.user.rawValue, RunningMode.factory.rawValue]
+        XCTAssertEqual(supportedModes, [0, 1])
+        for mode in supportedModes {
+            XCTAssertTrue(RouterRunningModeCapability.isSupported(mode))
             let result = try await fixture.client.setRunningMode(mode)
             XCTAssertEqual(result.mode, mode)
         }
-        await XCTAssertAdvancedThrowsError(try await fixture.client.setRunningMode(2)) {
-            XCTAssertEqual($0 as? RouterAdministrationError, .invalidResponse)
+        for mode: UInt8 in [2, .max] {
+            XCTAssertFalse(RouterRunningModeCapability.isSupported(mode))
+            await XCTAssertAdvancedThrowsError(try await fixture.client.setRunningMode(mode)) {
+                XCTAssertEqual($0 as? RouterAdministrationError, .invalidResponse)
+            }
         }
         XCTAssertEqual(fixture.http.calls.map { "\($0.method) \($0.path)" }, [
             "PUT /api/v1/device/advanced/running-mode",

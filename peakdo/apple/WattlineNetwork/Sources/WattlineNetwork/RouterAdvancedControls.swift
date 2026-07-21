@@ -1,4 +1,5 @@
 import Foundation
+import WattlineCore
 
 public struct RouterBypassThreshold: Codable, Equatable, Sendable {
     public let volts: Double
@@ -66,6 +67,13 @@ private struct RouterRunningModeRequest: Encodable {
     let mode: UInt8
 }
 
+enum RouterRunningModeCapability {
+    /// The network API accepts the raw values supported by the device's running-mode enum.
+    static func isSupported(_ mode: UInt8) -> Bool {
+        RunningMode(rawValue: mode) != nil
+    }
+}
+
 private struct RouterBarrierFreeRequest: Encodable {
     let enabled: Bool
 }
@@ -130,7 +138,9 @@ extension RouterAdministrationClient {
     }
 
     public func setRunningMode(_ mode: UInt8) async throws -> RouterRunningModeResult {
-        guard mode <= 1 else { throw RouterAdministrationError.invalidResponse }
+        guard RouterRunningModeCapability.isSupported(mode) else {
+            throw RouterAdministrationError.invalidResponse
+        }
         return try await advancedMutation(
             "PUT",
             "/api/v1/device/advanced/running-mode",
