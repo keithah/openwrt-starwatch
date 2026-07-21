@@ -2,7 +2,7 @@
 # Install the Starwatch packages from the project-maintained opkg feed.
 set -eu
 
-feed_url="${STARWATCH_FEED_URL:-https://keithah.github.io/openwrt-starwatch}"
+feed_url="${STARWATCH_FEED_URL:-https://keithah.github.io/openwrt-packages}"
 target_root="${STARWATCH_ROOT:-/}"
 feeds_file="$target_root/etc/opkg/customfeeds.conf"
 keys_dir="$target_root/etc/opkg/keys"

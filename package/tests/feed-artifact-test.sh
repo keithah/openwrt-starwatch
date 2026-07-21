@@ -26,6 +26,12 @@ set -- "$pages/starwatchd_${version}_aarch64_cortex-a53.ipk"
 [ -f "$1" ]
 starwatchd_ipk=$(basename "$1")
 
+mkdir -p "$tmp/starwatchd-data"
+tar -xOzf "$1" ./data.tar.gz >"$tmp/data.tar.gz"
+tar -xzf "$tmp/data.tar.gz" -C "$tmp/starwatchd-data"
+cmp -s "$root/keithah-feed-migrate.sh" "$tmp/starwatchd-data/usr/libexec/keithah-feed-migrate"
+tar -tzvf "$tmp/data.tar.gz" | awk '$1 == "-rwxr-xr-x" && $6 == "./usr/libexec/keithah-feed-migrate" { found = 1 } END { exit !found }'
+
 set -- "$pages/luci-app-starwatch_${version}_all.ipk"
 [ "$#" -eq 1 ]
 [ -f "$1" ]

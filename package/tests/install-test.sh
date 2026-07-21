@@ -86,7 +86,7 @@ EOF
 	chmod +x "$case_dir/bin/stat" "$case_dir/bin/chown"
 }
 
-feed='https://keithah.github.io/openwrt-starwatch'
+feed='https://keithah.github.io/openwrt-packages'
 base_feeds='src/gz core https://downloads.example/core
 src/gz extras https://downloads.example/extras'
 

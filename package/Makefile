@@ -37,6 +37,7 @@ all: ipk-starwatchd ipk-luci ipk-glapp
 
 test:
 	sh tests/uci-defaults-route-test.sh
+	sh tests/feed-migrate-test.sh
 	sh tests/feed-artifact-test.sh
 
 # feed: build all ipks + an opkg index (Packages/Packages.gz) so a router can
@@ -77,7 +78,9 @@ bin:
 define make_ipk
 	rm -rf $(OUT)/stage-$(1)
 	cp -r $(2) $(OUT)/stage-$(1)
-	if [ "$(1)" = "starwatchd" ]; then chmod 0755 $(OUT)/stage-$(1)/usr/bin/starwatchd; fi
+	if [ "$(1)" = "starwatchd" ]; then \
+		chmod 0755 $(OUT)/stage-$(1)/usr/bin/starwatchd $(OUT)/stage-$(1)/usr/libexec/keithah-feed-migrate; \
+	fi
 	mkdir -p $(OUT)/stage-$(1)/CONTROL
 	# Inject VERSION into the control's Version: field so the .ipk filename,
 	# the control metadata, and the feed index all agree — otherwise opkg sees
@@ -99,9 +102,11 @@ endef
 
 ipk-starwatchd: bin
 	rm -rf $(OUT)/stage
-	mkdir -p $(OUT)/stage/usr/bin
+	mkdir -p $(OUT)/stage/usr/bin $(OUT)/stage/usr/libexec
 	cp $(BIN) $(OUT)/stage/usr/bin/starwatchd
+	cp keithah-feed-migrate.sh $(OUT)/stage/usr/libexec/keithah-feed-migrate
 	chmod 0755 $(OUT)/stage/usr/bin/starwatchd
+	chmod 0755 $(OUT)/stage/usr/libexec/keithah-feed-migrate
 	cp -r starwatchd/etc $(OUT)/stage/
 	cp -r starwatchd/CONTROL $(OUT)/stage/
 	chmod +x $(OUT)/stage/etc/init.d/starwatch $(OUT)/stage/etc/uci-defaults/99-starwatch $(OUT)/stage/CONTROL/postinst
