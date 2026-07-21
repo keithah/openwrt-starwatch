@@ -166,10 +166,11 @@ release asset checksum from GitHub before installing it directly.
 
 Version tags publish immutable GitHub releases containing only Starwatch's
 three IPKs. The installer remains source-addressable at the matching tag for
-the dedicated feed publisher. During migration, the existing Pages workflow
-continues to publish the signed legacy snapshot at
-`https://keithah.github.io/openwrt-starwatch/`; its private signing key remains
-in GitHub Actions secrets.
+the dedicated feed publisher. The old
+`https://keithah.github.io/openwrt-starwatch/` feed is frozen as a signed,
+static migration bridge for routers upgrading to 0.1.3. New installs and all
+future package updates use `https://keithah.github.io/openwrt-packages/`;
+Starwatch no longer owns an active feed-publishing workflow.
 
 The GL.iNet Plug-ins page can use the same feed. mwan3 is optional; Starwatch
 reports its status and offers an explicit failover-assist flow when installed.

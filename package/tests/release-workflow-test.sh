@@ -18,13 +18,8 @@ grep -F 'gh release create "$tag"' "$workflow" >/dev/null
 grep -F 'python3 package/tests/compare-ipk-content.py "package/out/$asset" "$existing_dir/$asset"' "$workflow" >/dev/null
 grep -F 'test -f package/install.sh' "$workflow" >/dev/null
 
-[ -f "$pages_workflow" ]
-grep -F 'actions/checkout@v7' "$pages_workflow" >/dev/null
-grep -F 'actions/setup-go@v7' "$pages_workflow" >/dev/null
-grep -F 'actions/upload-pages-artifact@v5' "$pages_workflow" >/dev/null
-grep -F 'actions/deploy-pages@v5' "$pages_workflow" >/dev/null
-if grep -E 'actions/(checkout|setup-go)@v[0-6]([^0-9]|$)|actions/(upload-pages-artifact|deploy-pages)@v[0-4]([^0-9]|$)' \
-	"$workflow" "$pages_workflow" >/dev/null; then
+[ ! -e "$pages_workflow" ]
+if grep -E 'actions/(checkout|setup-go)@v[0-6]([^0-9]|$)' "$workflow" >/dev/null; then
 	echo 'workflow uses an obsolete GitHub-owned action major' >&2
 	exit 1
 fi
