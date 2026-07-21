@@ -1,0 +1,35 @@
+#!/bin/sh
+# Recover Wattline BLE pairing after a stale bluetoothd security state.
+set -eu
+command -v uci >/dev/null 2>&1 || { echo 'uci is required' >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo 'curl is required' >&2; exit 1; }
+token=$(uci -q get wattline.main.token 2>/dev/null || true)
+pin=$(uci -q get wattline.main.pin 2>/dev/null || true)
+port=$(uci -q get wattline.main.port 2>/dev/null || echo 8377)
+base="http://127.0.0.1:${port}/api/v1"
+[ -n "$token" ] || { echo 'Wattline API token is not configured' >&2; exit 1; }
+[ -n "$pin" ] || pin=020555
+ # Reset only Bluetooth and Wattline; no network or firewall changes.
+/etc/init.d/bluetoothd restart >/dev/null 2>&1 || true
+sleep 2
+/etc/init.d/wattlined restart >/dev/null 2>&1 || true
+sleep 2
+auth="Authorization: Bearer $token"
+for attempt in 1 2 3; do
+    curl -fsS -H "$auth" -H 'Content-Type: application/json' -X POST "$base/pairing/scan" >/dev/null
+    sleep 13
+    status=$(curl -fsS -H "$auth" "$base/pairing/status")
+    mac=$(printf '%s' "$status" | sed -n 's/.*"mac":"\([0-9A-Fa-f:.-]*\)".*/\1/p' | head -n 1)
+    [ -n "$mac" ] || continue
+    curl -fsS -H "$auth" -H 'Content-Type: application/json' -X POST "$base/pairing/request-code" -d "{\"mac\":\"$mac\",\"recover\":true}" >/dev/null
+    sleep 1
+    curl -fsS -H "$auth" -H 'Content-Type: application/json' -X POST "$base/pairing/submit-pin" -d "{\"pin\":\"$pin\"}" >/dev/null
+    for poll in $(seq 1 12); do
+        sleep 3
+        status=$(curl -fsS -H "$auth" "$base/pairing/status")
+        printf '%s' "$status" | grep -q '"stage":"paired"' && { echo 'Wattline pairing verified'; exit 0; }
+        printf '%s' "$status" | grep -q '"stage":"error"' && break
+    done
+done
+echo 'Wattline pairing did not complete; power-cycle the Link-Power and retry' >&2
+exit 1
