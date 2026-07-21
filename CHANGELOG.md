@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.2 — 2026-07-20
+
+- Reduces dashboard render churn by caching derived history data and avoiding
+  unnecessary sky-map, outage, and event redraw work.
+- Avoids redundant 15-minute battery power queries and repeated chronological
+  history sorting.
+- Adds short-lived browser caching for embedded static dashboard assets.
+
 - Sanitizes non-finite dish telemetry before REST or WebSocket encoding, so a
   degraded link cannot truncate status JSON or force one-second reconnects.
 - Uses crash-safe SQLite WAL/FULL mode with a busy timeout, bounds pre-NTP

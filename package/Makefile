@@ -4,7 +4,7 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 0.1.1
+VERSION := 0.1.2
 ARCH := aarch64_cortex-a53
 OUT := out
 BIN := $(OUT)/starwatchd-bin
