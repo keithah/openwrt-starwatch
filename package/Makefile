@@ -103,9 +103,8 @@ ipk-starwatchd: bin
 	cp $(BIN) $(OUT)/stage/usr/bin/starwatchd
 	chmod 0755 $(OUT)/stage/usr/bin/starwatchd
 	cp -r starwatchd/etc $(OUT)/stage/
-	cp -r starwatchd/usr $(OUT)/stage/
 	cp -r starwatchd/CONTROL $(OUT)/stage/
-	chmod +x $(OUT)/stage/etc/init.d/starwatch $(OUT)/stage/etc/uci-defaults/99-starwatch $(OUT)/stage/usr/bin/starwatch-wattline-pair $(OUT)/stage/CONTROL/postinst
+	chmod +x $(OUT)/stage/etc/init.d/starwatch $(OUT)/stage/etc/uci-defaults/99-starwatch $(OUT)/stage/CONTROL/postinst
 	$(call make_ipk,starwatchd,$(OUT)/stage,$(ARCH))
 
 ipk-luci:
