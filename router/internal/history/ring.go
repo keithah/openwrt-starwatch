@@ -3,20 +3,27 @@ package history
 import "time"
 
 type ring struct {
-	times  []int64
-	values []float32
-	next   int
-	count  int
+	times   []int64
+	values  []float32
+	next    int
+	count   int
+	ordered bool
 }
 
 func newRing(capacity int) *ring {
 	if capacity < 1 {
 		capacity = 1
 	}
-	return &ring{times: make([]int64, capacity), values: make([]float32, capacity)}
+	return &ring{times: make([]int64, capacity), values: make([]float32, capacity), ordered: true}
 }
 
 func (r *ring) append(point Point) {
+	if r.count > 0 {
+		previous := (r.next + len(r.times) - 1) % len(r.times)
+		if point.Time.Unix() < r.times[previous] {
+			r.ordered = false
+		}
+	}
 	r.times[r.next] = point.Time.Unix()
 	r.values[r.next] = point.Value
 	r.next = (r.next + 1) % len(r.values)
@@ -24,6 +31,8 @@ func (r *ring) append(point Point) {
 		r.count++
 	}
 }
+
+func (r *ring) isOrdered() bool { return r.ordered }
 
 func (r *ring) snapshot() []Point {
 	result := make([]Point, r.count)

@@ -6,6 +6,33 @@ import {mountChart} from './charts.js';
 const html = htm.bind(h);
 const number = (value, digits = 1) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '—';
 const percent = value => Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : '—';
+const alignedCache = new WeakMap();
+const averageCache = new WeakMap();
+const reverseCache = new WeakMap();
+function newestFirst(items) {
+  if (!items || typeof items !== 'object') return [];
+  let result = reverseCache.get(items);
+  if (!result) { result = items.slice().reverse(); reverseCache.set(items, result); }
+  return result;
+}
+function averagePower(responses) {
+  if (!responses || typeof responses !== 'object') return null;
+  if (averageCache.has(responses)) return averageCache.get(responses);
+  const points = responses[0]?.points || [];
+  const value = points.length ? points.reduce((sum, point) => sum + Number(point.value), 0) / points.length : null;
+  averageCache.set(responses, value);
+  return value;
+}
+function alignedSeries(responses) {
+  if (!responses || typeof responses !== 'object') return assembleSeries([]);
+  let aligned = alignedCache.get(responses);
+  if (!aligned) {
+    aligned = assembleSeries(responses);
+    aligned.series.forEach(item => { item.name = graphLabels[item.name] || item.name; });
+    alignedCache.set(responses, aligned);
+  }
+  return aligned;
+}
 
 export function Metric({label, value, unit = '', availability, hint = ''}) {
   const result = availabilityValue(value, availability);
@@ -39,8 +66,7 @@ const graphLabels = {
 };
 
 export function GraphCard({tab, span, responses, onTab, onSpan, loading}) {
-  const aligned = assembleSeries(responses || []);
-  aligned.series.forEach(item => { item.name = graphLabels[item.name] || item.name; });
+  const aligned = alignedSeries(responses || []);
   return html`<${Card} title="Telemetry" eyebrow="1 Hz · dish gRPC" className="graph-card full-width">
     <div class="toolbar"><div class="tabs" role="tablist">${['Throughput','Latency','Loss','Power'].map(name => html`<button key=${name} class=${tab === name.toLowerCase() ? 'active' : ''} onClick=${() => onTab(name.toLowerCase())}>${name}</button>`)}</div>
       <div class="span-picker">${['15m','3h','24h','7d','30d'].map(value => html`<button key=${value} class=${span === value ? 'active' : ''} onClick=${() => onSpan(value)}>${value}</button>`)}</div></div>
@@ -51,7 +77,7 @@ export function GraphCard({tab, span, responses, onTab, onSpan, loading}) {
 
 class SkyMap extends Component {
   componentDidMount() { this.draw(); }
-  componentDidUpdate() { this.draw(); }
+  componentDidUpdate(previousProps) { if (previousProps.grid !== this.props.grid) this.draw(); }
   draw() {
     const {grid} = this.props; const canvas = this.canvas;
     if (!grid || !canvas || !grid.rows || !grid.cols) return;
@@ -90,7 +116,7 @@ export class OutageCard extends Component {
     const picker = html`<div class="span-picker" aria-label="Outage timeline span">${['24h', '7d', '30d'].map(value => html`<button key=${value} class=${span === value ? 'active' : ''} onClick=${() => this.setState({span: value})}>${value}</button>`)}</div>`;
     return html`<${Card} title="Outage timeline" eyebrow="Dish · reachability · path" action=${picker}>
       <div class="timeline">${bars.map(({item, layout}) => { const at=new Date(item.start).getTime(); const duration=item.ongoing ? now-at : Number(item.duration)/1e6; return html`<span key=${`${item.start}-${item.source}-${item.cause}`} class=${`outage-bar source-${item.source}`} style=${`left:${layout.leftPercent}%;width:${layout.widthPercent}%`} title=${`${item.source}: ${item.cause} · ${formatDuration(duration/1000)}`}></span>`; })}</div>
-      <div class="table-wrap"><table><thead><tr><th>When</th><th>Source</th><th>Cause</th><th>Duration</th></tr></thead><tbody>${outages.slice(-8).reverse().map(item => html`<tr key=${`${item.start}-${item.source}-${item.cause}`}><td>${new Date(item.start).toLocaleString()}</td><td><span class=${`source-tag source-${item.source}`}>${item.source}</span></td><td>${item.cause}</td><td>${item.ongoing ? 'ongoing' : formatDuration(Number(item.duration)/1e9)}</td></tr>`)}</tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>When</th><th>Source</th><th>Cause</th><th>Duration</th></tr></thead><tbody>${newestFirst(outages).slice(0, 8).map(item => html`<tr key=${`${item.start}-${item.source}-${item.cause}`}><td>${new Date(item.start).toLocaleString()}</td><td><span class=${`source-tag source-${item.source}`}>${item.source}</span></td><td>${item.cause}</td><td>${item.ongoing ? 'ongoing' : formatDuration(Number(item.duration)/1e9)}</td></tr>`)}</tbody></table></div>
     </${Card}>`;
   }
 }
@@ -102,10 +128,9 @@ export function AlignmentCard({snapshot}) {
 
 export function PowerCard({snapshot, responses}) {
   const power=snapshot.dish?.power_w; if (power == null && !responses?.length) return null;
-  const points=responses?.[0]?.points||[]; const avg=points.length?points.reduce((sum,p)=>sum+Number(p.value),0)/points.length:null;
+  const avg=averagePower(responses);
   const availability=snapshot.field_availability?.power_w;
-  const aligned = assembleSeries(responses || []);
-  aligned.series.forEach(item => { item.name = graphLabels[item.name] || item.name; });
+  const aligned = alignedSeries(responses || []);
   return html`<${Card} title="Power" eyebrow="Terminal draw"><div class="power-hero"><${Metric} label="Instant" value=${number(power)} unit="W" availability=${availability}/>${snapshot.dish?.power_source==='history'&&html`<span class="badge amber">via history</span>`}</div><${Plot} aligned=${aligned} height=${170} kind="power"/><p class="derived">${avg==null?'—':(avg*24/1000).toFixed(2)} kWh/day <span>derived from the 24 h average</span></p></${Card}>`;
 }
 

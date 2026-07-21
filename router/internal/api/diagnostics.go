@@ -45,10 +45,14 @@ func (s *server) diagnostics(w http.ResponseWriter, r *http.Request) {
 			battery.StateOfChargeUpdatedAt = *view.StateOfChargeUpdatedAt
 		}
 		if battery.Enabled {
-			batteryPower, err = s.queryDiagnosticSeries(history.PowerW, now.Add(-15*time.Minute), 15*time.Minute)
-			if err != nil {
-				s.writeDiagnosticsError(w, err)
-				return
+			if span == 15*time.Minute {
+				batteryPower = power
+			} else {
+				batteryPower, err = s.queryDiagnosticSeries(history.PowerW, now.Add(-15*time.Minute), 15*time.Minute)
+				if err != nil {
+					s.writeDiagnosticsError(w, err)
+					return
+				}
 			}
 		}
 	}

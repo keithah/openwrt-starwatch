@@ -204,6 +204,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Static SPA assets are immutable for the lifetime of a daemon build. A
+	// short browser cache avoids retransmitting the embedded vendor bundle on
+	// every dashboard navigation without caching API responses.
+	if r.URL.Path != "/" {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	}
 	s.static.ServeHTTP(w, r)
 }
 

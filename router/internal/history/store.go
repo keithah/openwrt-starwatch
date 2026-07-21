@@ -75,6 +75,7 @@ func (s *Store) Query(series string, since time.Time, limit int) ([]Point, error
 		return nil, ErrUnknownSeries
 	}
 	all := r.snapshot()
+	ordered := r.isOrdered()
 	s.mu.RUnlock()
 	valid := make([]Point, 0, len(all))
 	for _, point := range all {
@@ -82,7 +83,7 @@ func (s *Store) Query(series string, since time.Time, limit int) ([]Point, error
 			valid = append(valid, point)
 		}
 	}
-	if !sort.SliceIsSorted(valid, func(i, j int) bool { return valid[i].Time.Before(valid[j].Time) }) {
+	if !ordered {
 		sort.SliceStable(valid, func(i, j int) bool { return valid[i].Time.Before(valid[j].Time) })
 	}
 	all = valid

@@ -3,6 +3,13 @@ import htm from './vendor/htm.module.js';
 import {Card} from './cards.js';
 
 const html = htm.bind(h);
+const reverseCache = new WeakMap();
+function newestFirst(items) {
+  if (!items || typeof items !== 'object') return [];
+  let result = reverseCache.get(items);
+  if (!result) { result = items.slice().reverse(); reverseCache.set(items, result); }
+  return result;
+}
 const tidy = value => value == null || value === '' ? '' : Math.round(Number(value) * 1e6) / 1e6;
 const optionalNumber = (data, name) => {
   const raw = String(data.get(name) ?? '').trim();
@@ -65,7 +72,7 @@ export function EventsView({events=[], embedded = false}) {
   const Root = embedded ? 'section' : 'main';
   const filter=(new URLSearchParams(location.hash.split('?')[1]||'')).get('kind')||'all';
   const kinds=['all',...new Set(events.map(item=>item.kind))]; const visible=filter==='all'?events:events.filter(item=>item.kind===filter);
-  return html`<${Root} class="view"><div class="view-heading"><div><span class="eyebrow">AUDIT TRAIL</span><h1>Events</h1></div><a href="#/">← Dashboard</a></div><div class="filters">${kinds.map(kind=>html`<a key=${kind} class=${filter===kind?'active':''} href=${kind==='all'?'#/events':`#/events?kind=${encodeURIComponent(kind)}`}>${kind}</a>`)}</div><${Card} title="Recorded activity" eyebrow="Newest first"><div class="audit-log">${visible.slice().reverse().map(item=>html`<article key=${`${item.at}-${item.kind}-${item.detail || ''}`}><time>${new Date(item.at).toLocaleString()}</time><span class="event-kind">${item.kind}</span><pre>${formatDetail(item.detail)}</pre></article>`)}</div></${Card}></${Root}>`;
+  return html`<${Root} class="view"><div class="view-heading"><div><span class="eyebrow">AUDIT TRAIL</span><h1>Events</h1></div><a href="#/">← Dashboard</a></div><div class="filters">${kinds.map(kind=>html`<a key=${kind} class=${filter===kind?'active':''} href=${kind==='all'?'#/events':`#/events?kind=${encodeURIComponent(kind)}`}>${kind}</a>`)}</div><${Card} title="Recorded activity" eyebrow="Newest first"><div class="audit-log">${newestFirst(visible).map(item=>html`<article key=${`${item.at}-${item.kind}-${item.detail || ''}`}><time>${new Date(item.at).toLocaleString()}</time><span class="event-kind">${item.kind}</span><pre>${formatDetail(item.detail)}</pre></article>`)}</div></${Card}></${Root}>`;
 }
 
 function formatDetail(detail) { try { return JSON.stringify(JSON.parse(detail),null,2); } catch (_) { return detail||''; } }
