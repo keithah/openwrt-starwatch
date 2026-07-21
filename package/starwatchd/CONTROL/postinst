@@ -1,4 +1,6 @@
 #!/bin/sh
+set -e
+
 [ -n "$IPKG_INSTROOT" ] && exit 0
 
 /usr/libexec/keithah-feed-migrate

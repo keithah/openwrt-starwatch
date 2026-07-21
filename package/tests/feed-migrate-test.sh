@@ -96,4 +96,34 @@ awk '
 	END { exit !(guard && migrate > guard && initialize > migrate) }
 ' "$postinst" || fail 'postinst migration contract is missing or out of order'
 
+# Execute the real postinst control flow with only its absolute command paths
+# redirected into a harmless harness. A migration failure must be returned to
+# opkg and must prevent every initialization command from running.
+mkdir -p "$tmp/postinst-bin"
+cat >"$tmp/postinst-bin/migrate" <<EOF
+#!/bin/sh
+printf '%s\n' migrate >>"$tmp/postinst.log"
+exit 23
+EOF
+for command in uci-defaults service; do
+	cat >"$tmp/postinst-bin/$command" <<EOF
+#!/bin/sh
+printf '%s\n' "$command \$*" >>"$tmp/postinst.log"
+exit 0
+EOF
+done
+chmod +x "$tmp/postinst-bin/migrate" "$tmp/postinst-bin/uci-defaults" "$tmp/postinst-bin/service"
+sed \
+	-e "s|/usr/libexec/keithah-feed-migrate|$tmp/postinst-bin/migrate|" \
+	-e "s|/etc/uci-defaults/99-starwatch|$tmp/postinst-bin/uci-defaults|" \
+	-e "s|/etc/init.d/starwatch|$tmp/postinst-bin/service|" \
+	"$postinst" >"$tmp/postinst"
+chmod +x "$tmp/postinst"
+: >"$tmp/postinst.log"
+if IPKG_INSTROOT= /bin/sh "$tmp/postinst"; then
+	fail 'postinst ignored a feed migration failure'
+fi
+printf '%s\n' migrate >"$tmp/expected-postinst.log"
+cmp -s "$tmp/expected-postinst.log" "$tmp/postinst.log" || fail 'postinst initialized Starwatch after migration failure'
+
 printf '%s\n' 'feed migration tests passed'
