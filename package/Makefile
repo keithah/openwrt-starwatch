@@ -4,7 +4,7 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 0.1.2
+VERSION := 0.1.3
 ARCH := aarch64_cortex-a53
 OUT := out
 BIN := $(OUT)/starwatchd-bin
@@ -38,7 +38,9 @@ all: ipk-starwatchd ipk-luci ipk-glapp
 test:
 	sh tests/uci-defaults-route-test.sh
 	sh tests/feed-migrate-test.sh
+	sh tests/install-test.sh
 	sh tests/feed-artifact-test.sh
+	sh tests/release-workflow-test.sh
 
 # feed: build all ipks + an opkg index (Packages/Packages.gz) so a router can
 # `opkg update && opkg upgrade` from a hosted feed instead of manual reinstall.

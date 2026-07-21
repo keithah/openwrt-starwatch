@@ -18,11 +18,11 @@ boundary.
 
 ## Quick install
 
-The public 0.1.2 feed currently supports `aarch64_cortex-a53` routers. Connect
+The public 0.1.3 feed currently supports `aarch64_cortex-a53` routers. Connect
 over SSH as root and run:
 
 ```sh
-wget -qO- https://keithah.github.io/openwrt-starwatch/install-starwatch.sh | sh
+wget -qO- https://keithah.github.io/openwrt-packages/install-starwatch.sh | sh
 ```
 
 The installer checks the opkg architecture before changing anything. GL.iNet
@@ -33,6 +33,9 @@ legacy `starwatch`/`wattline` entries to one shared `keithah` entry in
 Starwatch configuration. It never forces a downgrade or reinstall. The shared
 feed index is signed with Keith's OpenWrt publisher key installed
 alongside OpenWrt's existing opkg keys; global signature checking stays enabled.
+Upgrading `starwatchd` to 0.1.3 also performs this migration automatically, so
+routers already using the legacy feed move to the dedicated feed without
+rerunning the installer.
 
 After installation, open `http://<router-address>:9633`, **Services →
 Starwatch** in LuCI, or **Applications → Starwatch** in the GL.iNet panel.
@@ -69,11 +72,11 @@ ls -la package/out/*.ipk
 
 The build produces:
 
-- `starwatchd_0.1.2_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
+- `starwatchd_0.1.3_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
   UCI configuration, guarded dish route, token generator, and procd service.
-- `luci-app-starwatch_0.1.2_all.ipk` — LuCI menu, one-method rpcd bridge, and
+- `luci-app-starwatch_0.1.3_all.ipk` — LuCI menu, one-method rpcd bridge, and
   iframe launcher.
-- `gl-app-starwatch_0.1.2_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
+- `gl-app-starwatch_0.1.3_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
   evaluated Vue 2 iframe view.
 
 The outer `.ipk` is a **gzipped ustar tar**, not an `ar` archive. Its three
@@ -85,7 +88,7 @@ macOS pax headers. All payload paths remain below ustar's 100-character limit.
 architecture when needed:
 
 ```sh
-make -C package VERSION=0.1.2 ARCH=aarch64_cortex-a53 all
+make -C package VERSION=0.1.3 ARCH=aarch64_cortex-a53 all
 ```
 
 The committed GL view at
@@ -109,9 +112,9 @@ for f in package/out/*.ipk; do
 done
 
 ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/starwatchd_0.1.2_aarch64_cortex-a53.ipk \
-  /tmp/luci-app-starwatch_0.1.2_all.ipk \
-  /tmp/gl-app-starwatch_0.1.2_all.ipk'
+  /tmp/starwatchd_0.1.3_aarch64_cortex-a53.ipk \
+  /tmp/luci-app-starwatch_0.1.3_all.ipk \
+  /tmp/gl-app-starwatch_0.1.3_all.ipk'
 ```
 
 Install either admin-panel package or both. `starwatchd`'s post-install script
@@ -161,11 +164,12 @@ Unsigned local indexes are development artifacts, not an authenticity check.
 Install from the HTTPS production feed with its pinned public key, or verify a
 release asset checksum from GitHub before installing it directly.
 
-Version-tag and explicit manual GitHub Actions runs publish that verified
-artifact to `https://keithah.github.io/openwrt-starwatch/`. Pull requests and
-ordinary `main` pushes run the same build and tests without deploying. The
-deployed artifact also contains `Packages.sig` and the public verification key;
-the private signing key remains in GitHub Actions secrets.
+Version tags publish immutable GitHub releases containing only Starwatch's
+three IPKs. The installer remains source-addressable at the matching tag for
+the dedicated feed publisher. During migration, the existing Pages workflow
+continues to publish the signed legacy snapshot at
+`https://keithah.github.io/openwrt-starwatch/`; its private signing key remains
+in GitHub Actions secrets.
 
 The GL.iNet Plug-ins page can use the same feed. mwan3 is optional; Starwatch
 reports its status and offers an explicit failover-assist flow when installed.

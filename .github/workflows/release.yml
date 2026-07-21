@@ -1,0 +1,114 @@
+name: Publish Starwatch release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: starwatch-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: router/go.mod
+          cache-dependency-path: router/go.sum
+
+      - name: Verify tag and package version
+        id: release
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must have the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          mapfile -t package_versions < <(sed -nE 's/^VERSION := ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' package/Makefile)
+          if (( ${#package_versions[@]} != 1 )) || [[ "${package_versions[0]}" != "$version" ]]; then
+            echo "Tag $tag does not match the single VERSION in package/Makefile" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run full tests
+        run: |
+          go test -race ./...
+          go vet ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
+          make -C ../package test
+        working-directory: router
+
+      - name: Build and inspect release packages
+        shell: bash
+        run: |
+          version="${{ steps.release.outputs.version }}"
+          make -C package VERSION="$version" all
+          sh package/tests/release-inventory-test.sh package/out "$version"
+          test -f package/install.sh
+
+      - name: Create or verify immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          tag="$TAG"
+          version="$VERSION"
+          assets=(
+            "gl-app-starwatch_${version}_all.ipk"
+            "luci-app-starwatch_${version}_all.ipk"
+            "starwatchd_${version}_aarch64_cortex-a53.ipk"
+          )
+          expected=$(printf '%s\n' "${assets[@]}" | sort)
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            release_assets=$(gh release view "$tag" --json assets --jq '.assets[].name' | sort)
+            if [[ "$release_assets" != "$expected" ]]; then
+              echo "Release $tag has an unexpected asset inventory" >&2
+              diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$release_assets") || true
+              exit 1
+            fi
+
+            existing_dir=$(mktemp -d)
+            cleanup() {
+              rm -rf -- "$existing_dir"
+            }
+            trap cleanup EXIT
+            download_args=()
+            for asset in "${assets[@]}"; do
+              download_args+=(--pattern "$asset")
+            done
+            gh release download "$tag" --dir "$existing_dir" "${download_args[@]}"
+            downloaded=$(find "$existing_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+            if [[ "$downloaded" != "$expected" ]]; then
+              echo "Downloaded release $tag has an unexpected asset inventory" >&2
+              exit 1
+            fi
+            sh package/tests/release-inventory-test.sh "$existing_dir" "$version"
+            for asset in "${assets[@]}"; do
+              python3 package/tests/compare-ipk-content.py "package/out/$asset" "$existing_dir/$asset"
+            done
+            echo "Release $tag assets match the freshly built packages"
+            exit 0
+          fi
+
+          release_files=()
+          for asset in "${assets[@]}"; do
+            release_files+=("package/out/$asset")
+          done
+          gh release create "$tag" "${release_files[@]}" \
+            --title "$tag" \
+            --generate-notes
