@@ -347,23 +347,41 @@ final class RouterConnectionModel {
         discoveryError = nil
     }
 
-    func reloadSavedHosts() async {
+    func reloadSavedHosts(refreshGoodCloudRemoteAccess shouldRefreshGoodCloud: Bool = true) async {
         savedHosts = await hostStore.hosts()
         await refreshClientCredentialAvailability(for: savedHosts)
-        await refreshGoodCloudRemoteAccess()
+        if shouldRefreshGoodCloud {
+            await refreshGoodCloudRemoteAccess()
+        }
         loadError = nil
     }
 
     func refreshGoodCloudRemoteAccess() async {
         goodCloudRefreshGeneration &+= 1
         let generation = goodCloudRefreshGeneration
-        guard let goodCloudAccount, let goodCloudAssociationLoader else {
+        guard let goodCloudAccount else {
             clearGoodCloudRemoteAccess(ifCurrent: generation)
             return
         }
         let state = await goodCloudAccount.account.validateStoredSession()
+        await publishGoodCloudRemoteAccess(state, generation: generation)
+    }
+
+    func publishGoodCloudRemoteAccess(_ state: GoodCloudSessionState) async {
+        goodCloudRefreshGeneration &+= 1
+        await publishGoodCloudRemoteAccess(state, generation: goodCloudRefreshGeneration)
+    }
+
+    private func publishGoodCloudRemoteAccess(
+        _ state: GoodCloudSessionState,
+        generation: UInt64
+    ) async {
         guard goodCloudRefreshGeneration == generation else { return }
         guard case .authenticated = state else {
+            clearGoodCloudRemoteAccess(ifCurrent: generation)
+            return
+        }
+        guard let goodCloudAccount, let goodCloudAssociationLoader else {
             clearGoodCloudRemoteAccess(ifCurrent: generation)
             return
         }

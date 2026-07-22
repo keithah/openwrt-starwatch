@@ -1,14 +1,33 @@
 import SwiftUI
 
-struct GoodCloudLoginPresentation: Equatable {
-    struct Credentials: Equatable {
+struct GoodCloudLoginPresentation: Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    struct Credentials: Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
         let email: String
         let password: String
+
+        var description: String { "GoodCloud credentials (redacted)" }
+        var debugDescription: String { description }
+        var customMirror: Mirror {
+            Mirror(self, children: ["email": "<redacted>", "password": "<redacted>"])
+        }
     }
 
     let email: String
     let password: String
     let isLoading: Bool
+
+    var description: String { "GoodCloud login presentation (redacted, loading: \(isLoading))" }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "email": "<redacted>",
+                "password": "<redacted>",
+                "isLoading": isLoading,
+            ]
+        )
+    }
 
     var isSubmitDisabled: Bool {
         email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -29,6 +48,7 @@ struct GoodCloudLoginView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var email = ""
     @State private var password = ""
+    @State private var loginTask: Task<Void, Never>?
     @FocusState private var focusedField: Field?
 
     let model: GoodCloudSettingsModel
@@ -96,9 +116,9 @@ struct GoodCloudLoginView: View {
         .task {
             if email.isEmpty { focusedField = .email }
         }
-        .onDisappear(perform: clearPassword)
+        .onDisappear(perform: cancelLogin)
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { clearPassword() }
+            if phase != .active { cancelLogin() }
         }
     }
 
@@ -114,14 +134,23 @@ struct GoodCloudLoginView: View {
         guard !presentation.isSubmitDisabled else { return }
         focusedField = nil
         let credentials = presentation.credentialsForSubmission
-        Task { @MainActor in
-            defer { clearPassword() }
+        clearPassword()
+        loginTask?.cancel()
+        loginTask = Task { @MainActor in
             await model.login(email: credentials.email, password: credentials.password)
+            guard !Task.isCancelled else { return }
+            loginTask = nil
             if model.state == .authenticated { dismiss() }
         }
     }
 
     private func clearPassword() {
         password = ""
+    }
+
+    private func cancelLogin() {
+        clearPassword()
+        loginTask?.cancel()
+        loginTask = nil
     }
 }

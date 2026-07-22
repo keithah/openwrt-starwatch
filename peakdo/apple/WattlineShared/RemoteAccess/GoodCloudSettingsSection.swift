@@ -49,17 +49,23 @@ struct GoodCloudSettingsSection: View {
     private var signedInContent: some View {
         LabeledContent("GoodCloud", value: "Signed in")
         LabeledContent("Local", value: "Preferred")
-        if let association = model.association {
-            LabeledContent("Remote", value: association.isOnline ? "Available" : "Device offline")
-            VStack(alignment: .leading, spacing: 3) {
-                Text(association.name)
-                Text(association.model).font(.caption).foregroundStyle(.secondary)
-                Text(formattedMAC(association.mac))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                if let ddns = association.ddns, !ddns.isEmpty {
-                    Text(ddns).font(.caption).foregroundStyle(.secondary)
+        if model.association != nil {
+            LabeledContent("Remote", value: remoteAvailabilityText)
+            if let device = model.associatedDevice {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(device.name)
+                    Text(device.model).font(.caption).foregroundStyle(.secondary)
+                    Text(formattedMAC(device.mac))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    if let ddns = device.ddns, !ddns.isEmpty {
+                        Text(ddns).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
+            } else {
+                Text("The selected router was not returned by GoodCloud.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Button("Change GoodCloud router") { showsDevicePicker = true }
             Button("Remove GoodCloud router", role: .destructive) { removeAssociation() }
@@ -71,6 +77,7 @@ struct GoodCloudSettingsSection: View {
                     .foregroundStyle(.secondary)
             }
             Button("Choose GoodCloud router") { showsDevicePicker = true }
+                .disabled(model.savedHost == nil)
         }
         Button("Sign out of GoodCloud", role: .destructive) {
             Task { await model.logout() }
@@ -89,5 +96,13 @@ struct GoodCloudSettingsSection: View {
 
     private func formattedMAC(_ value: String) -> String {
         GoodCloudDevicePresentation.formattedMAC(value)
+    }
+
+    private var remoteAvailabilityText: String {
+        switch model.remoteAvailability {
+        case .unavailable: "Unavailable"
+        case .online: "Available"
+        case .offline: "Device offline"
+        }
     }
 }

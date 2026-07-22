@@ -56,7 +56,7 @@ public protocol GoodCloudAccountServing: Sendable {
     func validateStoredSession() async -> GoodCloudSessionState
     func login(email: String, password: String) async -> GoodCloudSessionState
     func refreshDevices() async -> GoodCloudSessionState
-    func logout() async
+    @discardableResult func logout() async -> GoodCloudSessionState
 }
 
 public protocol GoodCloudRelayProvisioning: Sendable {
@@ -176,19 +176,20 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         }
     }
 
-    public func logout() async {
-        guard await operations.acquire() else { return }
+    @discardableResult
+    public func logout() async -> GoodCloudSessionState {
+        guard await operations.acquire() else { return state }
         guard !Task.isCancelled else {
             operations.release()
-            return
+            return state
         }
         defer { operations.release() }
         let generation = beginOperation()
         do {
             try await clearSession()
-            _ = publish(.loggedOut, for: generation)
+            return publish(.loggedOut, for: generation)
         } catch {
-            _ = publish(.failed(Self.redactedFailure), for: generation)
+            return publish(.failed(Self.redactedFailure), for: generation)
         }
     }
 

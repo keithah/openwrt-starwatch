@@ -9,6 +9,12 @@ enum GoodCloudSettingsError: Error, Equatable {
     case associationUnavailable
 }
 
+enum GoodCloudRemoteAvailability: Equatable {
+    case unavailable
+    case online
+    case offline
+}
+
 @MainActor
 @Observable
 final class GoodCloudSettingsModel {
@@ -24,11 +30,12 @@ final class GoodCloudSettingsModel {
     private(set) var devices: [GoodCloudDeviceSummary] = []
     private(set) var association: GoodCloudAssociation?
     private(set) var errorMessage: String?
+    private(set) var activeHostID: UUID?
 
     private let account: (any GoodCloudAccountServing)?
     private let associations: GoodCloudAssociationStore?
     private let connections: RouterConnectionModel
-    private let hostID: UUID?
+    private var sessionState: GoodCloudSessionState = .loggedOut
 
     init(
         account: (any GoodCloudAccountServing)?,
@@ -39,7 +46,7 @@ final class GoodCloudSettingsModel {
         self.account = account
         self.associations = associations
         self.connections = connections
-        self.hostID = hostID
+        activeHostID = hostID
     }
 
     convenience init(connections: RouterConnectionModel, hostID: UUID? = nil) {
@@ -52,10 +59,11 @@ final class GoodCloudSettingsModel {
     }
 
     var savedHost: RouterHostMetadata? {
-        if let hostID {
-            return connections.savedHosts.first { $0.id == hostID }
+        if let activeHostID {
+            return connections.savedHosts.first { $0.id == activeHostID }
         }
-        return connections.savedHosts.first
+        guard connections.savedHosts.count == 1 else { return nil }
+        return connections.savedHosts[0]
     }
 
     var suggestedDevice: GoodCloudDeviceSummary? {
@@ -63,37 +71,56 @@ final class GoodCloudSettingsModel {
         return associations.suggestedDevice(forRouterMAC: routerMAC, devices: devices)
     }
 
+    var associatedDevice: GoodCloudDeviceSummary? {
+        guard let deviceID = association?.goodCloudDeviceID else { return nil }
+        return devices.first { $0.id == deviceID }
+    }
+
+    var remoteAvailability: GoodCloudRemoteAvailability {
+        guard state == .authenticated, association != nil, let associatedDevice else {
+            return .unavailable
+        }
+        return associatedDevice.isOnline ? .online : .offline
+    }
+
+    func selectHost(_ hostID: UUID?) {
+        guard activeHostID != hostID else { return }
+        activeHostID = hostID
+        association = nil
+        Task { @MainActor [weak self] in
+            await self?.loadAssociation()
+        }
+    }
+
     func load() async {
+        await connections.reloadSavedHosts(refreshGoodCloudRemoteAccess: false)
         guard let account else {
-            publish(.loggedOut)
-            await loadAssociation()
+            await accept(.loggedOut)
             return
         }
         state = .loading
-        apply(await account.validateStoredSession())
-        await loadAssociation()
+        errorMessage = nil
+        await accept(await account.validateStoredSession())
     }
 
     func login(email: String, password: String) async {
         guard let account else {
-            publish(.failed)
+            await accept(.failed("GoodCloud request failed."))
             return
         }
         state = .loading
-        apply(await account.login(email: email, password: password))
-        await loadAssociation()
-        await connections.refreshGoodCloudRemoteAccess()
+        errorMessage = nil
+        await accept(await account.login(email: email, password: password))
     }
 
     func logout() async {
         guard let account else {
-            publish(.loggedOut)
+            await accept(.loggedOut)
             return
         }
         state = .loading
-        await account.logout()
-        apply(await account.validateStoredSession())
-        await connections.refreshGoodCloudRemoteAccess()
+        errorMessage = nil
+        await accept(await account.logout())
     }
 
     func associate(deviceID: String) async throws {
@@ -121,17 +148,20 @@ final class GoodCloudSettingsModel {
         try await associations.save(newAssociation)
         association = newAssociation
         errorMessage = nil
-        await connections.refreshGoodCloudRemoteAccess()
+        await connections.publishGoodCloudRemoteAccess(sessionState)
     }
 
     func removeAssociation() async throws {
-        guard let associations, let host = savedHost else {
+        guard let host = savedHost else {
+            throw GoodCloudSettingsError.noSavedRouter
+        }
+        guard let associations else {
             throw GoodCloudSettingsError.associationUnavailable
         }
         try await associations.remove(hostID: host.id)
         association = nil
         errorMessage = nil
-        await connections.refreshGoodCloudRemoteAccess()
+        await connections.publishGoodCloudRemoteAccess(sessionState)
     }
 
     private func loadAssociation() async {
@@ -139,7 +169,16 @@ final class GoodCloudSettingsModel {
             association = nil
             return
         }
-        association = await associations.association(forHostID: host.id)
+        let loaded = await associations.association(forHostID: host.id)
+        guard savedHost?.id == host.id else { return }
+        association = loaded
+    }
+
+    private func accept(_ session: GoodCloudSessionState) async {
+        sessionState = session
+        apply(session)
+        await loadAssociation()
+        await connections.publishGoodCloudRemoteAccess(session)
     }
 
     private func apply(_ session: GoodCloudSessionState) {

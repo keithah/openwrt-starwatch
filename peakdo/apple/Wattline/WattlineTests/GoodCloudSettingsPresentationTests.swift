@@ -35,6 +35,31 @@ final class GoodCloudSettingsPresentationTests: XCTestCase {
         )
     }
 
+    func testCredentialBearingValuesRedactEveryReflectionSurface() {
+        let secret = "secret-password"
+        let presentation = GoodCloudLoginPresentation(
+            email: "owner@example.com",
+            password: secret,
+            isLoading: false
+        )
+        let credentials = presentation.credentialsForSubmission
+
+        for value in [
+            String(describing: presentation),
+            String(reflecting: presentation),
+            presentation.debugDescription,
+            String(describing: presentation.customMirror),
+            String(describing: Mirror(reflecting: presentation).children.map(\.value)),
+            String(describing: credentials),
+            String(reflecting: credentials),
+            credentials.debugDescription,
+            String(describing: credentials.customMirror),
+            String(describing: Mirror(reflecting: credentials).children.map(\.value)),
+        ] {
+            XCTAssertFalse(value.contains(secret), "reflection surface leaked the password: \(value)")
+        }
+    }
+
     func testDevicePresentationShowsMetadataSuggestionAndOfflineSelectionState() {
         let device = GoodCloudDeviceSummary(
             id: "42",

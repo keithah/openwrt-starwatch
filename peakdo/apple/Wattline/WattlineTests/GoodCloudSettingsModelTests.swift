@@ -21,7 +21,7 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         XCTAssertEqual(loginInputs, [
             .init(email: "owner@example.com", password: "secret-password"),
         ])
-        XCTAssertEqual(validationCount, 2)
+        XCTAssertEqual(validationCount, 0)
         XCTAssertFalse(String(describing: fixture.model).contains("secret-password"))
     }
 
@@ -50,7 +50,7 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         XCTAssertNil(fixture.model.association)
         XCTAssertEqual(fixture.connections.savedHosts, [fixture.host])
         let validationsAfterRemoval = await fixture.account.recordedValidationCount()
-        XCTAssertEqual(validationsAfterRemoval, validationsBeforeRemoval + 1)
+        XCTAssertEqual(validationsAfterRemoval, validationsBeforeRemoval)
     }
 
     func testOfflineDeviceCannotBeAssociated() async throws {
@@ -90,7 +90,7 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         let logoutCount = await fixture.account.recordedLogoutCount()
         let validationsAfterLogout = await fixture.account.recordedValidationCount()
         XCTAssertEqual(logoutCount, 1)
-        XCTAssertEqual(validationsAfterLogout, validationsBeforeLogout + 2)
+        XCTAssertEqual(validationsAfterLogout, validationsBeforeLogout)
     }
 
     func testLogoutDoesNotClaimLoggedOutWhenCredentialRemovalDidNotClearSession() async throws {
@@ -121,12 +121,129 @@ final class GoodCloudSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(fixture.model.association?.goodCloudDeviceID, second.id)
         let validationsAfterSelection = await fixture.account.recordedValidationCount()
-        XCTAssertEqual(validationsAfterSelection, validationsBeforeSelection + 2)
+        XCTAssertEqual(validationsAfterSelection, validationsBeforeSelection)
+    }
+
+    func testLoginPublishesTheSameAccountResultWithoutASecondValidation() async throws {
+        let fixture = try await makeFixture()
+        let validationsBeforeLogin = await fixture.account.recordedValidationCount()
+
+        await fixture.model.login(email: "owner@example.com", password: "secret")
+
+        XCTAssertEqual(fixture.model.state, .authenticated)
+        let loginCount = await fixture.account.recordedLoginCount()
+        let validationsAfterLogin = await fixture.account.recordedValidationCount()
+        XCTAssertEqual(loginCount, 1)
+        XCTAssertEqual(validationsAfterLogin, validationsBeforeLogin)
+    }
+
+    func testRequiresLoginLoadClearsPreviouslyEnabledPreferredTransportAndAdministrationRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(routeRecorder: recorder)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        _ = try fixture.connections.administrationHTTPFactory(fixture.host.endpoint)
+        await fixture.account.setState(.requiresLogin)
+        let validationsBeforeLoad = await fixture.account.recordedValidationCount()
+
+        await fixture.model.load()
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        _ = try fixture.connections.administrationHTTPFactory(fixture.host.endpoint)
+
+        XCTAssertEqual(fixture.model.state, .requiresLogin)
+        let validationsAfterLoad = await fixture.account.recordedValidationCount()
+        XCTAssertEqual(validationsAfterLoad, validationsBeforeLoad + 1)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+        XCTAssertEqual(recorder.preferredHTTPCount, 1)
+        XCTAssertEqual(recorder.directHTTPCount, 1)
+    }
+
+    func testRetryClearsOldFixedErrorBeforeLoginCompletes() async throws {
+        let fixture = try await makeFixture()
+        await fixture.account.setState(.failed("detail that must stay hidden"))
+        await fixture.model.load()
+        XCTAssertNotNil(fixture.model.errorMessage)
+        await fixture.account.setState(.authenticated([fixture.device]))
+        await fixture.account.holdNextLogin()
+
+        let login = Task {
+            await fixture.model.login(email: "owner@example.com", password: "secret")
+        }
+        try await waitUntil { await fixture.account.loginIsHeld }
+
+        XCTAssertNil(fixture.model.errorMessage)
+        await fixture.account.releaseLogin()
+        await login.value
+    }
+
+    func testMultipleSavedHostsRequireExplicitActiveHostBeforeAssociationOrRemoval() async throws {
+        let fixture = try await makeFixture(additionalHost: true)
+        await fixture.model.load()
+
+        XCTAssertNil(fixture.model.activeHostID)
+        XCTAssertNil(fixture.model.savedHost)
+        do {
+            try await fixture.model.associate(deviceID: fixture.device.id)
+            XCTFail("expected an explicit active host")
+        } catch {
+            XCTAssertEqual(error as? GoodCloudSettingsError, .noSavedRouter)
+        }
+        do {
+            try await fixture.model.removeAssociation()
+            XCTFail("expected removal to require an explicit active host")
+        } catch {
+            XCTAssertEqual(error as? GoodCloudSettingsError, .noSavedRouter)
+        }
+        let allAssociations = await fixture.associations.allAssociations()
+        XCTAssertEqual(allAssociations, [])
+
+        fixture.model.selectHost(fixture.host.id)
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        XCTAssertEqual(fixture.model.association?.hostID, fixture.host.id)
+    }
+
+    func testLoadReloadsSavedHostsBeforeResolvingExplicitActiveHost() async throws {
+        let fixture = try await makeFixture(reloadConnections: false, hostID: nil)
+        XCTAssertEqual(fixture.connections.savedHosts, [])
+
+        fixture.model.selectHost(fixture.host.id)
+        await fixture.model.load()
+
+        XCTAssertEqual(fixture.model.savedHost, fixture.host)
+    }
+
+    func testAssociatedDeviceAvailabilityUsesFreshDeviceResultInsteadOfPersistedAssociation() async throws {
+        let fixture = try await makeFixture()
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        XCTAssertEqual(fixture.model.associatedDevice?.isOnline, true)
+
+        let offline = GoodCloudDeviceSummary(
+            id: fixture.device.id,
+            name: "Fresh offline name",
+            mac: fixture.device.mac,
+            ddns: "fresh-offline.glddns.com",
+            model: fixture.device.model,
+            isOnline: false
+        )
+        await fixture.account.setState(.authenticated([offline]))
+        await fixture.model.load()
+
+        XCTAssertEqual(fixture.model.associatedDevice, offline)
+        XCTAssertEqual(fixture.model.remoteAvailability, .offline)
+        XCTAssertEqual(fixture.model.association?.isOnline, true, "persisted snapshot proves presentation is using fresh device state")
     }
 
     private func makeFixture(
         devices: [GoodCloudDeviceSummary] = [defaultDevice],
-        clearsSessionOnLogout: Bool = true
+        clearsSessionOnLogout: Bool = true,
+        additionalHost: Bool = false,
+        reloadConnections: Bool = true,
+        hostID: UUID? = nil,
+        routeRecorder: SettingsRouteRecorder? = nil
     ) async throws -> SettingsFixture {
         let host = try RouterHostValidator.validate(
             "192.168.8.1:8377",
@@ -138,6 +255,17 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         )
         let hostStore = RouterHostStore(backend: SettingsHostBackend())
         try await hostStore.save(host)
+        if additionalHost {
+            let second = try RouterHostValidator.validate(
+                "192.168.9.1:8377",
+                displayName: "Second Wattline router",
+                reachability: .lan,
+                allowsInsecureWAN: false,
+                deviceID: "11:22:33:44:55:66",
+                certificateFingerprint: nil
+            )
+            try await hostStore.save(second)
+        }
         let account = SettingsAccountService(
             state: .authenticated(devices),
             clearsSessionOnLogout: clearsSessionOnLogout
@@ -148,16 +276,30 @@ final class GoodCloudSettingsModelTests: XCTestCase {
             hostStore: hostStore,
             credentialStore: RouterCredentialStore(backend: SettingsCredentialBackend()),
             enrollmentClientFactory: { _ in throw NetworkError.unsupported("not used") },
-            transportFactory: { _, _ in throw NetworkError.unsupported("not used") },
+            transportFactory: { _, _ in
+                if let routeRecorder { return routeRecorder.makeDirectTransport() }
+                throw NetworkError.unsupported("not used")
+            },
             goodCloudAccount: .init(account: account, provisioner: provisioner),
-            goodCloudAssociations: associations
+            goodCloudAssociations: associations,
+            preferredTransportFactory: { _, _, _, _ in
+                if let routeRecorder { return routeRecorder.makePreferredTransport() }
+                throw NetworkError.unsupported("not used")
+            },
+            administrationHTTPFactory: { endpoint in
+                if let routeRecorder { return try routeRecorder.registry.client(for: endpoint) }
+                throw NetworkError.unsupported("not used")
+            },
+            goodCloudAdministrationHTTPRegistry: routeRecorder?.registry
         )
-        await connections.reloadSavedHosts()
+        if reloadConnections {
+            await connections.reloadSavedHosts(refreshGoodCloudRemoteAccess: false)
+        }
         let model = GoodCloudSettingsModel(
             account: account,
             associations: associations,
             connections: connections,
-            hostID: host.id
+            hostID: hostID ?? (additionalHost ? nil : host.id)
         )
         return SettingsFixture(
             model: model,
@@ -198,7 +340,11 @@ private actor SettingsAccountService: GoodCloudAccountServing {
     private(set) var loginInputs: [LoginInput] = []
     private(set) var validationCount = 0
     private(set) var logoutCount = 0
+    private(set) var loginCount = 0
     private let clearsSessionOnLogout: Bool
+    private var holdLogin = false
+    private var loginContinuation: CheckedContinuation<Void, Never>?
+    private(set) var loginIsHeld = false
 
     init(state: GoodCloudSessionState, clearsSessionOnLogout: Bool) {
         currentState = state
@@ -211,22 +357,37 @@ private actor SettingsAccountService: GoodCloudAccountServing {
     }
 
     func login(email: String, password: String) async -> GoodCloudSessionState {
+        loginCount += 1
         loginInputs.append(.init(email: email, password: password))
+        if holdLogin {
+            holdLogin = false
+            loginIsHeld = true
+            await withCheckedContinuation { loginContinuation = $0 }
+            loginIsHeld = false
+        }
         return currentState
     }
 
     func refreshDevices() async -> GoodCloudSessionState { currentState }
 
-    func logout() async {
+    func logout() async -> GoodCloudSessionState {
         logoutCount += 1
         if clearsSessionOnLogout {
             currentState = .loggedOut
         }
+        return currentState
     }
 
     func recordedLoginInputs() -> [LoginInput] { loginInputs }
     func recordedValidationCount() -> Int { validationCount }
     func recordedLogoutCount() -> Int { logoutCount }
+    func recordedLoginCount() -> Int { loginCount }
+    func setState(_ state: GoodCloudSessionState) { currentState = state }
+    func holdNextLogin() { holdLogin = true }
+    func releaseLogin() {
+        loginContinuation?.resume()
+        loginContinuation = nil
+    }
 }
 
 private actor SettingsAccountClient: GoodCloudAccountClient {
@@ -270,4 +431,65 @@ private actor SettingsCredentialBackend: RouterCredentialBackend {
     func read(account: String) async throws -> Data? { nil }
     func save(_ data: Data, account: String) async throws {}
     func delete(account: String) async throws {}
+}
+
+private final class SettingsRouteRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var directTransports = 0
+    private var preferredTransports = 0
+    private var directHTTP = 0
+    private var preferredHTTP = 0
+
+    lazy var registry = GoodCloudAdministrationHTTPRegistry(
+        directFactory: { [weak self] _ in
+            self?.lock.withLock { self?.directHTTP += 1 }
+            return SettingsNoopHTTPClient()
+        },
+        preferredFactory: { [weak self] _, _, _ in
+            self?.lock.withLock { self?.preferredHTTP += 1 }
+            return SettingsNoopHTTPClient()
+        }
+    )
+
+    var directTransportCount: Int { lock.withLock { directTransports } }
+    var preferredTransportCount: Int { lock.withLock { preferredTransports } }
+    var directHTTPCount: Int { lock.withLock { directHTTP } }
+    var preferredHTTPCount: Int { lock.withLock { preferredHTTP } }
+
+    func makeDirectTransport() -> any DeviceTransport {
+        lock.withLock { directTransports += 1 }
+        return SettingsNoopTransport()
+    }
+
+    func makePreferredTransport() -> any DeviceTransport {
+        lock.withLock { preferredTransports += 1 }
+        return SettingsNoopTransport()
+    }
+}
+
+private actor SettingsNoopHTTPClient: RouterHTTPClient {
+    func get(_ path: String, token: String) async throws -> (Data, HTTPURLResponse) {
+        throw NetworkError.unsupported("not used")
+    }
+
+    func request(
+        _ method: String,
+        _ path: String,
+        body: Data?,
+        token: String
+    ) async throws -> (Data, HTTPURLResponse) {
+        throw NetworkError.unsupported("not used")
+    }
+}
+
+private actor SettingsNoopTransport: DeviceTransport {
+    nonisolated let events: AsyncStream<DeviceEvent> = AsyncStream { _ in }
+    func startScan() async throws {}
+    func stopScan() async {}
+    func connect(to id: UUID, scope: DeviceConnectionScope) async throws {}
+    func disconnect() async {}
+    func perform(_ command: DeviceCommand) async throws -> CommandOutcome { .sent }
+    func refreshTelemetry() async throws {}
+    func synchronizeDeviceTime() async throws {}
+    func readDeviceTimeIfSupported() async throws -> Date? { nil }
 }

@@ -179,7 +179,7 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         let logout = Task { await service.logout() }
         await client.resumeFirstDevices(returning: [.fixture])
         let olderResult = await olderRefresh.value
-        await logout.value
+        _ = await logout.value
         let state = await service.state
 
         XCTAssertEqual(olderResult, .authenticated([.fixture]))
@@ -222,7 +222,7 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         await fulfillment(of: [logoutQueued], timeout: 1.0)
         await client.resumeLogin()
         _ = await login.value
-        await logout.value
+        _ = await logout.value
         let state = await service.state
         let hasStoredToken = await client.hasStoredToken()
 
@@ -279,7 +279,7 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         await client.resumeDevices(returning: [.fixture])
         _ = await holder.value
         _ = await cancelledLogin.value
-        await liveLogout.value
+        _ = await liveLogout.value
         let state = await service.state
         let snapshot = await client.snapshot
 

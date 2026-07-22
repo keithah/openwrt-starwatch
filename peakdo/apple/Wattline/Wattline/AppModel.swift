@@ -340,7 +340,7 @@ final class AppModel {
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
 
-        Task { await routerConnections.reloadSavedHosts() }
+        Task { await self.goodCloudSettings.load() }
 
         if persistence.systemSurfacePreferences.lowBatteryEnabled {
             Task { @MainActor [weak self] in
@@ -448,6 +448,7 @@ final class AppModel {
         _ host: RouterHostMetadata,
         endpoints: Set<RouterEndpointCapability> = RouterConnectionModel.canonicalClientEndpoints
     ) {
+        goodCloudSettings.selectHost(host.id)
         do {
             let routerTransport = try routerConnections.makeTransport(for: host)
             routerAdministration = .production(connections: routerConnections)

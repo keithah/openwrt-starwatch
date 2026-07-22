@@ -256,6 +256,7 @@ final class RouterAppWiringTests: XCTestCase {
         try await waitUntil { await transport.connectCount == 1 }
 
         XCTAssertEqual(model.activeTransportKind, .router)
+        XCTAssertEqual(model.goodCloudSettings.activeHostID, saved.id)
         XCTAssertFalse(model.supportsManualClockControls)
         XCTAssertEqual(routerFactoryCount, 1)
         XCTAssertEqual(bluetoothFactoryCount, 0, "manual router selection must not instantiate CBCentralManager/BLETransport")
@@ -624,7 +625,7 @@ private actor SequencedGoodCloudAccount: GoodCloudAccountServing {
 
     func login(email: String, password: String) async -> GoodCloudSessionState { .loggedOut }
     func refreshDevices() async -> GoodCloudSessionState { .loggedOut }
-    func logout() async {}
+    func logout() async -> GoodCloudSessionState { .loggedOut }
 }
 
 private actor ControllableGoodCloudAssociationLoader {
