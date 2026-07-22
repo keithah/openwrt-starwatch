@@ -352,6 +352,124 @@ final class RouterAppWiringTests: XCTestCase {
         XCTAssertEqual(bluetoothFactoryCount, 1, "switching BLE devices must retain exactly one BLE owner")
     }
 
+    func testBluetoothRecordWithDuplicateMACHostsKeepsGoodCloudSelectionAmbiguous() async throws {
+        let discoverySource = RouterWiringDiscoverySource()
+        var routerFactoryCount = 0
+        let fixture = makeFixture(
+            discovery: RouterDiscovery(source: discoverySource),
+            transportFactory: { _, _ in
+                routerFactoryCount += 1
+                return RouterSelectionTransport(identity: self.identity(mac: nil, cid: nil))
+            }
+        )
+        let firstHost = try host(
+            name: "Kitchen LAN",
+            address: "192.168.8.1:8377",
+            mac: "DC:04:5A:EB:72:2B"
+        )
+        let secondHost = try host(
+            name: "Kitchen VPN",
+            address: "kitchen.tailnet.ts.net:8377",
+            reachability: .vpn,
+            mac: "dc-04-5a-eb-72-2b"
+        )
+        try await fixture.hostStore.save(firstHost)
+        try await fixture.hostStore.save(secondHost)
+        await fixture.model.reloadSavedHosts()
+
+        let associationStore = GoodCloudAssociationStore(
+            backend: RouterWiringAssociationBackend()
+        )
+        for (host, deviceID) in [(firstHost, "first"), (secondHost, "second")] {
+            try await associationStore.save(GoodCloudAssociation(
+                hostID: host.id,
+                routerMAC: try XCTUnwrap(host.deviceID),
+                device: GoodCloudDeviceSummary(
+                    id: deviceID,
+                    name: host.displayName,
+                    mac: try XCTUnwrap(host.deviceID),
+                    ddns: nil,
+                    model: "GL-X3000",
+                    isOnline: true
+                )
+            ))
+        }
+        let settings = GoodCloudSettingsModel(
+            account: nil,
+            associations: associationStore,
+            connections: fixture.model
+        )
+
+        let bluetoothTransport = RouterSelectionTransport(
+            identity: identity(mac: "DC045AEB722B", cid: 0x0302)
+        )
+        var bluetoothFactoryCount = 0
+        let model = AppModel(
+            persistence: testPersistence(),
+            transportFactory: {
+                bluetoothFactoryCount += 1
+                return bluetoothTransport
+            },
+            snapshotCoordinator: nil,
+            widgetReloadAdapter: nil,
+            liveActivityAdapter: RouterNoopLiveActivityAdapter(),
+            routerConnections: fixture.model,
+            goodCloudSettings: settings
+        )
+        model.requestBluetoothAfterPriming()
+
+        fixture.model.startDiscovery()
+        try await waitUntil { discoverySource.startCount == 1 }
+        discoverySource.yield([
+            RouterServiceRecord(
+                serviceName: "Kitchen router",
+                domain: "local.",
+                host: "kitchen.local.",
+                port: 8377,
+                txt: [
+                    "api": Data("1".utf8),
+                    "auth": Data("pin".utf8),
+                    "id": Data("DC:04:5A:EB:72:2B".utf8),
+                    "model": Data("BP4SL3V2".utf8),
+                    "cid": Data("0302".utf8),
+                    "features": Data("00000fff".utf8),
+                    "tls": Data("none".utf8),
+                ]
+            ),
+        ])
+        try await waitUntil { await fixture.model.discoveredRouters.count == 1 }
+
+        let bluetoothDevice = DiscoveredDevice(
+            id: UUID(),
+            localName: "Link-Power",
+            rssi: -40,
+            mode: .application
+        )
+        let record = try XCTUnwrap(fixture.model.scanRecords(
+            bluetooth: [bluetoothDevice],
+            identities: [
+                bluetoothDevice.id: AppModel.CachedIdentity(
+                    advertisedName: bluetoothDevice.localName,
+                    deviceInformationName: "Link-Power 2",
+                    macAddress: "DC045AEB722B"
+                ),
+            ]
+        ).first { $0.bluetoothDevice?.id == bluetoothDevice.id })
+
+        XCTAssertNotNil(record.discoveredRouter)
+        XCTAssertNil(record.routerHost)
+        XCTAssertEqual(record.transportOptions, [.bluetooth, .router])
+
+        model.choose(record)
+        try await waitUntil { await bluetoothTransport.connectCount == 1 }
+        await settings.load()
+
+        XCTAssertNil(settings.activeHostID)
+        XCTAssertNil(settings.association)
+        XCTAssertEqual(routerFactoryCount, 0)
+        XCTAssertEqual(bluetoothFactoryCount, 1, "ambiguous routing must retain exactly one BLE owner")
+    }
+
     func testReturningBluetoothSessionSelectsMatchingGoodCloudRouterWithTwoSavedHosts() async throws {
         var routerFactoryCount = 0
         let fixture = makeFixture(transportFactory: { _, _ in
@@ -641,6 +759,7 @@ final class RouterAppWiringTests: XCTestCase {
 
     private func makeFixture(
         hostBackend: RouterHostMemoryBackend = RouterHostMemoryBackend(),
+        discovery: RouterDiscovery? = nil,
         enrollmentClientFactory: @escaping RouterConnectionModel.EnrollmentClientFactory = { _ in
             throw NetworkError.unsupported("Enrollment client not configured")
         },
@@ -655,6 +774,7 @@ final class RouterAppWiringTests: XCTestCase {
             model: RouterConnectionModel(
                 hostStore: hostStore,
                 credentialStore: credentialStore,
+                discovery: discovery,
                 enrollmentClientFactory: enrollmentClientFactory,
                 transportFactory: transportFactory
             ),
@@ -772,6 +892,27 @@ private final class RouterWiringAssociationBackend: GoodCloudAssociationKeyValue
 
     func set(_ data: Data?, forKey key: String) {
         lock.withLock { values[key] = data }
+    }
+}
+
+private final class RouterWiringDiscoverySource: RouterDiscoverySource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: AsyncStream<[RouterServiceRecord]>.Continuation?
+    private var starts = 0
+
+    var startCount: Int { lock.withLock { starts } }
+
+    func snapshots(serviceType: String) -> AsyncStream<[RouterServiceRecord]> {
+        AsyncStream { continuation in
+            lock.withLock {
+                starts += 1
+                self.continuation = continuation
+            }
+        }
+    }
+
+    func yield(_ records: [RouterServiceRecord]) {
+        lock.withLock { continuation }?.yield(records)
     }
 }
 

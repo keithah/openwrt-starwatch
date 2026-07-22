@@ -366,19 +366,20 @@ final class RouterConnectionModel {
         return matches[0]
     }
 
-    func refreshGoodCloudRemoteAccess() async {
+    @discardableResult
+    func refreshGoodCloudRemoteAccess() async -> Bool {
         let generation = beginGoodCloudRemoteAccessUpdate()
         guard let goodCloudAccount else {
-            clearGoodCloudRemoteAccess(ifCurrent: generation)
-            return
+            return clearGoodCloudRemoteAccess(ifCurrent: generation)
         }
         let state = await goodCloudAccount.account.validateStoredSession()
-        await publishGoodCloudRemoteAccess(state, generation: generation)
+        return await publishGoodCloudRemoteAccess(state, generation: generation)
     }
 
-    func publishGoodCloudRemoteAccess(_ state: GoodCloudSessionState) async {
+    @discardableResult
+    func publishGoodCloudRemoteAccess(_ state: GoodCloudSessionState) async -> Bool {
         let generation = beginGoodCloudRemoteAccessUpdate()
-        await publishGoodCloudRemoteAccess(state, generation: generation)
+        return await publishGoodCloudRemoteAccess(state, generation: generation)
     }
 
     @discardableResult
@@ -387,21 +388,19 @@ final class RouterConnectionModel {
         return goodCloudRefreshGeneration
     }
 
-    func publishGoodCloudRemoteAccess(
+    private func publishGoodCloudRemoteAccess(
         _ state: GoodCloudSessionState,
         generation: UInt64
-    ) async {
-        guard goodCloudRefreshGeneration == generation else { return }
+    ) async -> Bool {
+        guard goodCloudRefreshGeneration == generation else { return false }
         guard case .authenticated = state else {
-            clearGoodCloudRemoteAccess(ifCurrent: generation)
-            return
+            return clearGoodCloudRemoteAccess(ifCurrent: generation)
         }
         guard let goodCloudAccount, let goodCloudAssociationLoader else {
-            clearGoodCloudRemoteAccess(ifCurrent: generation)
-            return
+            return clearGoodCloudRemoteAccess(ifCurrent: generation)
         }
         let associations = await goodCloudAssociationLoader()
-        guard goodCloudRefreshGeneration == generation else { return }
+        guard goodCloudRefreshGeneration == generation else { return false }
         goodCloudSessionIsAuthenticated = true
         goodCloudAssociationsByHostID = Dictionary(uniqueKeysWithValues: associations.map {
             ($0.hostID, $0)
@@ -411,10 +410,11 @@ final class RouterConnectionModel {
             associations: associations,
             provisioner: goodCloudAccount.provisioner
         )
+        return true
     }
 
-    private func clearGoodCloudRemoteAccess(ifCurrent generation: UInt64) {
-        guard goodCloudRefreshGeneration == generation else { return }
+    private func clearGoodCloudRemoteAccess(ifCurrent generation: UInt64) -> Bool {
+        guard goodCloudRefreshGeneration == generation else { return false }
         goodCloudSessionIsAuthenticated = false
         goodCloudAssociationsByHostID = [:]
         goodCloudAdministrationHTTPRegistry?.update(
@@ -422,6 +422,7 @@ final class RouterConnectionModel {
             associations: [],
             provisioner: nil
         )
+        return true
     }
 
     @discardableResult
@@ -641,19 +642,22 @@ final class RouterConnectionModel {
         }
 
         for host in savedHosts {
-            let matchingIndex = records.firstIndex { record in
-                if let routerIdentity = routerIdentities[host.endpoint.peripheralID],
-                   let identity = record.identity,
-                   DeviceIdentityDeduplicator.merge(
-                       ble: identity,
-                       router: routerIdentity
-                   ) != nil {
-                    return true
+            let hostMAC = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID)
+            let matchingIndex: Int?
+            if let hostMAC {
+                matchingIndex = uniqueSavedHost(matchingNormalizedMAC: hostMAC)?.id == host.id
+                    ? Self.uniqueRecordIndex(in: records, matchingNormalizedMAC: hostMAC)
+                    : nil
+            } else if let routerIdentity = routerIdentities[host.endpoint.peripheralID] {
+                matchingIndex = Self.uniqueRecordIndex(in: records) { record in
+                    guard let identity = record.identity else { return false }
+                    return DeviceIdentityDeduplicator.merge(
+                        ble: identity,
+                        router: routerIdentity
+                    ) != nil
                 }
-                guard let hostMAC = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID),
-                      let deviceMAC = DeviceIdentityDeduplicator.normalizedMAC(record.identity?.macAddress)
-                else { return false }
-                return hostMAC == deviceMAC
+            } else {
+                matchingIndex = nil
             }
             if let matchingIndex {
                 let existing = records[matchingIndex]
@@ -703,11 +707,11 @@ final class RouterConnectionModel {
 
         for router in discoveredRouters {
             let routerIdentity = Self.snapshot(for: router)
-            let host = savedHosts.first { Self.matches($0, router: router) }
-            if let index = records.firstIndex(where: { record in
-                guard let identity = record.identity else { return false }
-                return DeviceIdentityDeduplicator.merge(ble: identity, router: routerIdentity) != nil
-            }) {
+            let host = uniqueSavedHost(matchingNormalizedMAC: router.deviceID)
+            if let index = Self.uniqueRecordIndex(
+                in: records,
+                matchingNormalizedMAC: router.deviceID
+            ) {
                 let existing = records[index]
                 records[index] = AppDeviceConnectionRecord(
                     id: existing.id,
@@ -736,12 +740,13 @@ final class RouterConnectionModel {
         }
 
         for host in savedHosts where !records.contains(where: { $0.routerHost?.id == host.id }) {
-            if let index = records.firstIndex(where: { record in
-                guard let hostMAC = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID),
-                      let deviceMAC = DeviceIdentityDeduplicator.normalizedMAC(record.identity?.macAddress)
-                else { return false }
-                return hostMAC == deviceMAC
-            }) {
+            let hostMAC = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID)
+            let index = hostMAC.flatMap { normalizedMAC in
+                uniqueSavedHost(matchingNormalizedMAC: normalizedMAC)?.id == host.id
+                    ? Self.uniqueRecordIndex(in: records, matchingNormalizedMAC: normalizedMAC)
+                    : nil
+            }
+            if let index {
                 let existing = records[index]
                 records[index] = AppDeviceConnectionRecord(
                     id: existing.id,
@@ -776,6 +781,34 @@ final class RouterConnectionModel {
         }
     }
     #endif
+
+    private func uniqueSavedHost(matchingNormalizedMAC normalizedMAC: String?) -> RouterHostMetadata? {
+        guard let normalizedMAC else { return nil }
+        let matches = savedHosts.filter {
+            DeviceIdentityDeduplicator.normalizedMAC($0.deviceID) == normalizedMAC
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    private static func uniqueRecordIndex(
+        in records: [AppDeviceConnectionRecord],
+        matchingNormalizedMAC normalizedMAC: String?
+    ) -> Int? {
+        guard let normalizedMAC else { return nil }
+        return uniqueRecordIndex(in: records) {
+            DeviceIdentityDeduplicator.normalizedMAC($0.identity?.macAddress) == normalizedMAC
+        }
+    }
+
+    private static func uniqueRecordIndex(
+        in records: [AppDeviceConnectionRecord],
+        where matches: (AppDeviceConnectionRecord) -> Bool
+    ) -> Int? {
+        let matchingIndices = records.indices.filter { matches(records[$0]) }
+        guard matchingIndices.count == 1 else { return nil }
+        return matchingIndices[0]
+    }
 
     private func availability(for host: RouterHostMetadata) -> RouterClientCredentialAvailability {
         clientCredentialAvailability[host.endpoint.peripheralID] ?? .unknown
@@ -897,13 +930,6 @@ final class RouterConnectionModel {
                 model: router.model
             )
         )
-    }
-
-    private static func matches(_ host: RouterHostMetadata, router: DiscoveredRouter) -> Bool {
-        if let hostMAC = DeviceIdentityDeduplicator.normalizedMAC(host.deviceID) {
-            return hostMAC == router.deviceID
-        }
-        return host.endpoint.peripheralID == router.endpoint.peripheralID
     }
 
     private static func displayName(for record: AppDeviceConnectionRecord) -> String {

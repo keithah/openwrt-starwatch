@@ -472,6 +472,146 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.association?.hostID, fixture.host.id)
     }
 
+    func testAccountOperationRetriesWhenNonSettingsRefreshSupersedesFirstRoutePublication() async throws {
+        let recorder = SettingsRouteRecorder()
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(
+            routeRecorder: recorder,
+            routeAssociationLoader: routeLoader
+        )
+        try await fixture.associations.save(GoodCloudAssociation(
+            hostID: fixture.host.id,
+            routerMAC: try XCTUnwrap(fixture.host.deviceID),
+            device: fixture.device
+        ))
+        await routeLoader.holdNext()
+
+        let load = Task { await fixture.model.load() }
+        do {
+            try await waitUntil { await routeLoader.isHeld }
+        } catch {
+            load.cancel()
+            await routeLoader.release()
+            await load.value
+            throw error
+        }
+        let competingRefresh = Task {
+            await fixture.connections.refreshGoodCloudRemoteAccess()
+        }
+        let competingRefreshCommitted = await competingRefresh.value
+        XCTAssertTrue(competingRefreshCommitted)
+        await routeLoader.release()
+        await load.value
+
+        XCTAssertEqual(fixture.model.state, .authenticated)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 0)
+    }
+
+    func testAssociationSaveFailureDoesNotInvalidateInFlightRouteRefresh() async throws {
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(routeAssociationLoader: routeLoader)
+        await fixture.model.load()
+        fixture.associationBackend.setRaw(Data("corrupt".utf8))
+        await routeLoader.holdNext()
+
+        let refresh = Task { await fixture.connections.refreshGoodCloudRemoteAccess() }
+        try await waitUntil { await routeLoader.isHeld }
+        do {
+            try await fixture.model.associate(deviceID: fixture.device.id)
+            XCTFail("expected corrupt association persistence to throw")
+        } catch {}
+        await routeLoader.release()
+
+        let refreshCommitted = await refresh.value
+        XCTAssertTrue(refreshCommitted)
+    }
+
+    func testAssociationRemoveFailureDoesNotInvalidateInFlightRouteRefresh() async throws {
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(routeAssociationLoader: routeLoader)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        fixture.associationBackend.setRaw(Data("corrupt".utf8))
+        await routeLoader.holdNext()
+
+        let refresh = Task { await fixture.connections.refreshGoodCloudRemoteAccess() }
+        try await waitUntil { await routeLoader.isHeld }
+        do {
+            try await fixture.model.removeAssociation()
+            XCTFail("expected corrupt association persistence to throw")
+        } catch {}
+        await routeLoader.release()
+
+        let refreshCommitted = await refresh.value
+        XCTAssertTrue(refreshCommitted)
+    }
+
+    func testCancellationAfterSuccessfulPublicationRestoresLastCommittedRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(
+            routeRecorder: recorder,
+            routeAssociationLoader: routeLoader
+        )
+        await routeLoader.holdNext()
+
+        let login = Task {
+            await fixture.model.login(email: "owner@example.com", password: "secret")
+        }
+        do {
+            try await waitUntil { await routeLoader.isHeld }
+        } catch {
+            login.cancel()
+            await routeLoader.release()
+            await login.value
+            throw error
+        }
+        login.cancel()
+        await routeLoader.release()
+        await login.value
+
+        XCTAssertEqual(fixture.model.state, .loggedOut)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 0)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+    }
+
+    func testSupersededPublicationRestoresStableRouteWhenNewerOperationCancelsBeforePublishing() async throws {
+        let recorder = SettingsRouteRecorder()
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(
+            routeRecorder: recorder,
+            routeAssociationLoader: routeLoader
+        )
+        try await fixture.associations.save(GoodCloudAssociation(
+            hostID: fixture.host.id,
+            routerMAC: try XCTUnwrap(fixture.host.deviceID),
+            device: fixture.device
+        ))
+        await routeLoader.holdNext()
+        let olderLogin = Task {
+            await fixture.model.login(email: "owner@example.com", password: "older")
+        }
+        try await waitUntil { await routeLoader.isHeld }
+        await fixture.account.holdNextLogin(returning: .authenticated([fixture.device]))
+        let newerLogin = Task {
+            await fixture.model.login(email: "owner@example.com", password: "newer")
+        }
+        try await waitUntil { await fixture.account.loginIsHeld }
+        newerLogin.cancel()
+        await fixture.account.releaseLogin()
+        await newerLogin.value
+        await routeLoader.release()
+        await olderLogin.value
+
+        XCTAssertEqual(fixture.model.state, .loggedOut)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 0)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+    }
+
     private func makeFixture(
         devices: [GoodCloudDeviceSummary] = [defaultDevice],
         clearsSessionOnLogout: Bool = true,
@@ -507,7 +647,8 @@ final class GoodCloudSettingsModelTests: XCTestCase {
             state: .authenticated(devices),
             clearsSessionOnLogout: clearsSessionOnLogout
         )
-        let associations = GoodCloudAssociationStore(backend: SettingsAssociationBackend())
+        let associationBackend = SettingsAssociationBackend()
+        let associations = GoodCloudAssociationStore(backend: associationBackend)
         let provisioner = GoodCloudAccountService.accountOnly(client: SettingsAccountClient())
         let associationLoader: RouterConnectionModel.GoodCloudAssociationLoader?
         if let routeAssociationLoader {
@@ -549,6 +690,7 @@ final class GoodCloudSettingsModelTests: XCTestCase {
             model: model,
             account: account,
             associations: associations,
+            associationBackend: associationBackend,
             connections: connections,
             host: host,
             device: devices[0]
@@ -569,6 +711,7 @@ private struct SettingsFixture {
     let model: GoodCloudSettingsModel
     let account: SettingsAccountService
     let associations: GoodCloudAssociationStore
+    let associationBackend: SettingsAssociationBackend
     let connections: RouterConnectionModel
     let host: RouterHostMetadata
     let device: GoodCloudDeviceSummary
@@ -677,6 +820,10 @@ private final class SettingsAssociationBackend: GoodCloudAssociationKeyValueStor
 
     func set(_ data: Data?, forKey key: String) {
         lock.withLock { values[key] = data }
+    }
+
+    func setRaw(_ data: Data?) {
+        lock.withLock { values["wattline.goodCloudAssociations"] = data }
     }
 }
 
