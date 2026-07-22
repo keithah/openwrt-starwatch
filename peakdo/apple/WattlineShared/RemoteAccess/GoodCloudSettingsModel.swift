@@ -36,6 +36,31 @@ final class GoodCloudSettingsModel {
     private let associations: GoodCloudAssociationStore?
     private let connections: RouterConnectionModel
     private var sessionState: GoodCloudSessionState = .loggedOut
+    private var operationGeneration: UInt64 = 0
+    private var hostGeneration: UInt64 = 0
+
+    private struct Snapshot {
+        let state: State
+        let devices: [GoodCloudDeviceSummary]
+        let association: GoodCloudAssociation?
+        let errorMessage: String?
+        let sessionState: GoodCloudSessionState
+    }
+
+    private struct Operation {
+        let generation: UInt64
+        let routeGeneration: UInt64
+        let hostGeneration: UInt64
+        let prior: Snapshot
+    }
+
+    private var lastCommittedSnapshot = Snapshot(
+        state: .loggedOut,
+        devices: [],
+        association: nil,
+        errorMessage: nil,
+        sessionState: .loggedOut
+    )
 
     init(
         account: (any GoodCloudAccountServing)?,
@@ -85,42 +110,60 @@ final class GoodCloudSettingsModel {
 
     func selectHost(_ hostID: UUID?) {
         guard activeHostID != hostID else { return }
+        hostGeneration &+= 1
+        let generation = hostGeneration
         activeHostID = hostID
         association = nil
+        recordCommittedAssociation(nil)
+        let host = savedHost
         Task { @MainActor [weak self] in
-            await self?.loadAssociation()
+            guard let self else { return }
+            let loaded = await self.associationSnapshot(for: host)
+            guard self.hostGeneration == generation,
+                  self.activeHostID == hostID,
+                  !Task.isCancelled
+            else { return }
+            self.association = loaded
+            self.recordCommittedAssociation(loaded)
         }
     }
 
     func load() async {
+        let operation = beginAccountOperation()
         await connections.reloadSavedHosts(refreshGoodCloudRemoteAccess: false)
-        guard let account else {
-            await accept(.loggedOut)
-            return
+        guard canContinue(operation) else { return }
+        let session: GoodCloudSessionState
+        if let account {
+            session = await account.validateStoredSession()
+            guard canContinue(operation) else { return }
+        } else {
+            session = .loggedOut
         }
-        state = .loading
-        errorMessage = nil
-        await accept(await account.validateStoredSession())
+        await finishAccountOperation(operation, session: session)
     }
 
     func login(email: String, password: String) async {
-        guard let account else {
-            await accept(.failed("GoodCloud request failed."))
-            return
+        let operation = beginAccountOperation()
+        let session: GoodCloudSessionState
+        if let account {
+            session = await account.login(email: email, password: password)
+            guard canContinue(operation) else { return }
+        } else {
+            session = .failed("GoodCloud request failed.")
         }
-        state = .loading
-        errorMessage = nil
-        await accept(await account.login(email: email, password: password))
+        await finishAccountOperation(operation, session: session)
     }
 
     func logout() async {
-        guard let account else {
-            await accept(.loggedOut)
-            return
+        let operation = beginAccountOperation()
+        let session: GoodCloudSessionState
+        if let account {
+            session = await account.logout()
+            guard canContinue(operation) else { return }
+        } else {
+            session = .loggedOut
         }
-        state = .loading
-        errorMessage = nil
-        await accept(await account.logout())
+        await finishAccountOperation(operation, session: session)
     }
 
     func associate(deviceID: String) async throws {
@@ -145,10 +188,20 @@ final class GoodCloudSettingsModel {
             routerMAC: routerMAC,
             device: device
         )
+        let operation = beginMutation()
         try await associations.save(newAssociation)
+        guard canContinue(operation) else { return }
+        await connections.publishGoodCloudRemoteAccess(
+            operation.prior.sessionState,
+            generation: operation.routeGeneration
+        )
+        guard await canCommitAfterRoute(operation) else { return }
+        guard hostGeneration == operation.hostGeneration,
+              savedHost?.id == host.id
+        else { return }
         association = newAssociation
         errorMessage = nil
-        await connections.publishGoodCloudRemoteAccess(sessionState)
+        recordCommittedSnapshot()
     }
 
     func removeAssociation() async throws {
@@ -158,27 +211,135 @@ final class GoodCloudSettingsModel {
         guard let associations else {
             throw GoodCloudSettingsError.associationUnavailable
         }
+        let operation = beginMutation()
         try await associations.remove(hostID: host.id)
+        guard canContinue(operation) else { return }
+        await connections.publishGoodCloudRemoteAccess(
+            operation.prior.sessionState,
+            generation: operation.routeGeneration
+        )
+        guard await canCommitAfterRoute(operation) else { return }
+        guard hostGeneration == operation.hostGeneration,
+              savedHost?.id == host.id
+        else { return }
         association = nil
         errorMessage = nil
-        await connections.publishGoodCloudRemoteAccess(sessionState)
+        recordCommittedSnapshot()
     }
 
-    private func loadAssociation() async {
-        guard let associations, let host = savedHost else {
-            association = nil
+    private func associationSnapshot(for host: RouterHostMetadata?) async -> GoodCloudAssociation? {
+        guard let associations, let host else { return nil }
+        return await associations.association(forHostID: host.id)
+    }
+
+    private func beginAccountOperation() -> Operation {
+        let operation = beginMutation()
+        state = .loading
+        errorMessage = nil
+        return operation
+    }
+
+    private func beginMutation() -> Operation {
+        let prior = lastCommittedSnapshot
+        operationGeneration &+= 1
+        return Operation(
+            generation: operationGeneration,
+            routeGeneration: connections.beginGoodCloudRemoteAccessUpdate(),
+            hostGeneration: hostGeneration,
+            prior: prior
+        )
+    }
+
+    private func finishAccountOperation(
+        _ operation: Operation,
+        session: GoodCloudSessionState
+    ) async {
+        let associationGeneration = hostGeneration
+        let host = savedHost
+        let loadedAssociation = await associationSnapshot(for: host)
+        guard canContinue(operation) else { return }
+        guard hostGeneration == associationGeneration, savedHost?.id == host?.id else {
+            await finishAccountOperation(operation, session: session)
             return
         }
-        let loaded = await associations.association(forHostID: host.id)
-        guard savedHost?.id == host.id else { return }
-        association = loaded
-    }
-
-    private func accept(_ session: GoodCloudSessionState) async {
+        await connections.publishGoodCloudRemoteAccess(
+            session,
+            generation: operation.routeGeneration
+        )
+        guard await canCommitAfterRoute(operation) else { return }
+        guard hostGeneration == associationGeneration, savedHost?.id == host?.id else {
+            await finishAccountOperation(operation, session: session)
+            return
+        }
         sessionState = session
         apply(session)
-        await loadAssociation()
-        await connections.publishGoodCloudRemoteAccess(session)
+        association = loadedAssociation
+        recordCommittedSnapshot()
+    }
+
+    private var snapshot: Snapshot {
+        Snapshot(
+            state: state,
+            devices: devices,
+            association: association,
+            errorMessage: errorMessage,
+            sessionState: sessionState
+        )
+    }
+
+    private func canContinue(_ operation: Operation) -> Bool {
+        guard operationGeneration == operation.generation else { return false }
+        guard !Task.isCancelled else {
+            cancel(operation)
+            return false
+        }
+        return true
+    }
+
+    private func canCommitAfterRoute(_ operation: Operation) async -> Bool {
+        guard operationGeneration == operation.generation else { return false }
+        guard !Task.isCancelled else {
+            let restoreSession = lastCommittedSnapshot.sessionState
+            let restoreGeneration = cancel(operation)
+            let cancelledGeneration = operationGeneration
+            await connections.publishGoodCloudRemoteAccess(
+                restoreSession,
+                generation: restoreGeneration
+            )
+            guard operationGeneration == cancelledGeneration else { return false }
+            return false
+        }
+        return true
+    }
+
+    @discardableResult
+    private func cancel(_ operation: Operation) -> UInt64 {
+        operationGeneration &+= 1
+        let restoreGeneration = connections.beginGoodCloudRemoteAccessUpdate()
+        restore(lastCommittedSnapshot)
+        return restoreGeneration
+    }
+
+    private func restore(_ snapshot: Snapshot) {
+        state = snapshot.state
+        devices = snapshot.devices
+        association = snapshot.association
+        errorMessage = snapshot.errorMessage
+        sessionState = snapshot.sessionState
+    }
+
+    private func recordCommittedSnapshot() {
+        lastCommittedSnapshot = snapshot
+    }
+
+    private func recordCommittedAssociation(_ association: GoodCloudAssociation?) {
+        lastCommittedSnapshot = Snapshot(
+            state: lastCommittedSnapshot.state,
+            devices: lastCommittedSnapshot.devices,
+            association: association,
+            errorMessage: lastCommittedSnapshot.errorMessage,
+            sessionState: lastCommittedSnapshot.sessionState
+        )
     }
 
     private func apply(_ session: GoodCloudSessionState) {

@@ -356,9 +356,18 @@ final class RouterConnectionModel {
         loadError = nil
     }
 
+    func savedHost(matchingDeviceMAC mac: String) async -> RouterHostMetadata? {
+        guard let normalizedMAC = DeviceIdentityDeduplicator.normalizedMAC(mac) else { return nil }
+        let hosts = await hostStore.hosts()
+        let matches = hosts.filter {
+            DeviceIdentityDeduplicator.normalizedMAC($0.deviceID) == normalizedMAC
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
     func refreshGoodCloudRemoteAccess() async {
-        goodCloudRefreshGeneration &+= 1
-        let generation = goodCloudRefreshGeneration
+        let generation = beginGoodCloudRemoteAccessUpdate()
         guard let goodCloudAccount else {
             clearGoodCloudRemoteAccess(ifCurrent: generation)
             return
@@ -368,11 +377,17 @@ final class RouterConnectionModel {
     }
 
     func publishGoodCloudRemoteAccess(_ state: GoodCloudSessionState) async {
-        goodCloudRefreshGeneration &+= 1
-        await publishGoodCloudRemoteAccess(state, generation: goodCloudRefreshGeneration)
+        let generation = beginGoodCloudRemoteAccessUpdate()
+        await publishGoodCloudRemoteAccess(state, generation: generation)
     }
 
-    private func publishGoodCloudRemoteAccess(
+    @discardableResult
+    func beginGoodCloudRemoteAccessUpdate() -> UInt64 {
+        goodCloudRefreshGeneration &+= 1
+        return goodCloudRefreshGeneration
+    }
+
+    func publishGoodCloudRemoteAccess(
         _ state: GoodCloudSessionState,
         generation: UInt64
     ) async {

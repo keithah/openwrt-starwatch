@@ -130,10 +130,10 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         defer { operations.release() }
         let generation = beginOperation()
         state = .loading
-        guard await hasStoredToken() else {
-            return publish(.loggedOut, for: generation)
-        }
         do {
+            guard try await hasStoredToken() else {
+                return publish(.loggedOut, for: generation)
+            }
             let devices = try await loadDevices()
             return publish(.authenticated(devices), for: generation)
         } catch {
@@ -187,6 +187,9 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         let generation = beginOperation()
         do {
             try await clearSession()
+            guard try await !hasStoredToken() else {
+                return publish(.failed(Self.redactedFailure), for: generation)
+            }
             return publish(.loggedOut, for: generation)
         } catch {
             return publish(.failed(Self.redactedFailure), for: generation)
@@ -218,12 +221,12 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         }
     }
 
-    private func hasStoredToken() async -> Bool {
+    private func hasStoredToken() async throws -> Bool {
         if let client {
             return await client.hasStoredToken()
         }
         guard let auth,
-              let token = try? await auth.currentToken()
+              let token = try await auth.currentToken()
         else {
             return false
         }

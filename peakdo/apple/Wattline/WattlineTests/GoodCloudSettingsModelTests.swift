@@ -237,13 +237,250 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         XCTAssertEqual(fixture.model.association?.isOnline, true, "persisted snapshot proves presentation is using fresh device state")
     }
 
+    func testOlderLoadCannotOverwriteNewerLoginUIAssociationOrRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(routeRecorder: recorder)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        let expectedAssociation = try XCTUnwrap(fixture.model.association)
+        await fixture.account.holdNextValidation(returning: .requiresLogin)
+
+        let olderLoad = Task { await fixture.model.load() }
+        try await waitUntil { await fixture.account.validationIsHeld }
+        await fixture.model.login(email: "owner@example.com", password: "secret")
+        await fixture.account.releaseValidation()
+        await olderLoad.value
+
+        XCTAssertEqual(fixture.model.state, .authenticated)
+        XCTAssertEqual(fixture.model.devices, [fixture.device])
+        XCTAssertEqual(fixture.model.association, expectedAssociation)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 0)
+    }
+
+    func testOlderLoginCannotOverwriteNewerLogoutUIAssociationOrRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(routeRecorder: recorder)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        let expectedAssociation = try XCTUnwrap(fixture.model.association)
+        await fixture.account.holdNextLogin(returning: .authenticated([fixture.device]))
+
+        let olderLogin = Task {
+            await fixture.model.login(email: "owner@example.com", password: "secret")
+        }
+        try await waitUntil { await fixture.account.loginIsHeld }
+        await fixture.model.logout()
+        await fixture.account.releaseLogin()
+        await olderLogin.value
+
+        XCTAssertEqual(fixture.model.state, .loggedOut)
+        XCTAssertEqual(fixture.model.devices, [])
+        XCTAssertEqual(fixture.model.association, expectedAssociation)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 0)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+    }
+
+    func testCancelledLoginRestoresPriorUIAndCannotOverwriteAssociationOrRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(routeRecorder: recorder)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        let expectedAssociation = try XCTUnwrap(fixture.model.association)
+        await fixture.account.holdNextLogin(returning: .requiresLogin)
+
+        let login = Task {
+            await fixture.model.login(email: "owner@example.com", password: "secret")
+        }
+        try await waitUntil { await fixture.account.loginIsHeld }
+        login.cancel()
+        await fixture.account.releaseLogin()
+        await login.value
+
+        XCTAssertEqual(fixture.model.state, .authenticated)
+        XCTAssertEqual(fixture.model.devices, [fixture.device])
+        XCTAssertEqual(fixture.model.association, expectedAssociation)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 0)
+    }
+
+    func testCancelledNewerLoginRestoresLastCommittedStateWhileOlderLoadIsPending() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(routeRecorder: recorder)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        let expectedAssociation = try XCTUnwrap(fixture.model.association)
+        await fixture.account.holdNextValidation(returning: .requiresLogin)
+
+        let olderLoad = Task { await fixture.model.load() }
+        do {
+            try await waitUntil { await fixture.account.validationIsHeld }
+        } catch {
+            await fixture.account.releaseValidation()
+            await olderLoad.value
+            throw error
+        }
+        await fixture.account.holdNextLogin(returning: .requiresLogin)
+        let newerLogin = Task {
+            await fixture.model.login(email: "owner@example.com", password: "secret")
+        }
+        do {
+            try await waitUntil { await fixture.account.loginIsHeld }
+        } catch {
+            newerLogin.cancel()
+            await fixture.account.releaseLogin()
+            await fixture.account.releaseValidation()
+            await newerLogin.value
+            await olderLoad.value
+            throw error
+        }
+        newerLogin.cancel()
+        await fixture.account.releaseLogin()
+        await newerLogin.value
+        await fixture.account.releaseValidation()
+        await olderLoad.value
+
+        XCTAssertEqual(fixture.model.state, .authenticated)
+        XCTAssertEqual(fixture.model.devices, [fixture.device])
+        XCTAssertEqual(fixture.model.association, expectedAssociation)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 0)
+    }
+
+    func testHostSelectionDuringStoredSessionValidationDoesNotDiscardAccountResult() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(additionalHost: true, routeRecorder: recorder)
+        try await fixture.associations.save(GoodCloudAssociation(
+            hostID: fixture.host.id,
+            routerMAC: try XCTUnwrap(fixture.host.deviceID),
+            device: fixture.device
+        ))
+        await fixture.account.holdNextValidation(returning: .authenticated([fixture.device]))
+
+        let load = Task { await fixture.model.load() }
+        do {
+            try await waitUntil { await fixture.account.validationIsHeld }
+        } catch {
+            await fixture.account.releaseValidation()
+            await load.value
+            throw error
+        }
+        fixture.model.selectHost(fixture.host.id)
+        await fixture.account.releaseValidation()
+        await load.value
+
+        XCTAssertEqual(fixture.model.activeHostID, fixture.host.id)
+        XCTAssertEqual(fixture.model.state, .authenticated)
+        XCTAssertEqual(fixture.model.devices, [fixture.device])
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 0)
+    }
+
+    func testCancelledAccountOperationKeepsAssociationCommittedByNewerHostSelection() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(additionalHost: true, routeRecorder: recorder)
+        let secondHost = try XCTUnwrap(
+            fixture.connections.savedHosts.first { $0.id != fixture.host.id }
+        )
+        let firstAssociation = GoodCloudAssociation(
+            hostID: fixture.host.id,
+            routerMAC: try XCTUnwrap(fixture.host.deviceID),
+            device: fixture.device
+        )
+        let secondAssociation = GoodCloudAssociation(
+            hostID: secondHost.id,
+            routerMAC: try XCTUnwrap(secondHost.deviceID),
+            device: fixture.device
+        )
+        try await fixture.associations.save(firstAssociation)
+        try await fixture.associations.save(secondAssociation)
+        fixture.model.selectHost(fixture.host.id)
+        await fixture.model.load()
+        XCTAssertEqual(fixture.model.association, firstAssociation)
+        await fixture.account.holdNextLogin(returning: .requiresLogin)
+
+        let login = Task {
+            await fixture.model.login(email: "owner@example.com", password: "secret")
+        }
+        do {
+            try await waitUntil { await fixture.account.loginIsHeld }
+        } catch {
+            login.cancel()
+            await fixture.account.releaseLogin()
+            await login.value
+            throw error
+        }
+        fixture.model.selectHost(secondHost.id)
+        try await waitUntil { await fixture.model.association?.hostID == secondHost.id }
+        login.cancel()
+        await fixture.account.releaseLogin()
+        await login.value
+
+        XCTAssertEqual(fixture.model.activeHostID, secondHost.id)
+        XCTAssertEqual(fixture.model.state, .authenticated)
+        XCTAssertEqual(fixture.model.association, secondAssociation)
+        _ = try fixture.connections.makeTransport(for: secondHost)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 0)
+    }
+
+    func testHostSwitchDuringAssociationRouteRefreshCannotPublishOldHostAssociationInUI() async throws {
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(
+            additionalHost: true,
+            routeAssociationLoader: routeLoader
+        )
+        let secondHost = try XCTUnwrap(
+            fixture.connections.savedHosts.first { $0.id != fixture.host.id }
+        )
+        fixture.model.selectHost(fixture.host.id)
+        await fixture.model.load()
+        await routeLoader.holdNext()
+
+        let association = Task {
+            try await fixture.model.associate(deviceID: fixture.device.id)
+        }
+        do {
+            try await waitUntil { await routeLoader.isHeld }
+        } catch {
+            association.cancel()
+            await routeLoader.release()
+            _ = try? await association.value
+            throw error
+        }
+        fixture.model.selectHost(secondHost.id)
+        await routeLoader.release()
+        try await association.value
+
+        XCTAssertEqual(fixture.model.activeHostID, secondHost.id)
+        XCTAssertNil(fixture.model.association)
+    }
+
+    func testImplicitSingleHostCanAssociateWithoutExplicitActiveHostID() async throws {
+        let fixture = try await makeFixture(implicitSingleHost: true)
+        await fixture.model.load()
+
+        XCTAssertNil(fixture.model.activeHostID)
+        XCTAssertEqual(fixture.model.savedHost, fixture.host)
+        try await fixture.model.associate(deviceID: fixture.device.id)
+
+        XCTAssertEqual(fixture.model.association?.hostID, fixture.host.id)
+    }
+
     private func makeFixture(
         devices: [GoodCloudDeviceSummary] = [defaultDevice],
         clearsSessionOnLogout: Bool = true,
         additionalHost: Bool = false,
         reloadConnections: Bool = true,
         hostID: UUID? = nil,
-        routeRecorder: SettingsRouteRecorder? = nil
+        routeRecorder: SettingsRouteRecorder? = nil,
+        routeAssociationLoader: SettingsRouteAssociationLoader? = nil,
+        implicitSingleHost: Bool = false
     ) async throws -> SettingsFixture {
         let host = try RouterHostValidator.validate(
             "192.168.8.1:8377",
@@ -272,6 +509,12 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         )
         let associations = GoodCloudAssociationStore(backend: SettingsAssociationBackend())
         let provisioner = GoodCloudAccountService.accountOnly(client: SettingsAccountClient())
+        let associationLoader: RouterConnectionModel.GoodCloudAssociationLoader?
+        if let routeAssociationLoader {
+            associationLoader = { await routeAssociationLoader.load(from: associations) }
+        } else {
+            associationLoader = nil
+        }
         let connections = RouterConnectionModel(
             hostStore: hostStore,
             credentialStore: RouterCredentialStore(backend: SettingsCredentialBackend()),
@@ -282,6 +525,7 @@ final class GoodCloudSettingsModelTests: XCTestCase {
             },
             goodCloudAccount: .init(account: account, provisioner: provisioner),
             goodCloudAssociations: associations,
+            goodCloudAssociationLoader: associationLoader,
             preferredTransportFactory: { _, _, _, _ in
                 if let routeRecorder { return routeRecorder.makePreferredTransport() }
                 throw NetworkError.unsupported("not used")
@@ -299,7 +543,7 @@ final class GoodCloudSettingsModelTests: XCTestCase {
             account: account,
             associations: associations,
             connections: connections,
-            hostID: hostID ?? (additionalHost ? nil : host.id)
+            hostID: implicitSingleHost ? nil : hostID ?? (additionalHost ? nil : host.id)
         )
         return SettingsFixture(
             model: model,
@@ -343,8 +587,12 @@ private actor SettingsAccountService: GoodCloudAccountServing {
     private(set) var loginCount = 0
     private let clearsSessionOnLogout: Bool
     private var holdLogin = false
+    private var heldLoginResult: GoodCloudSessionState?
     private var loginContinuation: CheckedContinuation<Void, Never>?
     private(set) var loginIsHeld = false
+    private var heldValidationResult: GoodCloudSessionState?
+    private var validationContinuation: CheckedContinuation<Void, Never>?
+    private(set) var validationIsHeld = false
 
     init(state: GoodCloudSessionState, clearsSessionOnLogout: Bool) {
         currentState = state
@@ -353,6 +601,13 @@ private actor SettingsAccountService: GoodCloudAccountServing {
 
     func validateStoredSession() async -> GoodCloudSessionState {
         validationCount += 1
+        if let result = heldValidationResult {
+            heldValidationResult = nil
+            validationIsHeld = true
+            await withCheckedContinuation { validationContinuation = $0 }
+            validationIsHeld = false
+            return result
+        }
         return currentState
     }
 
@@ -364,6 +619,10 @@ private actor SettingsAccountService: GoodCloudAccountServing {
             loginIsHeld = true
             await withCheckedContinuation { loginContinuation = $0 }
             loginIsHeld = false
+        }
+        if let result = heldLoginResult {
+            heldLoginResult = nil
+            return result
         }
         return currentState
     }
@@ -384,9 +643,20 @@ private actor SettingsAccountService: GoodCloudAccountServing {
     func recordedLoginCount() -> Int { loginCount }
     func setState(_ state: GoodCloudSessionState) { currentState = state }
     func holdNextLogin() { holdLogin = true }
+    func holdNextLogin(returning result: GoodCloudSessionState) {
+        heldLoginResult = result
+        holdLogin = true
+    }
     func releaseLogin() {
         loginContinuation?.resume()
         loginContinuation = nil
+    }
+    func holdNextValidation(returning result: GoodCloudSessionState) {
+        heldValidationResult = result
+    }
+    func releaseValidation() {
+        validationContinuation?.resume()
+        validationContinuation = nil
     }
 }
 
@@ -492,4 +762,29 @@ private actor SettingsNoopTransport: DeviceTransport {
     func refreshTelemetry() async throws {}
     func synchronizeDeviceTime() async throws {}
     func readDeviceTimeIfSupported() async throws -> Date? { nil }
+}
+
+private actor SettingsRouteAssociationLoader {
+    private var shouldHold = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var isHeld = false
+
+    func holdNext() {
+        shouldHold = true
+    }
+
+    func load(from store: GoodCloudAssociationStore) async -> [GoodCloudAssociation] {
+        if shouldHold {
+            shouldHold = false
+            isHeld = true
+            await withCheckedContinuation { continuation = $0 }
+            isHeld = false
+        }
+        return await store.allAssociations()
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }

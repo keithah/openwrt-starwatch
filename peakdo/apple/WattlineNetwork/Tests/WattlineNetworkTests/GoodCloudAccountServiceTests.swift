@@ -24,6 +24,17 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         XCTAssertEqual(state, .authenticated([.fixture]))
     }
 
+    func test_validateStoredSessionFailsWhenGoodCloudAuthTokenReadThrows() async {
+        let credentials = LogoutVerificationFailingCredentialStore()
+        let auth = GoodCloudAuth(credentials: credentials)
+        let service = GoodCloudAccountService(auth: auth)
+
+        let result = await service.validateStoredSession()
+
+        XCTAssertEqual(result, .failed("GoodCloud request failed."))
+        XCTAssertFalse(String(describing: result).contains("secret-token"))
+    }
+
     func test_loginAuthenticatesThenLoadsDevices() async {
         let client = FakeGoodCloudAccountClient(tokenPresent: false, devices: [.fixture])
         let service = GoodCloudAccountService(client: client)
@@ -109,6 +120,33 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         XCTAssertEqual(state, .failed("GoodCloud request failed."))
         XCTAssertEqual(logoutCount, 1)
         XCTAssertFalse(String(describing: state).contains("secret"))
+    }
+
+    func test_logoutFailsWhenInjectedClientLeavesStoredTokenBehind() async {
+        let client = FakeGoodCloudAccountClient(
+            tokenPresent: true,
+            logoutClearsToken: false
+        )
+        let service = GoodCloudAccountService(client: client)
+
+        let result = await service.logout()
+        let tokenRemains = await client.hasStoredToken()
+
+        XCTAssertEqual(result, .failed("GoodCloud request failed."))
+        XCTAssertTrue(tokenRemains)
+        XCTAssertFalse(String(describing: result).contains("secret"))
+    }
+
+    func test_logoutFailsWhenGoodCloudAuthTokenVerificationThrows() async {
+        let credentials = LogoutVerificationFailingCredentialStore()
+        let auth = GoodCloudAuth(credentials: credentials)
+        let service = GoodCloudAccountService(auth: auth)
+
+        let result = await service.logout()
+
+        XCTAssertEqual(result, .failed("GoodCloud request failed."))
+        XCTAssertEqual(credentials.deleteCount, 1)
+        XCTAssertFalse(String(describing: result).contains("secret-token"))
     }
 
     func test_remoteAccessUsesInjectedProvisioner() async throws {
@@ -296,10 +334,11 @@ private actor FakeGoodCloudAccountClient: GoodCloudAccountClient {
         let password: String
     }
 
-    let tokenPresent: Bool
+    private var tokenPresent: Bool
     let returnedDevices: [GoodCloudDeviceSummary]
     let error: (any Error)?
     let logoutError: (any Error)?
+    let logoutClearsToken: Bool
     private(set) var loginArguments: LoginArguments?
     private(set) var devicesCount = 0
     private(set) var logoutCount = 0
@@ -308,12 +347,14 @@ private actor FakeGoodCloudAccountClient: GoodCloudAccountClient {
         tokenPresent: Bool,
         devices: [GoodCloudDeviceSummary] = [],
         error: (any Error)? = nil,
-        logoutError: (any Error)? = nil
+        logoutError: (any Error)? = nil,
+        logoutClearsToken: Bool = true
     ) {
         self.tokenPresent = tokenPresent
         self.returnedDevices = devices
         self.error = error
         self.logoutError = logoutError
+        self.logoutClearsToken = logoutClearsToken
     }
 
     func hasStoredToken() -> Bool { tokenPresent }
@@ -332,6 +373,26 @@ private actor FakeGoodCloudAccountClient: GoodCloudAccountClient {
     func logout() throws {
         logoutCount += 1
         if let logoutError { throw logoutError }
+        if logoutClearsToken { tokenPresent = false }
+    }
+}
+
+private final class LogoutVerificationFailingCredentialStore: CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedDeleteCount = 0
+
+    var deleteCount: Int {
+        lock.withLock { storedDeleteCount }
+    }
+
+    func save(_ credentials: Credentials) throws {}
+
+    func load() throws -> Credentials? {
+        throw GoodCloudError.api(code: 500, message: "secret-token")
+    }
+
+    func delete() throws {
+        lock.withLock { storedDeleteCount += 1 }
     }
 }
 
@@ -350,6 +411,7 @@ private actor RemoteAccessRecorder {
 
 private actor SuspendedGoodCloudAccountClient: GoodCloudAccountClient {
     private let subsequentDevicesError: GoodCloudError?
+    private var storedToken = true
     private var devicesInvocationCount = 0
     private var firstDevicesContinuation: CheckedContinuation<[GoodCloudDeviceSummary], any Error>?
     private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -358,7 +420,7 @@ private actor SuspendedGoodCloudAccountClient: GoodCloudAccountClient {
         self.subsequentDevicesError = subsequentDevicesError
     }
 
-    func hasStoredToken() -> Bool { true }
+    func hasStoredToken() -> Bool { storedToken }
 
     func login(email: String, password: String) {}
 
@@ -376,7 +438,7 @@ private actor SuspendedGoodCloudAccountClient: GoodCloudAccountClient {
         return []
     }
 
-    func logout() throws {}
+    func logout() throws { storedToken = false }
 
     func waitUntilFirstDevicesSuspends() async {
         guard firstDevicesContinuation == nil else { return }

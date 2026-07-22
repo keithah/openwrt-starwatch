@@ -155,7 +155,7 @@ struct ScanView: View {
     private func perform(_ action: ScanPrimaryAction, record: AppDeviceConnectionRecord) {
         switch action {
         case .connectBluetooth:
-            if let device = record.bluetoothDevice { model.choose(device) }
+            model.choose(record)
         case .connectRouter:
             if let host = record.routerHost { model.connectViaRouter(host) }
         case .enrollRouter:

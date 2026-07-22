@@ -264,6 +264,169 @@ final class RouterAppWiringTests: XCTestCase {
         XCTAssertEqual(connectCount, 1)
     }
 
+    func testBluetoothPreferredRecordSelectsItsMatchingGoodCloudRouterWithoutCreatingAnotherBluetoothOwner() async throws {
+        var routerFactoryCount = 0
+        let fixture = makeFixture(transportFactory: { _, _ in
+            routerFactoryCount += 1
+            return RouterSelectionTransport(identity: self.identity(mac: nil, cid: nil))
+        })
+        let selectedHost = try host(
+            name: "Kitchen router",
+            address: "192.168.8.1:8377",
+            mac: "DC:04:5A:EB:72:2B"
+        )
+        let otherHost = try host(
+            name: "Cabin router",
+            address: "192.168.9.1:8377",
+            mac: "AA:BB:CC:DD:EE:FF"
+        )
+        try await fixture.hostStore.save(selectedHost)
+        try await fixture.hostStore.save(otherHost)
+        await fixture.model.reloadSavedHosts()
+
+        let bluetoothTransport = RouterSelectionTransport(
+            identity: identity(mac: selectedHost.deviceID, cid: 0x0302)
+        )
+        var bluetoothFactoryCount = 0
+        let model = AppModel(
+            persistence: testPersistence(),
+            transportFactory: {
+                bluetoothFactoryCount += 1
+                return bluetoothTransport
+            },
+            snapshotCoordinator: nil,
+            widgetReloadAdapter: nil,
+            liveActivityAdapter: RouterNoopLiveActivityAdapter(),
+            routerConnections: fixture.model
+        )
+        model.requestBluetoothAfterPriming()
+
+        let bluetoothDevice = DiscoveredDevice(
+            id: UUID(),
+            localName: "Link-Power",
+            rssi: -40,
+            mode: .application
+        )
+        let cachedIdentity = AppModel.CachedIdentity(
+            advertisedName: bluetoothDevice.localName,
+            deviceInformationName: "Link-Power 2",
+            macAddress: selectedHost.deviceID
+        )
+        let record = try XCTUnwrap(fixture.model.scanRecords(
+            bluetooth: [bluetoothDevice],
+            identities: [bluetoothDevice.id: cachedIdentity]
+        ).first { $0.bluetoothDevice?.id == bluetoothDevice.id })
+        XCTAssertEqual(record.preferredTransport, .bluetooth)
+        XCTAssertEqual(record.routerHost?.id, selectedHost.id)
+
+        model.choose(record)
+        try await waitUntil { await bluetoothTransport.connectCount == 1 }
+
+        XCTAssertEqual(model.goodCloudSettings.activeHostID, selectedHost.id)
+        XCTAssertEqual(model.activeTransportKind, .bluetooth)
+        XCTAssertEqual(routerFactoryCount, 0)
+        XCTAssertEqual(bluetoothFactoryCount, 1, "record selection must keep the existing single BLE owner")
+
+        let unmatchedDevice = DiscoveredDevice(
+            id: UUID(),
+            localName: "Unmatched Link-Power",
+            rssi: -45,
+            mode: .application
+        )
+        let unmatchedRecord = try XCTUnwrap(fixture.model.scanRecords(
+            bluetooth: [unmatchedDevice],
+            identities: [
+                unmatchedDevice.id: AppModel.CachedIdentity(
+                    advertisedName: unmatchedDevice.localName,
+                    deviceInformationName: "Link-Power 2",
+                    macAddress: "77:88:99:AA:BB:CC"
+                ),
+            ]
+        ).first { $0.bluetoothDevice?.id == unmatchedDevice.id })
+        XCTAssertNil(unmatchedRecord.routerHost)
+
+        model.choose(unmatchedRecord)
+        try await waitUntil { await bluetoothTransport.connectCount == 2 }
+
+        XCTAssertNil(model.goodCloudSettings.activeHostID)
+        XCTAssertEqual(bluetoothFactoryCount, 1, "switching BLE devices must retain exactly one BLE owner")
+    }
+
+    func testReturningBluetoothSessionSelectsMatchingGoodCloudRouterWithTwoSavedHosts() async throws {
+        var routerFactoryCount = 0
+        let fixture = makeFixture(transportFactory: { _, _ in
+            routerFactoryCount += 1
+            return RouterSelectionTransport(identity: self.identity(mac: nil, cid: nil))
+        })
+        let selectedHost = try host(
+            name: "Kitchen router",
+            address: "192.168.8.1:8377",
+            mac: "DC:04:5A:EB:72:2B"
+        )
+        let otherHost = try host(
+            name: "Cabin router",
+            address: "192.168.9.1:8377",
+            mac: "AA:BB:CC:DD:EE:FF"
+        )
+        try await fixture.hostStore.save(selectedHost)
+        try await fixture.hostStore.save(otherHost)
+
+        let peripheralID = UUID()
+        let persistence = testPersistence()
+        persistence.onboardingComplete = true
+        persistence.lastSuccessfulPeripheralID = peripheralID
+        persistence.saveKnownDevices([
+            peripheralID: AppModel.CachedIdentity(
+                advertisedName: "Link-Power",
+                deviceInformationName: "Link-Power 2",
+                macAddress: selectedHost.deviceID
+            ),
+        ])
+        let bluetoothTransport = RouterSelectionTransport(
+            identity: identity(id: peripheralID, mac: selectedHost.deviceID, cid: 0x0302)
+        )
+        var bluetoothFactoryCount = 0
+
+        let model = AppModel(
+            persistence: persistence,
+            transportFactory: {
+                bluetoothFactoryCount += 1
+                return bluetoothTransport
+            },
+            snapshotCoordinator: nil,
+            widgetReloadAdapter: nil,
+            liveActivityAdapter: RouterNoopLiveActivityAdapter(),
+            routerConnections: fixture.model
+        )
+        try await waitUntil { await model.goodCloudSettings.activeHostID != nil }
+
+        XCTAssertEqual(model.goodCloudSettings.activeHostID, selectedHost.id)
+        XCTAssertEqual(model.activeTransportKind, .bluetooth)
+        XCTAssertEqual(routerFactoryCount, 0)
+        XCTAssertEqual(bluetoothFactoryCount, 1, "returning session must retain exactly one BLE owner")
+    }
+
+    func testReturningHostLookupRejectsDuplicateMACAmbiguity() async throws {
+        let fixture = makeFixture()
+        let first = try host(
+            name: "Kitchen LAN",
+            address: "192.168.8.1:8377",
+            mac: "DC:04:5A:EB:72:2B"
+        )
+        let second = try host(
+            name: "Kitchen VPN",
+            address: "kitchen.tailnet.ts.net:8377",
+            reachability: .vpn,
+            mac: "dc-04-5a-eb-72-2b"
+        )
+        try await fixture.hostStore.save(first)
+        try await fixture.hostStore.save(second)
+
+        let match = await fixture.model.savedHost(matchingDeviceMAC: "DC045AEB722B")
+
+        XCTAssertNil(match)
+    }
+
     func testProductionUsesOneGoodCloudServiceForAssociatedRouterWithoutCreatingBLEOwner() async throws {
         let suite = "RouterAppWiringTests.GoodCloud.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

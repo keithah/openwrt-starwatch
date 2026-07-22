@@ -340,7 +340,12 @@ final class AppModel {
         route = onboardingComplete ? .scan : .onboarding
         knownDevices = persistence.loadKnownDevices()
 
-        Task { await self.goodCloudSettings.load() }
+        Task {
+            if onboardingComplete {
+                await self.selectReturningSessionGoodCloudHost()
+            }
+            await self.goodCloudSettings.load()
+        }
 
         if persistence.systemSurfacePreferences.lowBatteryEnabled {
             Task { @MainActor [weak self] in
@@ -805,6 +810,12 @@ final class AppModel {
         }
     }
 
+    func choose(_ record: AppDeviceConnectionRecord) {
+        guard let device = record.bluetoothDevice else { return }
+        goodCloudSettings.selectHost(record.routerHost?.id)
+        choose(device)
+    }
+
     func retryConnection() {
         guard let selectedPeripheralID,
               let context = beginOperationForCurrentTransport()
@@ -1039,6 +1050,16 @@ final class AppModel {
                 }
             }
         }
+    }
+
+    private func selectReturningSessionGoodCloudHost() async {
+        guard let storedID = persistence.lastSuccessfulPeripheralID,
+              let mac = knownDevices[storedID]?.macAddress,
+              let host = await routerConnections.savedHost(matchingDeviceMAC: mac),
+              selectedPeripheralID == storedID,
+              activeTransportKind == .bluetooth
+        else { return }
+        goodCloudSettings.selectHost(host.id)
     }
 
     @discardableResult
