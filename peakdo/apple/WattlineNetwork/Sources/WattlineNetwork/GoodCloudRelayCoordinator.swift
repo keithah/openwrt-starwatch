@@ -70,6 +70,7 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
     private var currentSession: RemoteAccessSession?
     private var sessionGeneration: UInt64 = 0
     private var provisioning: Provisioning?
+    private var hasStartedSSEBatch = false
 
     public init(
         deviceID: String,
@@ -195,7 +196,8 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
         headers: [String: String],
         body: Data?
     ) async -> AsyncThrowingStream<RemoteRelayStreamEvent, Error> {
-        AsyncThrowingStream { continuation in
+        beginSSEBatch()
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 var attempt = 0
                 do {
@@ -241,6 +243,14 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func beginSSEBatch() {
+        if hasStartedSSEBatch {
+            currentSession = nil
+        } else {
+            hasStartedSSEBatch = true
         }
     }
 

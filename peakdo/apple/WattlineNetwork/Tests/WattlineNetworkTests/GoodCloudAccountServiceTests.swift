@@ -191,6 +191,21 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         }
     }
 
+    func test_remoteAccessMinus1010PublishesRedactedRequiresLoginUpdate() async {
+        let client = FakeGoodCloudAccountClient(tokenPresent: true)
+        let service = GoodCloudAccountService(client: client) { _, _ in
+            throw GoodCloudError.api(code: -1010, message: "FE_TOKEN=secret")
+        }
+        let updates = service.stateUpdates()
+        var iterator = updates.makeAsyncIterator()
+
+        _ = try? await service.remoteAccess(deviceID: "device-42", port: 8377)
+
+        let update = await iterator.next()
+        XCTAssertEqual(update, .requiresLogin)
+        XCTAssertFalse(String(describing: update).contains("secret"))
+    }
+
     func test_remoteAccessOtherAPIErrorMapsToFixedSafeError() async {
         let client = FakeGoodCloudAccountClient(tokenPresent: true)
         let service = GoodCloudAccountService(client: client) { _, _ in

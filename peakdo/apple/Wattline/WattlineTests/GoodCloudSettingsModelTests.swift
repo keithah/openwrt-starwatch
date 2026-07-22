@@ -763,6 +763,49 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         XCTAssertEqual(recorder.directTransportCount, 1)
     }
 
+    func testRuntimeSessionExpiryUpdatesUIAndDisablesRemoteRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(routeRecorder: recorder)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+
+        await fixture.account.emitRuntimeState(.requiresLogin)
+        try await waitUntil { await fixture.model.state == .requiresLogin }
+
+        XCTAssertNotNil(fixture.model.association, "device mapping remains persisted")
+        XCTAssertEqual(
+            fixture.model.errorMessage,
+            "Your GoodCloud session ended. Sign in again."
+        )
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+    }
+
+    func testRuntimeSessionExpirySupersedesCancelledOlderLoginWithoutRestoringRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let fixture = try await makeFixture(routeRecorder: recorder)
+        await fixture.model.load()
+        try await fixture.model.associate(deviceID: fixture.device.id)
+        await fixture.account.holdNextLogin(returning: .authenticated([fixture.device]))
+        let olderLogin = Task {
+            await fixture.model.login(email: "owner@example.com", password: "private")
+        }
+        try await waitUntil { await fixture.account.loginIsHeld }
+
+        olderLogin.cancel()
+        await fixture.account.emitRuntimeState(.requiresLogin)
+        try await waitUntil { await fixture.model.state == .requiresLogin }
+        await fixture.account.releaseLogin()
+        await olderLogin.value
+
+        XCTAssertEqual(fixture.model.state, .requiresLogin)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+        XCTAssertEqual(recorder.preferredTransportCount, 0)
+    }
+
     private func makeFixture(
         devices: [GoodCloudDeviceSummary] = [defaultDevice],
         clearsSessionOnLogout: Bool = true,
@@ -895,6 +938,7 @@ private actor SettingsAccountService: GoodCloudAccountServing {
     private var heldValidationResult: GoodCloudSessionState?
     private var validationContinuation: CheckedContinuation<Void, Never>?
     private(set) var validationIsHeld = false
+    private nonisolated let stateBroadcaster = SettingsAccountStateBroadcaster()
 
     init(state: GoodCloudSessionState, clearsSessionOnLogout: Bool) {
         currentState = state
@@ -931,6 +975,10 @@ private actor SettingsAccountService: GoodCloudAccountServing {
 
     func refreshDevices() async -> GoodCloudSessionState { currentState }
 
+    nonisolated func stateUpdates() -> AsyncStream<GoodCloudSessionState> {
+        stateBroadcaster.stream()
+    }
+
     func logout() async -> GoodCloudSessionState {
         logoutCount += 1
         if clearsSessionOnLogout {
@@ -964,6 +1012,31 @@ private actor SettingsAccountService: GoodCloudAccountServing {
     func releaseValidation() {
         validationContinuation?.resume()
         validationContinuation = nil
+    }
+
+    func emitRuntimeState(_ state: GoodCloudSessionState) {
+        currentState = state
+        stateBroadcaster.publish(state)
+    }
+}
+
+private final class SettingsAccountStateBroadcaster: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [UUID: AsyncStream<GoodCloudSessionState>.Continuation] = [:]
+
+    func stream() -> AsyncStream<GoodCloudSessionState> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            lock.withLock { continuations[id] = continuation }
+            continuation.onTermination = { [weak self] _ in
+                self?.lock.withLock { self?.continuations[id] = nil }
+            }
+        }
+    }
+
+    func publish(_ state: GoodCloudSessionState) {
+        let continuations = lock.withLock { Array(self.continuations.values) }
+        continuations.forEach { $0.yield(state) }
     }
 }
 

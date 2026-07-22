@@ -183,6 +183,74 @@ final class GoodCloudRelayCoordinatorTests: XCTestCase {
         XCTAssertEqual(provisionCount, 2)
     }
 
+    func test_eachSSEReconnectAfterInitialSharedBatchProvisionsFreshSession() async throws {
+        let relay = ScriptedRemoteRelayClient(
+            requestResults: [.success((Data(), .ok))],
+            streamResults: [[], []]
+        )
+        let provisioner = CountingRelayProvisioner()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in relay }
+        )
+
+        _ = try await coordinator.request(
+            method: "GET",
+            path: "/api/v1/status",
+            headers: [:],
+            body: nil
+        )
+        for _ in 0..<2 {
+            let stream = await coordinator.stream(
+                method: "GET",
+                path: "/api/v1/events",
+                headers: [:],
+                body: nil
+            )
+            for try await _ in stream {}
+        }
+
+        let provisionCount = await provisioner.callCount
+        let streamCount = await relay.streamCount
+        XCTAssertEqual(provisionCount, 2)
+        XCTAssertEqual(streamCount, 2)
+    }
+
+    func test_newSSEBatchNeverReplaysPriorMutation() async throws {
+        let relay = ScriptedRemoteRelayClient(
+            requestResults: [.success((Data(), .ok))],
+            streamResults: [[], []]
+        )
+        let provisioner = CountingRelayProvisioner()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in relay }
+        )
+
+        _ = try await coordinator.request(
+            method: "POST",
+            path: "/api/v1/device/action",
+            headers: [:],
+            body: Data("{}".utf8)
+        )
+        for _ in 0..<2 {
+            let stream = await coordinator.stream(
+                method: "GET",
+                path: "/api/v1/events",
+                headers: [:],
+                body: nil
+            )
+            for try await _ in stream {}
+        }
+
+        let requestCount = await relay.requestCount
+        XCTAssertEqual(requestCount, 1)
+        let provisionCount = await provisioner.callCount
+        XCTAssertEqual(provisionCount, 2)
+    }
+
     func test_cancelledMutationWaitingForSharedProvisioningNeverDispatchesRelay() async throws {
         let provisioner = SuspendedRelayProvisioner()
         let relay = DispatchRecordingRemoteRelayClient()

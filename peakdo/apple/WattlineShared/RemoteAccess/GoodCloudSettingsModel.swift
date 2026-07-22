@@ -38,6 +38,7 @@ final class GoodCloudSettingsModel {
     private var sessionState: GoodCloudSessionState = .loggedOut
     private var operationGeneration: UInt64 = 0
     private var hostGeneration: UInt64 = 0
+    private let accountObservation = GoodCloudAccountObservation()
 
     private struct Snapshot {
         let state: State
@@ -72,6 +73,15 @@ final class GoodCloudSettingsModel {
         self.associations = associations
         self.connections = connections
         activeHostID = hostID
+        if let account {
+            let updates = account.stateUpdates()
+            accountObservation.task = Task { @MainActor [weak self] in
+                for await update in updates {
+                    guard !Task.isCancelled, let self else { return }
+                    await self.applyObservedAccountState(update)
+                }
+            }
+        }
     }
 
     convenience init(connections: RouterConnectionModel, hostID: UUID? = nil) {
@@ -281,6 +291,24 @@ final class GoodCloudSettingsModel {
         recordCommittedSnapshot()
     }
 
+    private func applyObservedAccountState(_ session: GoodCloudSessionState) async {
+        let operation = beginMutation()
+        let associationGeneration = hostGeneration
+        let host = savedHost
+
+        // Authentication loss must disable the remote route before any
+        // persistence read can suspend. LAN and BLE state are untouched.
+        guard await publishRoute(session, for: operation) else { return }
+        let loadedAssociation = await associationSnapshot(for: host)
+        guard canContinue(operation) else { return }
+        guard hostGeneration == associationGeneration, savedHost?.id == host?.id else { return }
+
+        sessionState = session
+        apply(session)
+        association = loadedAssociation
+        recordCommittedSnapshot()
+    }
+
     private var snapshot: Snapshot {
         Snapshot(
             state: state,
@@ -368,6 +396,14 @@ final class GoodCloudSettingsModel {
             devices = []
         }
         errorMessage = GoodCloudSettingsPresentation(modelState: newState).message
+    }
+}
+
+private final class GoodCloudAccountObservation {
+    var task: Task<Void, Never>?
+
+    deinit {
+        task?.cancel()
     }
 }
 

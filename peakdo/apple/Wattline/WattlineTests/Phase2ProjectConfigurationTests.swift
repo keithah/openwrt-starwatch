@@ -13,7 +13,7 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         )
         XCTAssertTrue(package.contains("https://github.com/keithah/goodcloudkit"))
         XCTAssertTrue(package.contains(
-            "revision: \"e8e1518e8d29a0ce73697bf4f93a72fc49cf53a6\""
+            "revision: \"66226f7fb23876d273029a13d0a799bf8aa8cc7c\""
         ))
         XCTAssertFalse(package.contains("branch:"))
         XCTAssertFalse(package.contains("from: \"0.1.0\""))

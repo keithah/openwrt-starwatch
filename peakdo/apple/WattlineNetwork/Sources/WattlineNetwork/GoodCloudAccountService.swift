@@ -57,6 +57,13 @@ public protocol GoodCloudAccountServing: Sendable {
     func login(email: String, password: String) async -> GoodCloudSessionState
     func refreshDevices() async -> GoodCloudSessionState
     @discardableResult func logout() async -> GoodCloudSessionState
+    func stateUpdates() -> AsyncStream<GoodCloudSessionState>
+}
+
+public extension GoodCloudAccountServing {
+    func stateUpdates() -> AsyncStream<GoodCloudSessionState> {
+        AsyncStream { $0.finish() }
+    }
 }
 
 public protocol GoodCloudRelayProvisioning: Sendable {
@@ -65,6 +72,7 @@ public protocol GoodCloudRelayProvisioning: Sendable {
 
 public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayProvisioning {
     public private(set) var state: GoodCloudSessionState = .loggedOut
+    private nonisolated let stateBroadcaster = GoodCloudAccountStateBroadcaster()
     private var operationGeneration: UInt64 = 0
 
     private static let redactedFailure = "GoodCloud request failed."
@@ -221,6 +229,10 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         }
     }
 
+    public nonisolated func stateUpdates() -> AsyncStream<GoodCloudSessionState> {
+        stateBroadcaster.stream()
+    }
+
     private func hasStoredToken() async throws -> Bool {
         if let client {
             return await client.hasStoredToken()
@@ -269,6 +281,7 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     ) -> GoodCloudSessionState {
         guard generation == operationGeneration else { return state }
         state = newState
+        stateBroadcaster.publish(newState)
         return state
     }
 
@@ -286,6 +299,26 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
             }
         }
         return publish(.failed(Self.redactedFailure), for: generation)
+    }
+}
+
+private final class GoodCloudAccountStateBroadcaster: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [UUID: AsyncStream<GoodCloudSessionState>.Continuation] = [:]
+
+    func stream() -> AsyncStream<GoodCloudSessionState> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            lock.withLock { continuations[id] = continuation }
+            continuation.onTermination = { [weak self] _ in
+                self?.lock.withLock { self?.continuations[id] = nil }
+            }
+        }
+    }
+
+    func publish(_ state: GoodCloudSessionState) {
+        let continuations = lock.withLock { Array(self.continuations.values) }
+        continuations.forEach { $0.yield(state) }
     }
 }
 
