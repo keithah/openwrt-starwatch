@@ -9,7 +9,8 @@ final class MacAppModel {
     typealias TransportFactory = @MainActor () -> any DeviceTransport
     typealias RouterServices = (
         connections: RouterConnectionModel,
-        administration: RouterAdministrationModel
+        administration: RouterAdministrationModel,
+        goodCloudSettings: GoodCloudSettingsModel
     )
     typealias RouterServicesFactory = @MainActor () -> RouterServices
 
@@ -20,6 +21,7 @@ final class MacAppModel {
 
     private(set) var routerConnections: RouterConnectionModel
     private(set) var routerAdministration: RouterAdministrationModel
+    private(set) var goodCloudSettings: GoodCloudSettingsModel
     private(set) var routerServicesGeneration: UInt64 = 0
     let routerEnrollmentRoute: RouterEnrollmentRoute
 
@@ -30,10 +32,15 @@ final class MacAppModel {
         transportFactory: @escaping TransportFactory,
         routerConnections: RouterConnectionModel? = nil,
         routerAdministration: RouterAdministrationModel? = nil,
+        goodCloudSettings: GoodCloudSettingsModel? = nil,
         routerEnrollmentRoute: RouterEnrollmentRoute = RouterEnrollmentRoute(),
         routerServicesFactory: @escaping RouterServicesFactory = {
             let connections = RouterConnectionModel.production()
-            return (connections, .production(connections: connections))
+            return (
+                connections,
+                .production(connections: connections),
+                GoodCloudSettingsModel(connections: connections)
+            )
         }
     ) {
         let connections = routerConnections ?? .demo()
@@ -43,11 +50,25 @@ final class MacAppModel {
         self.routerAdministration = routerAdministration ?? .demo(
             connections: connections
         )
+        self.goodCloudSettings = goodCloudSettings ?? GoodCloudSettingsModel(
+            connections: connections
+        )
         self.routerEnrollmentRoute = routerEnrollmentRoute
     }
 
     static func production() -> MacAppModel {
-        MacAppModel(transportFactory: { BLETransport() })
+        let connections = RouterConnectionModel.production()
+        let administration = RouterAdministrationModel.production(connections: connections)
+        let goodCloudSettings = GoodCloudSettingsModel(connections: connections)
+        return MacAppModel(
+            transportFactory: { BLETransport() },
+            routerConnections: connections,
+            routerAdministration: administration,
+            goodCloudSettings: goodCloudSettings,
+            routerServicesFactory: {
+                (connections, administration, goodCloudSettings)
+            }
+        )
     }
 
     func start() {
@@ -82,6 +103,7 @@ final class MacAppModel {
         let services = routerServicesFactory()
         routerConnections = services.connections
         routerAdministration = services.administration
+        goodCloudSettings = services.goodCloudSettings
         routerServicesGeneration &+= 1
     }
 }

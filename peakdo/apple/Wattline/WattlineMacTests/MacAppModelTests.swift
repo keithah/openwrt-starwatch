@@ -19,6 +19,30 @@ final class MacAppModelTests: XCTestCase {
         XCTAssertTrue(model.started)
     }
 
+    func testSharesInjectedGoodCloudSettingsWithoutAddingTransportOwner() {
+        var constructions = 0
+        let connections = RouterConnectionModel.demo()
+        let remote = GoodCloudSettingsModel(
+            account: nil,
+            associations: nil,
+            connections: connections
+        )
+        let model = MacAppModel(
+            transportFactory: {
+                constructions += 1
+                return TestTransport()
+            },
+            routerConnections: connections,
+            goodCloudSettings: remote
+        )
+
+        model.start()
+        model.start()
+
+        XCTAssertEqual(constructions, 1)
+        XCTAssertTrue(model.goodCloudSettings === remote)
+    }
+
     func testRealDeviceActivationReplacesRouterServicesOnceAndAdvancesGeneration() {
         let initialConnections = RouterConnectionModel.demo()
         let initialAdministration = RouterAdministrationModel.demo(
@@ -28,6 +52,11 @@ final class MacAppModelTests: XCTestCase {
         let realAdministration = RouterAdministrationModel.demo(
             connections: realConnections
         )
+        let realGoodCloudSettings = GoodCloudSettingsModel(
+            account: nil,
+            associations: nil,
+            connections: realConnections
+        )
         var serviceConstructions = 0
         let model = MacAppModel(
             transportFactory: { TestTransport() },
@@ -35,7 +64,7 @@ final class MacAppModelTests: XCTestCase {
             routerAdministration: initialAdministration,
             routerServicesFactory: {
                 serviceConstructions += 1
-                return (realConnections, realAdministration)
+                return (realConnections, realAdministration, realGoodCloudSettings)
             }
         )
 
@@ -46,6 +75,7 @@ final class MacAppModelTests: XCTestCase {
         XCTAssertEqual(model.routerServicesGeneration, 1)
         XCTAssertTrue(model.routerConnections === realConnections)
         XCTAssertTrue(model.routerAdministration === realAdministration)
+        XCTAssertTrue(model.goodCloudSettings === realGoodCloudSettings)
         XCTAssertFalse(model.isDemo)
     }
 }

@@ -21,6 +21,12 @@ final class MacRouterAdministrationTests: XCTestCase {
         XCTAssertFalse(root.contains("Timers"))
     }
 
+    func testMacSettingsUsesSharedGoodCloudSettingsSection() throws {
+        let root = try source("WattlineMac/MacRootView.swift")
+
+        XCTAssertTrue(root.contains("GoodCloudSettingsSection(model: model.goodCloudSettings)"))
+    }
+
     func testMacAdministrationSupportsPasteAndImageButNoCamera() throws {
         let administration = try source("WattlineMac/RouterAdministration/MacRouterAdministrationView.swift")
         let adapters = try source("WattlineMac/RouterAdministration/MacRouterPlatformAdapters.swift")

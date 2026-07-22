@@ -6,6 +6,25 @@ final class Phase2ProjectConfigurationTests: XCTestCase {
         try String(contentsOf: TestProjectFiles.url("Wattline.xcodeproj/project.pbxproj"), encoding: .utf8)
     }
 
+    func testGoodCloudKitUsesImmutableRevisionAndBothAppsUseWattlineNetwork() throws {
+        let package = try String(
+            contentsOf: TestProjectFiles.url("../WattlineNetwork/Package.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(package.contains("https://github.com/keithah/goodcloudkit"))
+        XCTAssertTrue(package.contains(
+            "revision: \"e8e1518e8d29a0ce73697bf4f93a72fc49cf53a6\""
+        ))
+        XCTAssertFalse(package.contains("branch:"))
+        XCTAssertFalse(package.contains("from: \"0.1.0\""))
+
+        let project = try projectText()
+        let iOSApp = try target("A10000000000000000000020", in: project)
+        let macApp = try target("A100000000000000000000A0", in: project)
+        XCTAssertTrue(iOSApp.contains("WattlineNetwork"))
+        XCTAssertTrue(macApp.contains("WattlineNetwork"))
+    }
+
     /// Return one Xcode object, rather than searching the entire project. This keeps
     /// configuration assertions mutation-sensitive when another target happens to
     /// contain the same setting.

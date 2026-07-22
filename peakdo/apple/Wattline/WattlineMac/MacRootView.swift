@@ -120,6 +120,7 @@ private struct MacSettingsView: View {
                         .accessibilityLabel("Connect a real device")
                 }
             }
+            GoodCloudSettingsSection(model: model.goodCloudSettings)
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
