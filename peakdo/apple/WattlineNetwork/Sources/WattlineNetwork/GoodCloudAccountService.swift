@@ -49,7 +49,7 @@ public protocol GoodCloudAccountClient: Sendable {
     func hasStoredToken() async -> Bool
     func login(email: String, password: String) async throws
     func devices() async throws -> [GoodCloudDeviceSummary]
-    func logout() async
+    func logout() async throws
 }
 
 public protocol GoodCloudAccountServing: Sendable {
@@ -65,6 +65,7 @@ public protocol GoodCloudRelayProvisioning: Sendable {
 
 public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayProvisioning {
     public private(set) var state: GoodCloudSessionState = .loggedOut
+    private var operationGeneration: UInt64 = 0
 
     private static let redactedFailure = "GoodCloud request failed."
 
@@ -93,50 +94,66 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func validateStoredSession() async -> GoodCloudSessionState {
+        let generation = beginOperation()
         state = .loading
         guard await hasStoredToken() else {
-            state = .loggedOut
-            return state
+            return publish(.loggedOut, for: generation)
         }
-        return await refreshDevices()
+        do {
+            let devices = try await loadDevices()
+            return publish(.authenticated(devices), for: generation)
+        } catch {
+            return await stateForFailure(error, generation: generation)
+        }
     }
 
     public func login(email: String, password: String) async -> GoodCloudSessionState {
+        let generation = beginOperation()
         state = .loading
         do {
             try await performLogin(email: email, password: password)
-            return await refreshDevices()
+            let devices = try await loadDevices()
+            return publish(.authenticated(devices), for: generation)
         } catch {
-            return await stateForFailure(error)
+            return await stateForFailure(error, generation: generation)
         }
     }
 
     public func refreshDevices() async -> GoodCloudSessionState {
+        let generation = beginOperation()
         state = .loading
         do {
             let devices = try await loadDevices()
-            state = .authenticated(devices)
-            return state
+            return publish(.authenticated(devices), for: generation)
         } catch {
-            return await stateForFailure(error)
+            return await stateForFailure(error, generation: generation)
         }
     }
 
     public func logout() async {
-        if let client {
-            await client.logout()
-        } else if let auth {
-            try? await auth.logOut()
+        let generation = beginOperation()
+        do {
+            try await clearSession()
+            _ = publish(.loggedOut, for: generation)
+        } catch {
+            _ = publish(.failed(Self.redactedFailure), for: generation)
         }
-        state = .loggedOut
     }
 
     public func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession {
         do {
             return try await provisionRemoteAccess(deviceID, port)
         } catch {
-            if case GoodCloudError.api(code: -1010, message: _) = error {
-                _ = await stateForFailure(error)
+            if case let GoodCloudError.api(code, _) = error {
+                guard code == -1010 else {
+                    throw GoodCloudError.relayUnavailable
+                }
+                let generation = beginOperation()
+                let failureState = await stateForFailure(error, generation: generation)
+                guard failureState == .requiresLogin else {
+                    throw GoodCloudError.authFailed
+                }
+                throw GoodCloudError.sessionExpired
             }
             throw error
         }
@@ -171,13 +188,41 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         return try await client.devices().map(GoodCloudDeviceSummary.init(device:))
     }
 
-    private func stateForFailure(_ error: any Error) async -> GoodCloudSessionState {
-        if case GoodCloudError.api(code: -1010, message: _) = error {
-            await logout()
-            state = .requiresLogin
-        } else {
-            state = .failed(Self.redactedFailure)
+    private func clearSession() async throws {
+        if let client {
+            try await client.logout()
+        } else if let auth {
+            try await auth.logOut()
         }
+    }
+
+    private func beginOperation() -> UInt64 {
+        operationGeneration &+= 1
+        return operationGeneration
+    }
+
+    private func publish(
+        _ newState: GoodCloudSessionState,
+        for generation: UInt64
+    ) -> GoodCloudSessionState {
+        guard generation == operationGeneration else { return state }
+        state = newState
         return state
+    }
+
+    private func stateForFailure(
+        _ error: any Error,
+        generation: UInt64
+    ) async -> GoodCloudSessionState {
+        guard generation == operationGeneration else { return state }
+        if case GoodCloudError.api(code: -1010, message: _) = error {
+            do {
+                try await clearSession()
+                return publish(.requiresLogin, for: generation)
+            } catch {
+                return publish(.failed(Self.redactedFailure), for: generation)
+            }
+        }
+        return publish(.failed(Self.redactedFailure), for: generation)
     }
 }
