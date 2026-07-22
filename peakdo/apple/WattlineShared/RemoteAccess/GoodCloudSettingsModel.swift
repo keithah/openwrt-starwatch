@@ -51,6 +51,7 @@ final class GoodCloudSettingsModel {
         let generation: UInt64
         let hostGeneration: UInt64
         let prior: Snapshot
+        let priorRoute: RouterConnectionModel.GoodCloudRemoteAccessRouteSnapshot
     }
 
     private var lastCommittedSnapshot = Snapshot(
@@ -188,7 +189,12 @@ final class GoodCloudSettingsModel {
             device: device
         )
         let operation = beginMutation()
-        try await associations.save(newAssociation)
+        do {
+            try await associations.save(newAssociation)
+        } catch {
+            rollback(operation)
+            throw error
+        }
         guard canContinue(operation) else { return }
         guard hostGeneration == operation.hostGeneration,
               savedHost?.id == host.id
@@ -210,7 +216,12 @@ final class GoodCloudSettingsModel {
             throw GoodCloudSettingsError.associationUnavailable
         }
         let operation = beginMutation()
-        try await associations.remove(hostID: host.id)
+        do {
+            try await associations.remove(hostID: host.id)
+        } catch {
+            rollback(operation)
+            throw error
+        }
         guard canContinue(operation) else { return }
         guard hostGeneration == operation.hostGeneration,
               savedHost?.id == host.id
@@ -242,7 +253,8 @@ final class GoodCloudSettingsModel {
         return Operation(
             generation: operationGeneration,
             hostGeneration: hostGeneration,
-            prior: prior
+            prior: prior,
+            priorRoute: connections.goodCloudRemoteAccessRouteSnapshot()
         )
     }
 
@@ -282,7 +294,7 @@ final class GoodCloudSettingsModel {
     private func canContinue(_ operation: Operation) -> Bool {
         guard operationGeneration == operation.generation else { return false }
         guard !Task.isCancelled else {
-            cancel(operation)
+            rollback(operation)
             return false
         }
         return true
@@ -294,18 +306,9 @@ final class GoodCloudSettingsModel {
     ) async -> Bool {
         while canContinue(operation) {
             let committed = await connections.publishGoodCloudRemoteAccess(session)
-            guard operationGeneration == operation.generation else {
-                if committed {
-                    await restoreCommittedRoute(expectedGeneration: operationGeneration)
-                }
-                return false
-            }
+            guard operationGeneration == operation.generation else { return false }
             if Task.isCancelled {
-                if committed {
-                    await cancelAfterPublication(operation)
-                } else {
-                    cancel(operation)
-                }
+                rollback(operation)
                 return false
             }
             if committed { return true }
@@ -313,35 +316,11 @@ final class GoodCloudSettingsModel {
         return false
     }
 
-    private func cancelAfterPublication(_ operation: Operation) async {
-        let restoreSession = lastCommittedSnapshot.sessionState
-        cancel(operation)
-        let cancelledGeneration = operationGeneration
-        await restoreCommittedRoute(
-            restoreSession,
-            expectedGeneration: cancelledGeneration
-        )
-    }
-
-    private func restoreCommittedRoute(expectedGeneration: UInt64) async {
-        await restoreCommittedRoute(
-            lastCommittedSnapshot.sessionState,
-            expectedGeneration: expectedGeneration
-        )
-    }
-
-    private func restoreCommittedRoute(
-        _ session: GoodCloudSessionState,
-        expectedGeneration: UInt64
-    ) async {
-        while operationGeneration == expectedGeneration {
-            if await connections.publishGoodCloudRemoteAccess(session) { return }
-        }
-    }
-
-    private func cancel(_ operation: Operation) {
+    private func rollback(_ operation: Operation) {
+        guard operationGeneration == operation.generation else { return }
         operationGeneration &+= 1
         restore(lastCommittedSnapshot)
+        connections.publishGoodCloudRemoteAccess(operation.priorRoute)
     }
 
     private func restore(_ snapshot: Snapshot) {

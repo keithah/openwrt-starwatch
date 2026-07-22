@@ -139,6 +139,10 @@ final class RouterConnectionModel {
             self.provisioner = provisioner
         }
     }
+    struct GoodCloudRemoteAccessRouteSnapshot: Sendable {
+        let isAuthenticated: Bool
+        let associations: [GoodCloudAssociation]
+    }
     typealias PreferredTransportFactory = @MainActor (
         _ endpoint: RouterEndpoint,
         _ credentials: any RouterCredentialProvider,
@@ -380,6 +384,32 @@ final class RouterConnectionModel {
     func publishGoodCloudRemoteAccess(_ state: GoodCloudSessionState) async -> Bool {
         let generation = beginGoodCloudRemoteAccessUpdate()
         return await publishGoodCloudRemoteAccess(state, generation: generation)
+    }
+
+    func goodCloudRemoteAccessRouteSnapshot() -> GoodCloudRemoteAccessRouteSnapshot {
+        GoodCloudRemoteAccessRouteSnapshot(
+            isAuthenticated: goodCloudSessionIsAuthenticated,
+            associations: Array(goodCloudAssociationsByHostID.values)
+        )
+    }
+
+    @discardableResult
+    func publishGoodCloudRemoteAccess(_ snapshot: GoodCloudRemoteAccessRouteSnapshot) -> Bool {
+        let generation = beginGoodCloudRemoteAccessUpdate()
+        guard snapshot.isAuthenticated, let goodCloudAccount else {
+            return clearGoodCloudRemoteAccess(ifCurrent: generation)
+        }
+        guard goodCloudRefreshGeneration == generation else { return false }
+        goodCloudSessionIsAuthenticated = true
+        goodCloudAssociationsByHostID = Dictionary(uniqueKeysWithValues: snapshot.associations.map {
+            ($0.hostID, $0)
+        })
+        goodCloudAdministrationHTTPRegistry?.update(
+            hosts: savedHosts,
+            associations: snapshot.associations,
+            provisioner: goodCloudAccount.provisioner
+        )
+        return true
     }
 
     @discardableResult

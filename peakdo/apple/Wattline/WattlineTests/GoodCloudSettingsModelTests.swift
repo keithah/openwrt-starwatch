@@ -509,9 +509,13 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         XCTAssertEqual(recorder.directTransportCount, 0)
     }
 
-    func testAssociationSaveFailureDoesNotInvalidateInFlightRouteRefresh() async throws {
+    func testAssociationSaveFailureRestoresStableRouteAfterInFlightRefresh() async throws {
+        let recorder = SettingsRouteRecorder()
         let routeLoader = SettingsRouteAssociationLoader()
-        let fixture = try await makeFixture(routeAssociationLoader: routeLoader)
+        let fixture = try await makeFixture(
+            routeRecorder: recorder,
+            routeAssociationLoader: routeLoader
+        )
         await fixture.model.load()
         fixture.associationBackend.setRaw(Data("corrupt".utf8))
         await routeLoader.holdNext()
@@ -525,12 +529,19 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         await routeLoader.release()
 
         let refreshCommitted = await refresh.value
-        XCTAssertTrue(refreshCommitted)
+        XCTAssertFalse(refreshCommitted)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 0)
+        XCTAssertEqual(recorder.directTransportCount, 1)
     }
 
-    func testAssociationRemoveFailureDoesNotInvalidateInFlightRouteRefresh() async throws {
+    func testAssociationRemoveFailureRestoresStableRouteAfterInFlightRefresh() async throws {
+        let recorder = SettingsRouteRecorder()
         let routeLoader = SettingsRouteAssociationLoader()
-        let fixture = try await makeFixture(routeAssociationLoader: routeLoader)
+        let fixture = try await makeFixture(
+            routeRecorder: recorder,
+            routeAssociationLoader: routeLoader
+        )
         await fixture.model.load()
         try await fixture.model.associate(deviceID: fixture.device.id)
         fixture.associationBackend.setRaw(Data("corrupt".utf8))
@@ -545,7 +556,10 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         await routeLoader.release()
 
         let refreshCommitted = await refresh.value
-        XCTAssertTrue(refreshCommitted)
+        XCTAssertFalse(refreshCommitted)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
+        XCTAssertEqual(recorder.directTransportCount, 0)
     }
 
     func testCancellationAfterSuccessfulPublicationRestoresLastCommittedRoute() async throws {
@@ -607,6 +621,81 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         await olderLogin.value
 
         XCTAssertEqual(fixture.model.state, .loggedOut)
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 0)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+    }
+
+    func testInterleavedOlderAndNewerPublicationsCompleteWithOnlyNewerOwningFinalRoute() async throws {
+        let recorder = SettingsRouteRecorder()
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(
+            routeRecorder: recorder,
+            routeAssociationLoader: routeLoader
+        )
+        let newerDevice = GoodCloudDeviceSummary(
+            id: "newer",
+            name: "Newer router result",
+            mac: fixture.device.mac,
+            ddns: nil,
+            model: fixture.device.model,
+            isOnline: true
+        )
+        await routeLoader.holdNext(count: 2)
+        let older = Task {
+            await fixture.model.login(email: "owner@example.com", password: "older")
+        }
+        try await waitUntil { await routeLoader.heldCount == 1 }
+        await fixture.account.setState(.authenticated([newerDevice]))
+        let newer = Task {
+            await fixture.model.login(email: "owner@example.com", password: "newer")
+        }
+        try await waitUntil { await routeLoader.heldCount == 2 }
+
+        await routeLoader.releaseNext()
+        await routeLoader.releaseNext()
+        await older.value
+        await newer.value
+
+        XCTAssertEqual(fixture.model.devices, [newerDevice])
+        let publicationCount = await routeLoader.loadCount
+        XCTAssertEqual(publicationCount, 2, "stale operation must not publish rollback")
+        _ = try fixture.connections.makeTransport(for: fixture.host)
+        XCTAssertEqual(recorder.preferredTransportCount, 0)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+    }
+
+    func testCurrentCancellationBeforeRouteCompletionRollsBackAfterOlderPublicationCommits() async throws {
+        let recorder = SettingsRouteRecorder()
+        let routeLoader = SettingsRouteAssociationLoader()
+        let fixture = try await makeFixture(
+            routeRecorder: recorder,
+            routeAssociationLoader: routeLoader
+        )
+        try await fixture.associations.save(GoodCloudAssociation(
+            hostID: fixture.host.id,
+            routerMAC: try XCTUnwrap(fixture.host.deviceID),
+            device: fixture.device
+        ))
+        await routeLoader.holdNext(count: 2)
+        let older = Task {
+            await fixture.model.login(email: "owner@example.com", password: "older")
+        }
+        try await waitUntil { await routeLoader.heldCount == 1 }
+        let newer = Task {
+            await fixture.model.login(email: "owner@example.com", password: "newer")
+        }
+        try await waitUntil { await routeLoader.heldCount == 2 }
+        newer.cancel()
+
+        await routeLoader.releaseNext()
+        await routeLoader.releaseNext()
+        await older.value
+        await newer.value
+
+        XCTAssertEqual(fixture.model.state, .loggedOut)
+        let publicationCount = await routeLoader.loadCount
+        XCTAssertEqual(publicationCount, 2, "stale operation must not publish rollback")
         _ = try fixture.connections.makeTransport(for: fixture.host)
         XCTAssertEqual(recorder.preferredTransportCount, 0)
         XCTAssertEqual(recorder.directTransportCount, 1)
@@ -912,26 +1001,37 @@ private actor SettingsNoopTransport: DeviceTransport {
 }
 
 private actor SettingsRouteAssociationLoader {
-    private var shouldHold = false
-    private var continuation: CheckedContinuation<Void, Never>?
-    private(set) var isHeld = false
+    private var holdsRemaining = 0
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private(set) var heldCount = 0
+    private(set) var loadCount = 0
+    var isHeld: Bool { heldCount > 0 }
 
     func holdNext() {
-        shouldHold = true
+        holdNext(count: 1)
+    }
+
+    func holdNext(count: Int) {
+        holdsRemaining += count
     }
 
     func load(from store: GoodCloudAssociationStore) async -> [GoodCloudAssociation] {
-        if shouldHold {
-            shouldHold = false
-            isHeld = true
-            await withCheckedContinuation { continuation = $0 }
-            isHeld = false
+        loadCount += 1
+        if holdsRemaining > 0 {
+            holdsRemaining -= 1
+            heldCount += 1
+            await withCheckedContinuation { continuations.append($0) }
+            heldCount -= 1
         }
         return await store.allAssociations()
     }
 
     func release() {
-        continuation?.resume()
-        continuation = nil
+        releaseNext()
+    }
+
+    func releaseNext() {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume()
     }
 }
