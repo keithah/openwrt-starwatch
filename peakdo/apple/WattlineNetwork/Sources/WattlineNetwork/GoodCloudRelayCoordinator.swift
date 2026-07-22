@@ -22,6 +22,14 @@ public protocol RemoteRelayClient: Sendable {
 
 extension RelayHTTPClient: RemoteRelayClient {}
 
+/// Marks relay-attempt boundaries explicitly so stream consumers can discard
+/// response and parser state when the coordinator reprovisions an expired relay.
+public enum RemoteRelayStreamEvent: @unchecked Sendable {
+    case attemptStarted
+    case response(HTTPURLResponse)
+    case data(Data)
+}
+
 public protocol RemoteRelayCoordinating: Sendable {
     func request(
         method: String,
@@ -35,7 +43,7 @@ public protocol RemoteRelayCoordinating: Sendable {
         path: String,
         headers: [String: String],
         body: Data?
-    ) async -> AsyncThrowingStream<RelayHTTPStreamEvent, Error>
+    ) async -> AsyncThrowingStream<RemoteRelayStreamEvent, Error>
 }
 
 public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
@@ -71,6 +79,7 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
     }
 
     public func session() async throws -> RemoteAccessSession {
+        try Task.checkCancellation()
         if let currentSession {
             return currentSession
         }
@@ -102,6 +111,7 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
                 sessionGeneration &+= 1
                 currentSession = provisionedSession
             }
+            try Task.checkCancellation()
             return currentSession ?? provisionedSession
         } catch {
             if provisioning?.id == operation.id {
@@ -122,6 +132,7 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
 
         while true {
             let lease = try await makeLease()
+            try Task.checkCancellation()
             do {
                 return try await lease.client.request(
                     method: method,
@@ -147,7 +158,7 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
         path: String,
         headers: [String: String],
         body: Data?
-    ) async -> AsyncThrowingStream<RelayHTTPStreamEvent, Error> {
+    ) async -> AsyncThrowingStream<RemoteRelayStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var attempt = 0
@@ -155,7 +166,10 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
                     while true {
                         try Task.checkCancellation()
                         let lease = try await self.makeLease()
+                        try Task.checkCancellation()
                         do {
+                            continuation.yield(.attemptStarted)
+                            try Task.checkCancellation()
                             let relayStream = lease.client.stream(
                                 method: method,
                                 path: path,
@@ -164,7 +178,12 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
                             )
                             for try await event in relayStream {
                                 try Task.checkCancellation()
-                                continuation.yield(event)
+                                switch event {
+                                case .response(let response):
+                                    continuation.yield(.response(response))
+                                case .data(let data):
+                                    continuation.yield(.data(data))
+                                }
                             }
                             continuation.finish()
                             return

@@ -135,6 +135,41 @@ final class RemoteRouterTransportTests: XCTestCase {
         let wasCancelled = await probe.wasCancelled
         XCTAssertTrue(wasCancelled)
     }
+
+    func test_remoteSSERetryResetsResponseParserAndPartialLineState() async throws {
+        let relay = RetryingStreamRelayClient(attempts: [
+            [
+                .event(.response(.ok)),
+                .event(.data(Data("data: stale-partial".utf8))),
+                .expired,
+            ],
+            [
+                .event(.response(.ok)),
+                .event(.data(Data("data: fresh\n\n".utf8))),
+            ],
+        ])
+        let provisioner = ImmediateRelayProvisioner()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in relay }
+        )
+        let stream = RemoteRouterEventStream(coordinator: coordinator)
+        var iterator = stream.events(
+            path: "/api/v1/events",
+            token: "wattline-token"
+        ).makeAsyncIterator()
+
+        let payload = try await iterator.next()
+        let end = try await iterator.next()
+
+        XCTAssertEqual(payload, Data("fresh".utf8))
+        XCTAssertNil(end)
+        let attempts = await relay.streamCount
+        let provisions = await provisioner.callCount
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(provisions, 2)
+    }
 }
 
 private actor RecordingRemoteCoordinator: RemoteRelayCoordinating {
@@ -186,11 +221,12 @@ private actor RecordingRemoteCoordinator: RemoteRelayCoordinating {
         path: String,
         headers: [String: String],
         body: Data?
-    ) async -> AsyncThrowingStream<RelayHTTPStreamEvent, Error> {
+    ) async -> AsyncThrowingStream<RemoteRelayStreamEvent, Error> {
         lastStream = .init(method: method, path: path, headers: headers, body: body)
         if let cancellationProbe {
             return AsyncThrowingStream { continuation in
                 let task = Task {
+                    continuation.yield(.attemptStarted)
                     await cancellationProbe.started()
                     do {
                         try await Task.sleep(for: .seconds(60))
@@ -203,7 +239,13 @@ private actor RecordingRemoteCoordinator: RemoteRelayCoordinating {
             }
         }
         return AsyncThrowingStream { continuation in
-            streamEvents.forEach { continuation.yield($0) }
+            continuation.yield(.attemptStarted)
+            streamEvents.forEach { event in
+                switch event {
+                case .response(let response): continuation.yield(.response(response))
+                case .data(let data): continuation.yield(.data(data))
+                }
+            }
             continuation.finish()
         }
     }
@@ -237,6 +279,73 @@ private actor StreamCancellationProbe {
     func waitUntilCancelled() async {
         guard !wasCancelled else { return }
         await withCheckedContinuation { cancelWaiters.append($0) }
+    }
+}
+
+private actor ImmediateRelayProvisioner: GoodCloudRelayProvisioning {
+    private(set) var callCount = 0
+
+    func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession {
+        callCount += 1
+        return RemoteAccessSession(
+            baseURL: URL(string: "https://relay.goodcloud.xyz/\(callCount)/")!,
+            tokenDomain: ".goodcloud.xyz",
+            sessionID: "session-\(callCount)",
+            issuedAtMillis: Int64(callCount)
+        )
+    }
+}
+
+private actor RetryingStreamRelayClient: RemoteRelayClient {
+    enum Step: @unchecked Sendable {
+        case event(RelayHTTPStreamEvent)
+        case expired
+    }
+
+    private var attempts: [[Step]]
+    private(set) var streamCount = 0
+
+    init(attempts: [[Step]]) {
+        self.attempts = attempts
+    }
+
+    func request(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) async throws -> (Data, HTTPURLResponse) {
+        (Data(), .ok)
+    }
+
+    nonisolated func stream(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) -> AsyncThrowingStream<RelayHTTPStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                let steps = await self.nextAttempt()
+                for step in steps {
+                    switch step {
+                    case .event(let event):
+                        continuation.yield(event)
+                    case .expired:
+                        continuation.finish(throwing: GoodCloudError.sessionExpired)
+                        return
+                    }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func nextAttempt() -> [Step] {
+        streamCount += 1
+        guard !attempts.isEmpty else { return [] }
+        return attempts.removeFirst()
     }
 }
 

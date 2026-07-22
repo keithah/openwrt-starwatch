@@ -33,6 +33,10 @@ public final class RemoteRouterEventStream: RouterEventStream, @unchecked Sendab
                     for try await event in relayStream {
                         try Task.checkCancellation()
                         switch event {
+                        case .attemptStarted:
+                            receivedResponse = false
+                            parser = SSEFrameParser()
+                            line.removeAll(keepingCapacity: true)
                         case .response(let response):
                             guard !receivedResponse else {
                                 throw NetworkError.decode("Remote event stream returned multiple responses")

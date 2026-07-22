@@ -171,16 +171,87 @@ final class GoodCloudRelayCoordinatorTests: XCTestCase {
             headers: [:],
             body: nil
         )
-        var events: [RelayHTTPStreamEvent] = []
+        var events: [RemoteRelayStreamEvent] = []
         for try await event in stream {
             events.append(event)
         }
 
-        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(events.count, 4)
         let streamCount = await relay.streamCount
         let provisionCount = await provisioner.callCount
         XCTAssertEqual(streamCount, 2)
         XCTAssertEqual(provisionCount, 2)
+    }
+
+    func test_cancelledMutationWaitingForSharedProvisioningNeverDispatchesRelay() async throws {
+        let provisioner = SuspendedRelayProvisioner()
+        let relay = DispatchRecordingRemoteRelayClient()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in relay }
+        )
+        let cancelledMutation = Task {
+            try await coordinator.request(
+                method: "POST",
+                path: "/api/v1/device/action",
+                headers: [:],
+                body: Data("{}".utf8)
+            )
+        }
+
+        await provisioner.waitUntilCalled()
+        let liveRequest = Task {
+            try await coordinator.request(
+                method: "GET",
+                path: "/api/v1/status",
+                headers: [:],
+                body: nil
+            )
+        }
+        await Task.yield()
+        cancelledMutation.cancel()
+        await provisioner.resume(with: .fixture)
+
+        do {
+            _ = try await cancelledMutation.value
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        _ = try await liveRequest.value
+
+        let methods = relay.requestMethods
+        let provisionCalls = await provisioner.calls
+        XCTAssertEqual(methods, ["GET"])
+        XCTAssertEqual(provisionCalls.count, 1)
+    }
+
+    func test_cancelledSSEWaitingForProvisioningNeverOpensRelayStream() async {
+        let provisioner = SuspendedRelayProvisioner()
+        let relay = DispatchRecordingRemoteRelayClient()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in relay }
+        )
+        let stream = await coordinator.stream(
+            method: "GET",
+            path: "/api/v1/events",
+            headers: [:],
+            body: nil
+        )
+        let consumer = Task {
+            for try await _ in stream {}
+        }
+
+        await provisioner.waitUntilCalled()
+        consumer.cancel()
+        await provisioner.resume(with: .fixture)
+        _ = try? await consumer.value
+
+        let streamCount = relay.streamCount
+        XCTAssertEqual(streamCount, 0)
     }
 }
 
@@ -256,6 +327,42 @@ private struct EmptyRemoteRelayClient: RemoteRelayClient {
         body: Data?
     ) -> AsyncThrowingStream<RelayHTTPStreamEvent, Error> {
         AsyncThrowingStream { $0.finish() }
+    }
+}
+
+private final class DispatchRecordingRemoteRelayClient: RemoteRelayClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedRequestMethods: [String] = []
+    private var recordedStreamCount = 0
+
+    var requestMethods: [String] {
+        lock.withLock { recordedRequestMethods }
+    }
+
+    var streamCount: Int {
+        lock.withLock { recordedStreamCount }
+    }
+
+    func request(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) async throws -> (Data, HTTPURLResponse) {
+        lock.withLock { recordedRequestMethods.append(method) }
+        return (Data(), .ok)
+    }
+
+    func stream(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) -> AsyncThrowingStream<RelayHTTPStreamEvent, Error> {
+        lock.withLock { recordedStreamCount += 1 }
+        return AsyncThrowingStream { continuation in
+            continuation.finish()
+        }
     }
 }
 
