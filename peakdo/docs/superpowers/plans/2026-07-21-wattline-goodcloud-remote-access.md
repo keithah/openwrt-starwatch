@@ -238,18 +238,31 @@ func test_stream_emitsResponseThenIncrementalBodyChunks() async throws {
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer wattline-token")
         return .init(status: 200, data: Data(), headers: ["Content-Type": "text/event-stream"],
-                     chunks: [Data("data: one\n\n".utf8), Data("data: two\n\n".utf8)])
+                     chunks: [Data("data: one\n\n".utf8), Data("data: two\n\n".utf8)],
+                     finish: false)
     }
     let client = makeClient()
-    var events: [RelayHTTPStreamEvent] = []
-    for try await event in client.stream(
-        method: "GET", path: "/api/v1/events",
-        headers: ["Authorization": "Bearer wattline-token", "Accept": "text/event-stream"]
-    ) { events.append(event) }
+    let expectedBody = Data("data: one\n\ndata: two\n\n".utf8)
+    let task = Task { () throws -> (HTTPURLResponse, Data) in
+        var iterator = client.stream(
+            method: "GET", path: "/api/v1/events",
+            headers: ["Authorization": "Bearer wattline-token", "Accept": "text/event-stream"]
+        ).makeAsyncIterator()
+        guard case .response(let response) = try await iterator.next() else {
+            XCTFail("response must be first")
+            throw GoodCloudError.relayUnavailable
+        }
+        var body = Data()
+        while body.count < expectedBody.count, let event = try await iterator.next() {
+            if case .data(let chunk) = event { body.append(chunk) }
+        }
+        return (response, body)
+    }
+    let (response, body) = try await task.value
+    task.cancel()
 
-    guard case .response(let response) = events[0] else { return XCTFail("response must be first") }
     XCTAssertEqual(response.statusCode, 200)
-    XCTAssertEqual(events.compactMap(\.dataValue), [Data("data: one\n\n".utf8), Data("data: two\n\n".utf8)])
+    XCTAssertEqual(body, expectedBody)
 }
 
 func test_requestAndStreamMapRelayErrorPageToSessionExpired() async {
@@ -301,17 +314,10 @@ public func stream(
                     throw GoodCloudError.sessionExpired
                 }
                 continuation.yield(.response(http))
-                var chunk = Data()
-                chunk.reserveCapacity(4096)
                 for try await byte in bytes {
                     try Task.checkCancellation()
-                    chunk.append(byte)
-                    if chunk.count == 4096 {
-                        continuation.yield(.data(chunk))
-                        chunk.removeAll(keepingCapacity: true)
-                    }
+                    continuation.yield(.data(Data([byte])))
                 }
-                if !chunk.isEmpty { continuation.yield(.data(chunk)) }
                 continuation.finish()
             } catch is CancellationError {
                 continuation.finish()
@@ -728,7 +734,7 @@ Run:
 ```bash
 cd /Users/keith/.codex/worktrees/wattline-goodcloud/peakdo/apple/Wattline
 xcodebuild test -project Wattline.xcodeproj -scheme Wattline \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -only-testing:WattlineTests/RouterAppWiringTests \
   -only-testing:WattlineTests/RouterDiscoveryLifecycleTests
 ```
@@ -767,7 +773,7 @@ swift test --filter PreferredRouterRouteTests
 swift test
 cd ../Wattline
 xcodebuild test -project Wattline.xcodeproj -scheme Wattline \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -only-testing:WattlineTests/RouterAppWiringTests \
   -only-testing:WattlineTests/RouterDiscoveryLifecycleTests
 git -C /Users/keith/.codex/worktrees/wattline-goodcloud add \
@@ -839,7 +845,7 @@ func test_errorPresentationUsesFixedCopyForMinus1010AndGenericFailures() {
 ```bash
 cd /Users/keith/.codex/worktrees/wattline-goodcloud/peakdo/apple/Wattline
 xcodebuild test -project Wattline.xcodeproj -scheme Wattline \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -only-testing:WattlineTests/GoodCloudSettingsModelTests \
   -only-testing:WattlineTests/GoodCloudSettingsPresentationTests
 ```
@@ -879,7 +885,7 @@ The model accepts protocols/factories in tests and production services in `AppMo
 
 ```bash
 xcodebuild test -project Wattline.xcodeproj -scheme Wattline \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -only-testing:WattlineTests/GoodCloudSettingsModelTests \
   -only-testing:WattlineTests/GoodCloudSettingsPresentationTests \
   -only-testing:WattlineTests/RouterAppWiringTests
@@ -945,7 +951,7 @@ xcodebuild test -project Wattline.xcodeproj -scheme WattlineMac \
   -only-testing:WattlineMacTests/MacAppModelTests \
   -only-testing:WattlineMacTests/MacRouterAdministrationTests
 xcodebuild test -project Wattline.xcodeproj -scheme Wattline \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -only-testing:WattlineTests/Phase2ProjectConfigurationTests
 ```
 
@@ -984,7 +990,7 @@ swift test --package-path /Users/keith/.codex/worktrees/wattline-goodcloud/peakd
 swift test --package-path /Users/keith/.codex/worktrees/wattline-goodcloud/peakdo/apple/WattlineUI
 cd /Users/keith/.codex/worktrees/wattline-goodcloud/peakdo/apple/Wattline
 xcodebuild test -project Wattline.xcodeproj -scheme Wattline \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro'
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 xcodebuild test -project Wattline.xcodeproj -scheme WattlineMac \
   -destination 'platform=macOS'
 xcodebuild build -project Wattline.xcodeproj -scheme Wattline \
