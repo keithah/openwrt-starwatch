@@ -1,7 +1,7 @@
 # Wattline GoodCloud Remote Access Design
 
-**Date:** 2026-07-21  
-**Status:** Approved for implementation planning  
+**Date:** 2026-07-21
+**Status:** Approved for implementation planning
 **Base:** `codex/wattline-phase-2` at `ec8425f2`
 
 ## Goal
