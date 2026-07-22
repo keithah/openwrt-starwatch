@@ -43,6 +43,42 @@ final class MacAppModelTests: XCTestCase {
         XCTAssertTrue(model.goodCloudSettings === remote)
     }
 
+    func testProductionKeepsRouterServicesInertUntilRealDeviceActivation() {
+        var transportConstructions = 0
+        let futureConnections = RouterConnectionModel.demo()
+        let futureAdministration = RouterAdministrationModel.demo(
+            connections: futureConnections
+        )
+        let futureGoodCloudSettings = GoodCloudSettingsModel(
+            account: nil,
+            associations: nil,
+            connections: futureConnections
+        )
+        let model = MacAppModel.production(
+            transportFactory: {
+                transportConstructions += 1
+                return TestTransport()
+            },
+            routerServicesFactory: {
+                (futureConnections, futureAdministration, futureGoodCloudSettings)
+            }
+        )
+
+        XCTAssertTrue(model.isDemo)
+        XCTAssertFalse(model.routerConnections === futureConnections)
+        XCTAssertFalse(model.routerAdministration === futureAdministration)
+        XCTAssertTrue(model.goodCloudSettings === futureGoodCloudSettings)
+        XCTAssertEqual(transportConstructions, 0)
+
+        model.connectRealDevice()
+
+        XCTAssertFalse(model.isDemo)
+        XCTAssertTrue(model.routerConnections === futureConnections)
+        XCTAssertTrue(model.routerAdministration === futureAdministration)
+        XCTAssertTrue(model.goodCloudSettings === futureGoodCloudSettings)
+        XCTAssertEqual(transportConstructions, 1)
+    }
+
     func testRealDeviceActivationReplacesRouterServicesOnceAndAdvancesGeneration() {
         let initialConnections = RouterConnectionModel.demo()
         let initialAdministration = RouterAdministrationModel.demo(
