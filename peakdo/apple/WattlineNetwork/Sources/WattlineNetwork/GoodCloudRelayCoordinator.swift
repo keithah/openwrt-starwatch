@@ -59,6 +59,7 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
     private struct Provisioning: Sendable {
         let id: UUID
         let task: Task<RemoteAccessSession, Error>
+        let waiters: ProvisioningWaiterFanout
     }
 
     private let deviceID: String
@@ -91,39 +92,30 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
             let id = UUID()
             let deviceID = self.deviceID
             let provisioner = self.provisioner
+            let waiters = ProvisioningWaiterFanout()
             let task = Task {
                 try await provisioner.remoteAccess(
                     deviceID: deviceID,
                     port: Self.wattlinedPort
                 )
             }
-            operation = Provisioning(id: id, task: task)
+            operation = Provisioning(id: id, task: task, waiters: waiters)
             provisioning = operation
+            observeCompletion(of: operation)
         }
 
-        let waiter = ProvisioningTaskWaiter()
-        switch await waiter.wait(for: operation.task) {
+        switch await operation.waiters.wait() {
         case .waiterCancelled:
             throw CancellationError()
-        case .sharedFailure(let error):
-            if provisioning?.id == operation.id {
-                provisioning = nil
+        case .sharedFailure(let error, let joinedOrphanedProvisioning):
+            if joinedOrphanedProvisioning {
+                try Task.checkCancellation()
+                return try await session()
             }
             throw Self.normalized(error)
-        case .success(let provisionedSession):
-            let resolvedSession: RemoteAccessSession
-            if let currentSession {
-                resolvedSession = currentSession
-            } else if provisioning?.id == operation.id {
-                provisioning = nil
-                sessionGeneration &+= 1
-                currentSession = provisionedSession
-                resolvedSession = provisionedSession
-            } else {
-                resolvedSession = provisionedSession
-            }
+        case .success(let provisionedSession, joinedOrphanedProvisioning: _):
             try Task.checkCancellation()
-            return resolvedSession
+            return currentSession ?? provisionedSession
         }
     }
 
@@ -222,6 +214,31 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
         )
     }
 
+    private func observeCompletion(of operation: Provisioning) {
+        Task.detached { [weak self] in
+            let outcome: SharedProvisioningOutcome = switch await operation.task.result {
+            case .success(let session): .success(session)
+            case .failure(let error): .failure(error)
+            }
+            if let self {
+                await self.completeProvisioning(id: operation.id, outcome: outcome)
+            }
+            operation.waiters.complete(with: outcome)
+        }
+    }
+
+    private func completeProvisioning(
+        id: UUID,
+        outcome: SharedProvisioningOutcome
+    ) {
+        guard provisioning?.id == id else { return }
+        provisioning = nil
+        if case .success(let session) = outcome {
+            sessionGeneration &+= 1
+            currentSession = session
+        }
+    }
+
     private func invalidate(generation: UInt64) {
         guard generation == sessionGeneration else { return }
         currentSession = nil
@@ -258,63 +275,128 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
     }
 }
 
-private enum ProvisioningWaitOutcome: @unchecked Sendable {
+private enum SharedProvisioningOutcome: @unchecked Sendable {
     case success(RemoteAccessSession)
-    case sharedFailure(any Error)
+    case failure(any Error)
+}
+
+private enum ProvisioningWaitOutcome: @unchecked Sendable {
+    case success(RemoteAccessSession, joinedOrphanedProvisioning: Bool)
+    case sharedFailure(any Error, joinedOrphanedProvisioning: Bool)
     case waiterCancelled
 }
 
-/// Gives every caller an independently cancellable wait on a shared task.
-/// Cancellation resolves only that caller's continuation; the shared task and
-/// other live waiters continue unchanged.
-private final class ProvisioningTaskWaiter: @unchecked Sendable {
+/// Fans one provisioning completion out to independently cancellable waiters.
+/// The coordinator owns exactly one shared completion observer; this object
+/// only registers, cancels, and resumes individual continuations.
+private final class ProvisioningWaiterFanout: @unchecked Sendable {
+    private struct Waiter {
+        let continuation: CheckedContinuation<ProvisioningWaitOutcome, Never>
+        let joinedOrphanedProvisioning: Bool
+    }
+
     private enum Registration {
-        case observeSharedTask
+        case registered
         case resume(ProvisioningWaitOutcome)
     }
 
     private let lock = NSLock()
-    private var outcome: ProvisioningWaitOutcome?
-    private var continuation: CheckedContinuation<ProvisioningWaitOutcome, Never>?
+    private var sharedOutcome: SharedProvisioningOutcome?
+    private var waiters: [UUID: Waiter] = [:]
+    private var cancelledBeforeRegistration: Set<UUID> = []
+    private var wasOrphaned = false
 
-    func wait(
-        for task: Task<RemoteAccessSession, Error>
-    ) async -> ProvisioningWaitOutcome {
-        await withTaskCancellationHandler {
+    func wait() async -> ProvisioningWaitOutcome {
+        let id = UUID()
+        return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 let registration = lock.withLock { () -> Registration in
-                    if let outcome {
-                        return .resume(outcome)
+                    if cancelledBeforeRegistration.remove(id) != nil {
+                        if waiters.isEmpty {
+                            wasOrphaned = true
+                        }
+                        return .resume(.waiterCancelled)
                     }
-                    self.continuation = continuation
-                    return .observeSharedTask
+                    if let sharedOutcome {
+                        return .resume(Self.waitOutcome(
+                            for: sharedOutcome,
+                            joinedOrphanedProvisioning: wasOrphaned
+                        ))
+                    }
+                    waiters[id] = Waiter(
+                        continuation: continuation,
+                        joinedOrphanedProvisioning: wasOrphaned
+                    )
+                    return .registered
                 }
 
                 switch registration {
                 case .resume(let outcome):
                     continuation.resume(returning: outcome)
-                case .observeSharedTask:
-                    Task.detached {
-                        let outcome: ProvisioningWaitOutcome = switch await task.result {
-                        case .success(let session): .success(session)
-                        case .failure(let error): .sharedFailure(error)
-                        }
-                        self.complete(with: outcome)
-                    }
+                case .registered:
+                    break
                 }
             }
         } onCancel: {
-            self.complete(with: .waiterCancelled)
+            self.cancel(id: id)
         }
     }
 
-    private func complete(with outcome: ProvisioningWaitOutcome) {
-        let continuation: CheckedContinuation<ProvisioningWaitOutcome, Never>? = lock.withLock {
-            guard self.outcome == nil else { return nil }
-            self.outcome = outcome
-            defer { self.continuation = nil }
-            return self.continuation
+    func complete(with outcome: SharedProvisioningOutcome) {
+        typealias Resumption = (
+            CheckedContinuation<ProvisioningWaitOutcome, Never>,
+            ProvisioningWaitOutcome
+        )
+        let resumptions: [Resumption] = lock.withLock {
+            guard sharedOutcome == nil else { return [] }
+            sharedOutcome = outcome
+            let resumptions = waiters.values.map { waiter in
+                (
+                    waiter.continuation,
+                    Self.waitOutcome(
+                        for: outcome,
+                        joinedOrphanedProvisioning: waiter.joinedOrphanedProvisioning
+                    )
+                )
+            }
+            waiters.removeAll()
+            return resumptions
         }
-        continuation?.resume(returning: outcome)
+        resumptions.forEach { continuation, outcome in
+            continuation.resume(returning: outcome)
+        }
+    }
+
+    private func cancel(id: UUID) {
+        let continuation: CheckedContinuation<ProvisioningWaitOutcome, Never>? = lock.withLock {
+            guard sharedOutcome == nil else { return nil }
+            guard let waiter = waiters.removeValue(forKey: id) else {
+                cancelledBeforeRegistration.insert(id)
+                return nil
+            }
+            if waiters.isEmpty {
+                wasOrphaned = true
+            }
+            return waiter.continuation
+        }
+        continuation?.resume(returning: .waiterCancelled)
+    }
+
+    private static func waitOutcome(
+        for outcome: SharedProvisioningOutcome,
+        joinedOrphanedProvisioning: Bool
+    ) -> ProvisioningWaitOutcome {
+        switch outcome {
+        case .success(let session):
+            .success(
+                session,
+                joinedOrphanedProvisioning: joinedOrphanedProvisioning
+            )
+        case .failure(let error):
+            .sharedFailure(
+                error,
+                joinedOrphanedProvisioning: joinedOrphanedProvisioning
+            )
+        }
     }
 }

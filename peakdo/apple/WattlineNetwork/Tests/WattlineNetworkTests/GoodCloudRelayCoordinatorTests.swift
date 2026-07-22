@@ -252,6 +252,39 @@ final class GoodCloudRelayCoordinatorTests: XCTestCase {
         XCTAssertEqual(callCount, 2)
     }
 
+    func test_orphanedFailedProvisioningIsClearedBeforeNextLiveWaiter() async throws {
+        let provisioner = SuspendedFailureThenSuccessRelayProvisioner()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in EmptyRemoteRelayClient() }
+        )
+        let cancellationFinished = expectation(
+            description: "sole waiter cancels before orphaned provisioning fails"
+        )
+        let cancelledWaiter = Task {
+            defer { cancellationFinished.fulfill() }
+            return try await coordinator.session()
+        }
+
+        await provisioner.waitUntilFirstCall()
+        cancelledWaiter.cancel()
+        await fulfillment(of: [cancellationFinished], timeout: 0.5)
+        await provisioner.failFirstCall()
+
+        let session = try await coordinator.session()
+
+        XCTAssertEqual(session.sessionID, "replacement-session")
+        let callCount = await provisioner.callCount
+        XCTAssertEqual(callCount, 2)
+        do {
+            _ = try await cancelledWaiter.value
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
     func test_cancelledSSEWaitingForProvisioningNeverOpensRelayStream() async {
         let provisioner = SuspendedRelayProvisioner()
         let relay = DispatchRecordingRemoteRelayClient()
@@ -336,6 +369,40 @@ private actor CancellationThenSuccessRelayProvisioner: GoodCloudRelayProvisionin
             throw CancellationError()
         }
         return .fixture
+    }
+}
+
+private actor SuspendedFailureThenSuccessRelayProvisioner: GoodCloudRelayProvisioning {
+    private(set) var callCount = 0
+    private var firstContinuation: CheckedContinuation<RemoteAccessSession, Error>?
+    private var firstCallWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession {
+        callCount += 1
+        guard callCount == 1 else {
+            return RemoteAccessSession(
+                baseURL: URL(string: "https://relay.goodcloud.xyz/replacement/")!,
+                tokenDomain: ".goodcloud.xyz",
+                sessionID: "replacement-session",
+                issuedAtMillis: 84
+            )
+        }
+        let waiters = firstCallWaiters
+        firstCallWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return try await withCheckedThrowingContinuation { continuation in
+            firstContinuation = continuation
+        }
+    }
+
+    func waitUntilFirstCall() async {
+        guard callCount == 0 else { return }
+        await withCheckedContinuation { firstCallWaiters.append($0) }
+    }
+
+    func failFirstCall() {
+        firstContinuation?.resume(throwing: GoodCloudError.relayUnavailable)
+        firstContinuation = nil
     }
 }
 
