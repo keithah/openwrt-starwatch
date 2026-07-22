@@ -84,6 +84,19 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         self.operations = GoodCloudAccountOperationLock()
     }
 
+    public static func production() -> GoodCloudAccountService {
+        GoodCloudAccountService(auth: GoodCloudAuth())
+    }
+
+    public static func accountOnly(
+        client: any GoodCloudAccountClient
+    ) -> GoodCloudAccountService {
+        GoodCloudAccountService(
+            client: client,
+            remoteAccess: { _, _ in throw GoodCloudError.relayUnavailable }
+        )
+    }
+
     public init(
         client: any GoodCloudAccountClient,
         remoteAccess: @escaping @Sendable (String, Int) async throws -> RemoteAccessSession = { _, _ in

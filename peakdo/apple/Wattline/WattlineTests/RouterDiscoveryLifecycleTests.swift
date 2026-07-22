@@ -165,6 +165,48 @@ final class RouterDiscoveryLifecycleTests: XCTestCase {
         XCTAssertEqual(presentation.transportLabels, ["Router"])
     }
 
+    func testBonjourLifecycleDoesNotCallGoodCloudOrChangeSavedLANRecords() async throws {
+        let source = RecordingRouterDiscoverySource()
+        let accountClient = DiscoveryGoodCloudClient()
+        let account = GoodCloudAccountService.accountOnly(client: accountClient)
+        let associationStore = GoodCloudAssociationStore(
+            backend: DiscoveryAssociationBackend()
+        )
+        let hostStore = RouterHostStore(backend: DiscoveryHostBackend())
+        let saved = try RouterHostValidator.validate(
+            "192.168.8.1:8377",
+            displayName: "Saved LAN router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "DC:04:5A:EB:72:2B",
+            certificateFingerprint: nil
+        )
+        try await hostStore.save(saved)
+        let model = RouterConnectionModel(
+            hostStore: hostStore,
+            credentialStore: RouterCredentialStore(backend: DiscoveryCredentialBackend()),
+            discovery: RouterDiscovery(source: source),
+            enrollmentClientFactory: { _ in
+                throw NetworkError.unsupported("not used")
+            },
+            transportFactory: { _, _ in DiscoveryNoopTransport() },
+            goodCloudAccount: .init(account: account, provisioner: account),
+            goodCloudAssociations: associationStore
+        )
+        await model.reloadSavedHosts()
+        let validationCountBeforeDiscovery = await accountClient.validationCount
+
+        model.startDiscovery()
+        try await waitUntil { source.startCount == 1 }
+        model.stopDiscovery()
+        try await waitUntil { source.cancelCount == 1 }
+
+        let validationCountAfterDiscovery = await accountClient.validationCount
+        XCTAssertEqual(validationCountBeforeDiscovery, 1)
+        XCTAssertEqual(validationCountAfterDiscovery, validationCountBeforeDiscovery)
+        XCTAssertEqual(model.savedHosts, [saved])
+    }
+
     private func makeModel(discovery: RouterDiscovery) -> RouterConnectionModel {
         RouterConnectionModel(
             hostStore: RouterHostStore(backend: DiscoveryHostBackend()),
@@ -233,9 +275,33 @@ private final class RecordingRouterDiscoverySource: RouterDiscoverySource, @unch
 }
 
 private final class DiscoveryHostBackend: RouterHostKeyValueStore, @unchecked Sendable {
-    func data(forKey key: String) -> Data? { nil }
-    func set(_ data: Data, forKey key: String) throws {}
-    func removeValue(forKey key: String) {}
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+
+    func data(forKey key: String) -> Data? { lock.withLock { values[key] } }
+    func set(_ data: Data, forKey key: String) throws { lock.withLock { values[key] = data } }
+    func removeValue(forKey key: String) { lock.withLock { values[key] = nil } }
+}
+
+private actor DiscoveryGoodCloudClient: GoodCloudAccountClient {
+    private(set) var validationCount = 0
+
+    func hasStoredToken() async -> Bool {
+        validationCount += 1
+        return false
+    }
+
+    func login(email: String, password: String) async throws {}
+    func devices() async throws -> [GoodCloudDeviceSummary] { [] }
+    func logout() async throws {}
+}
+
+private final class DiscoveryAssociationBackend: GoodCloudAssociationKeyValueStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+
+    func data(forKey key: String) -> Data? { lock.withLock { values[key] } }
+    func set(_ data: Data?, forKey key: String) { lock.withLock { values[key] = data } }
 }
 
 private actor DiscoveryCredentialBackend: RouterCredentialBackend {

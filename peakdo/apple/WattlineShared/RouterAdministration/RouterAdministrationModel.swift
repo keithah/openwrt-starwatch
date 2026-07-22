@@ -203,11 +203,10 @@ final class RouterAdministrationModel {
 
     static func production(
         connections: RouterConnectionModel,
-        httpFactory: @escaping RouterAdministrationClient.HTTPFactory = {
-            try HTTPClient(endpoint: $0)
-        }
+        httpFactory: RouterAdministrationClient.HTTPFactory? = nil
     ) -> RouterAdministrationModel {
         let credentials = connections.credentialStore
+        let httpFactory = httpFactory ?? connections.administrationHTTPFactory
         return RouterAdministrationModel(
             connections: connections,
             adminClient: RouterAdministrationClient(

@@ -83,6 +83,17 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
         self.onBeforeProvisioningWait = { _, _ in }
     }
 
+    public static func production(
+        deviceID: String,
+        provisioner: any GoodCloudRelayProvisioning
+    ) -> GoodCloudRelayCoordinator {
+        GoodCloudRelayCoordinator(
+            deviceID: deviceID,
+            provisioner: provisioner,
+            relayClient: { RelayHTTPClient(session: $0) }
+        )
+    }
+
     init(
         deviceID: String,
         provisioner: any GoodCloudRelayProvisioning,
