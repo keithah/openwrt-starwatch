@@ -70,6 +70,8 @@ struct SettingsView: View {
                 }
             }
 
+            GoodCloudSettingsSection(model: model.goodCloudSettings)
+
             if model.isDemo {
                 Section {
                     if let host = model.routerAdministration.host {

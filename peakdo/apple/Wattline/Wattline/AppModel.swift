@@ -220,6 +220,7 @@ final class AppModel {
     private let widgetReloadAdapter: WidgetReloadAdapter?
     private let liveActivityCoordinator: LiveActivityCoordinator
     let routerConnections: RouterConnectionModel
+    let goodCloudSettings: GoodCloudSettingsModel
     private(set) var routerAdministration: RouterAdministrationModel
     let routerEnrollmentRoute: RouterEnrollmentRoute
     private var snapshotFlushTask: Task<Void, Never>?
@@ -311,6 +312,7 @@ final class AppModel {
         widgetReloadAdapter: WidgetReloadAdapter? = WidgetReloadAdapter(),
         liveActivityAdapter: any LiveActivityAdapter = SystemLiveActivityAdapter(),
         routerConnections: RouterConnectionModel = .production(),
+        goodCloudSettings: GoodCloudSettingsModel? = nil,
         routerAdministration: RouterAdministrationModel? = nil,
         routerEnrollmentRoute: RouterEnrollmentRoute = RouterEnrollmentRoute()
     ) {
@@ -327,6 +329,9 @@ final class AppModel {
         self.widgetReloadAdapter = widgetReloadAdapter
         self.liveActivityCoordinator = LiveActivityCoordinator(adapter: liveActivityAdapter)
         self.routerConnections = routerConnections
+        self.goodCloudSettings = goodCloudSettings ?? GoodCloudSettingsModel(
+            connections: routerConnections
+        )
         self.routerAdministration = routerAdministration ?? .production(
             connections: routerConnections
         )
