@@ -74,7 +74,7 @@ public func stream(
 
 Both paths install `gl-rtty-token` and `FE_TOKEN` in the supplied URLSession's cookie store, allow only GoodCloud-domain redirects, and stop before redirects emitted by the proxied target. Leading and non-leading slashes are normalized so Wattline's existing `/api/v1/...` paths append correctly to the encoded rtty target.
 
-A final `404`/relay error page or redirect to `gl-rtty/error.html` maps to `GoodCloudError.sessionExpired`. Network failures remain `GoodCloudError.transport`; GoodCloud account API code `-1010` remains distinguishable as account-session expiry.
+A final response whose URL ends in `gl-rtty/error.html` maps to `GoodCloudError.sessionExpired`. An ordinary target `404` remains the target's HTTP response. Network failures remain `GoodCloudError.transport`; GoodCloud account API code `-1010` remains distinguishable as account-session expiry.
 
 ### Wattline remote session coordinator
 
@@ -221,7 +221,7 @@ No compatible Wattline router is currently available because the GL-X3000 is out
 When replacement hardware arrives:
 
 1. Log in through Wattline and associate the X3000 GoodCloud device.
-2. Provision `remoteAccess(deviceID: ..., port: 8377)`.
+2. Provision `remoteAccess(deviceID: association.goodCloudDeviceID, port: 8377)`.
 3. Request `/api/v1/status` with the stored Wattline bearer token and confirm a `200` Wattline JSON response.
 4. Exercise a JSON mutation and confirm `wattlined` receives the authorization header and exact body.
 5. Hold `/api/v1/events` open and confirm live SSE frames arrive through the relay.
