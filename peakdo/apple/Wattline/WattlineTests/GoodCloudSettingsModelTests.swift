@@ -641,21 +641,52 @@ final class GoodCloudSettingsModelTests: XCTestCase {
             model: fixture.device.model,
             isOnline: true
         )
-        await routeLoader.holdNext(count: 2)
+        let olderCompletion = SettingsTaskCompletion()
+        await routeLoader.holdNext()
         let older = Task {
             await fixture.model.login(email: "owner@example.com", password: "older")
+            await olderCompletion.complete()
         }
-        try await waitUntil { await routeLoader.heldCount == 1 }
-        await fixture.account.setState(.authenticated([newerDevice]))
+        do {
+            try await waitUntil { await routeLoader.heldCount == 1 }
+        } catch {
+            older.cancel()
+            await fixture.account.releaseAllLogins()
+            await routeLoader.releaseAll()
+            try? await waitUntil { await olderCompletion.isComplete }
+            throw error
+        }
+
+        await fixture.account.holdNextLogin(returning: .authenticated([newerDevice]))
+        let newerCompletion = SettingsTaskCompletion()
         let newer = Task {
             await fixture.model.login(email: "owner@example.com", password: "newer")
+            await newerCompletion.complete()
         }
-        try await waitUntil { await routeLoader.heldCount == 2 }
+        do {
+            try await waitUntil { await fixture.account.loginIsHeld }
+            await routeLoader.release()
+            try await waitUntil { await olderCompletion.isComplete }
+            let completedPublicationCount = await routeLoader.loadCount
+            XCTAssertEqual(completedPublicationCount, 1)
 
-        await routeLoader.releaseNext()
-        await routeLoader.releaseNext()
-        await older.value
-        await newer.value
+            await routeLoader.holdNext()
+            await fixture.account.releaseLogin()
+            try await waitUntil { await routeLoader.heldCount == 1 }
+            await routeLoader.release()
+            try await waitUntil { await newerCompletion.isComplete }
+        } catch {
+            older.cancel()
+            newer.cancel()
+            await fixture.account.releaseAllLogins()
+            await routeLoader.releaseAll()
+            try? await waitUntil {
+                let olderIsComplete = await olderCompletion.isComplete
+                let newerIsComplete = await newerCompletion.isComplete
+                return olderIsComplete && newerIsComplete
+            }
+            throw error
+        }
 
         XCTAssertEqual(fixture.model.devices, [newerDevice])
         let publicationCount = await routeLoader.loadCount
@@ -677,27 +708,58 @@ final class GoodCloudSettingsModelTests: XCTestCase {
             routerMAC: try XCTUnwrap(fixture.host.deviceID),
             device: fixture.device
         ))
-        await routeLoader.holdNext(count: 2)
+        let olderCompletion = SettingsTaskCompletion()
+        await routeLoader.holdNext()
         let older = Task {
             await fixture.model.login(email: "owner@example.com", password: "older")
+            await olderCompletion.complete()
         }
-        try await waitUntil { await routeLoader.heldCount == 1 }
+        do {
+            try await waitUntil { await routeLoader.heldCount == 1 }
+        } catch {
+            older.cancel()
+            await fixture.account.releaseAllLogins()
+            await routeLoader.releaseAll()
+            try? await waitUntil { await olderCompletion.isComplete }
+            throw error
+        }
+
+        await fixture.account.holdNextLogin(returning: .authenticated([fixture.device]))
+        let newerCompletion = SettingsTaskCompletion()
         let newer = Task {
             await fixture.model.login(email: "owner@example.com", password: "newer")
+            await newerCompletion.complete()
         }
-        try await waitUntil { await routeLoader.heldCount == 2 }
-        newer.cancel()
+        do {
+            try await waitUntil { await fixture.account.loginIsHeld }
+            await routeLoader.release()
+            try await waitUntil { await olderCompletion.isComplete }
 
-        await routeLoader.releaseNext()
-        await routeLoader.releaseNext()
-        await older.value
-        await newer.value
+            _ = try fixture.connections.makeTransport(for: fixture.host)
+            XCTAssertEqual(recorder.preferredTransportCount, 1)
+            XCTAssertEqual(recorder.directTransportCount, 0)
+
+            newer.cancel()
+            await fixture.account.releaseLogin()
+            try await waitUntil { await newerCompletion.isComplete }
+        } catch {
+            older.cancel()
+            newer.cancel()
+            await fixture.account.releaseAllLogins()
+            await routeLoader.releaseAll()
+            try? await waitUntil {
+                let olderIsComplete = await olderCompletion.isComplete
+                let newerIsComplete = await newerCompletion.isComplete
+                return olderIsComplete && newerIsComplete
+            }
+            throw error
+        }
 
         XCTAssertEqual(fixture.model.state, .loggedOut)
         let publicationCount = await routeLoader.loadCount
-        XCTAssertEqual(publicationCount, 2, "stale operation must not publish rollback")
+        XCTAssertEqual(publicationCount, 1, "stale operation must not publish rollback")
         _ = try fixture.connections.makeTransport(for: fixture.host)
-        XCTAssertEqual(recorder.preferredTransportCount, 0)
+        XCTAssertEqual(recorder.preferredTransportCount, 1)
         XCTAssertEqual(recorder.directTransportCount, 1)
     }
 
@@ -806,6 +868,14 @@ private struct SettingsFixture {
     let device: GoodCloudDeviceSummary
 }
 
+private actor SettingsTaskCompletion {
+    private(set) var isComplete = false
+
+    func complete() {
+        isComplete = true
+    }
+}
+
 private actor SettingsAccountService: GoodCloudAccountServing {
     struct LoginInput: Equatable {
         let email: String
@@ -882,6 +952,11 @@ private actor SettingsAccountService: GoodCloudAccountServing {
     func releaseLogin() {
         loginContinuation?.resume()
         loginContinuation = nil
+    }
+    func releaseAllLogins() {
+        holdLogin = false
+        heldLoginResult = nil
+        releaseLogin()
     }
     func holdNextValidation(returning result: GoodCloudSessionState) {
         heldValidationResult = result
@@ -1033,5 +1108,12 @@ private actor SettingsRouteAssociationLoader {
     func releaseNext() {
         guard !continuations.isEmpty else { return }
         continuations.removeFirst().resume()
+    }
+
+    func releaseAll() {
+        holdsRemaining = 0
+        let heldContinuations = continuations
+        continuations.removeAll()
+        heldContinuations.forEach { $0.resume() }
     }
 }
