@@ -176,12 +176,13 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         let olderRefresh = Task { await service.refreshDevices() }
         await client.waitUntilFirstDevicesSuspends()
 
-        await service.logout()
+        let logout = Task { await service.logout() }
         await client.resumeFirstDevices(returning: [.fixture])
         let olderResult = await olderRefresh.value
+        await logout.value
         let state = await service.state
 
-        XCTAssertEqual(olderResult, .loggedOut)
+        XCTAssertEqual(olderResult, .authenticated([.fixture]))
         XCTAssertEqual(state, .loggedOut)
     }
 
@@ -193,14 +194,64 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         let olderRefresh = Task { await service.refreshDevices() }
         await client.waitUntilFirstDevicesSuspends()
 
-        let newerResult = await service.refreshDevices()
+        let newerRefresh = Task { await service.refreshDevices() }
         await client.resumeFirstDevices(returning: [.fixture])
         let olderResult = await olderRefresh.value
+        let newerResult = await newerRefresh.value
         let state = await service.state
 
         XCTAssertEqual(newerResult, .requiresLogin)
-        XCTAssertEqual(olderResult, .requiresLogin)
+        XCTAssertEqual(olderResult, .authenticated([.fixture]))
         XCTAssertEqual(state, .requiresLogin)
+    }
+
+    func test_logoutDuringSuspendedLoginRunsAfterLoginAndLeavesNoStoredToken() async {
+        let logoutEntered = expectation(description: "logout entered before login was released")
+        logoutEntered.isInverted = true
+        let client = SuspendedLoginCredentialClient(
+            onLogout: ExpectationSignal(logoutEntered)
+        )
+        let service = GoodCloudAccountService(client: client)
+        let login = Task {
+            await service.login(email: "owner@example.com", password: "private")
+        }
+        await client.waitUntilLoginSuspends()
+
+        let logout = Task { await service.logout() }
+        await fulfillment(of: [logoutEntered], timeout: 0.05)
+        await client.resumeLogin()
+        _ = await login.value
+        await logout.value
+        let state = await service.state
+        let hasStoredToken = await client.hasStoredToken()
+
+        XCTAssertEqual(state, .loggedOut)
+        XCTAssertFalse(hasStoredToken)
+    }
+
+    func test_newerRefreshRunsAfterSuspendedExpiryCleanupAndObservesDeletedToken() async {
+        let newerRefreshEntered = expectation(
+            description: "newer refresh entered before expiry cleanup was released"
+        )
+        newerRefreshEntered.isInverted = true
+        let client = SuspendedExpiryCleanupCredentialClient(
+            onSecondDevices: ExpectationSignal(newerRefreshEntered)
+        )
+        let service = GoodCloudAccountService(client: client)
+        let expiredRefresh = Task { await service.refreshDevices() }
+        await client.waitUntilLogoutSuspends()
+
+        let newerRefresh = Task { await service.refreshDevices() }
+        await fulfillment(of: [newerRefreshEntered], timeout: 0.05)
+        await client.resumeLogout()
+        _ = await expiredRefresh.value
+        let newerResult = await newerRefresh.value
+        let state = await service.state
+        let hasStoredToken = await client.hasStoredToken()
+
+        XCTAssertEqual(newerResult, .failed("GoodCloud request failed."))
+        XCTAssertEqual(state, .failed("GoodCloud request failed."))
+        XCTAssertFalse(hasStoredToken)
     }
 }
 
@@ -303,6 +354,110 @@ private actor SuspendedGoodCloudAccountClient: GoodCloudAccountClient {
         let continuation = firstDevicesContinuation
         firstDevicesContinuation = nil
         continuation?.resume(returning: devices)
+    }
+}
+
+private final class ExpectationSignal: @unchecked Sendable {
+    private let expectation: XCTestExpectation
+
+    init(_ expectation: XCTestExpectation) {
+        self.expectation = expectation
+    }
+
+    func fulfill() {
+        expectation.fulfill()
+    }
+}
+
+private actor SuspendedLoginCredentialClient: GoodCloudAccountClient {
+    private let onLogout: ExpectationSignal
+    private var storedToken = false
+    private var loginContinuation: CheckedContinuation<Void, Never>?
+    private var loginWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(onLogout: ExpectationSignal) {
+        self.onLogout = onLogout
+    }
+
+    func hasStoredToken() -> Bool { storedToken }
+
+    func login(email: String, password: String) async {
+        await withCheckedContinuation { continuation in
+            loginContinuation = continuation
+            let waiters = loginWaiters
+            loginWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+        storedToken = true
+    }
+
+    func devices() -> [GoodCloudDeviceSummary] { [.fixture] }
+
+    func logout() {
+        onLogout.fulfill()
+        storedToken = false
+    }
+
+    func waitUntilLoginSuspends() async {
+        guard loginContinuation == nil else { return }
+        await withCheckedContinuation { continuation in
+            loginWaiters.append(continuation)
+        }
+    }
+
+    func resumeLogin() {
+        let continuation = loginContinuation
+        loginContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private actor SuspendedExpiryCleanupCredentialClient: GoodCloudAccountClient {
+    private let onSecondDevices: ExpectationSignal
+    private var storedToken = true
+    private var devicesInvocationCount = 0
+    private var logoutContinuation: CheckedContinuation<Void, Never>?
+    private var logoutWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(onSecondDevices: ExpectationSignal) {
+        self.onSecondDevices = onSecondDevices
+    }
+
+    func hasStoredToken() -> Bool { storedToken }
+
+    func login(email: String, password: String) {}
+
+    func devices() throws -> [GoodCloudDeviceSummary] {
+        devicesInvocationCount += 1
+        if devicesInvocationCount == 1 {
+            throw GoodCloudError.api(code: -1010, message: "token=secret server text")
+        }
+        onSecondDevices.fulfill()
+        guard storedToken else { throw GoodCloudError.authFailed }
+        return [.fixture]
+    }
+
+    func logout() async {
+        await withCheckedContinuation { continuation in
+            logoutContinuation = continuation
+            let waiters = logoutWaiters
+            logoutWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+        storedToken = false
+    }
+
+    func waitUntilLogoutSuspends() async {
+        guard logoutContinuation == nil else { return }
+        await withCheckedContinuation { continuation in
+            logoutWaiters.append(continuation)
+        }
+    }
+
+    func resumeLogout() {
+        let continuation = logoutContinuation
+        logoutContinuation = nil
+        continuation?.resume()
     }
 }
 

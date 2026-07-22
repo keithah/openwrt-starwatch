@@ -72,6 +72,7 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     private let auth: GoodCloudAuth?
     private let client: (any GoodCloudAccountClient)?
     private let provisionRemoteAccess: @Sendable (String, Int) async throws -> RemoteAccessSession
+    private let operations = GoodCloudAccountOperationLock()
 
     public init(auth: GoodCloudAuth = GoodCloudAuth()) {
         self.auth = auth
@@ -94,6 +95,8 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func validateStoredSession() async -> GoodCloudSessionState {
+        await operations.acquire()
+        defer { operations.release() }
         let generation = beginOperation()
         state = .loading
         guard await hasStoredToken() else {
@@ -108,6 +111,8 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func login(email: String, password: String) async -> GoodCloudSessionState {
+        await operations.acquire()
+        defer { operations.release() }
         let generation = beginOperation()
         state = .loading
         do {
@@ -120,6 +125,8 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func refreshDevices() async -> GoodCloudSessionState {
+        await operations.acquire()
+        defer { operations.release() }
         let generation = beginOperation()
         state = .loading
         do {
@@ -131,6 +138,8 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func logout() async {
+        await operations.acquire()
+        defer { operations.release() }
         let generation = beginOperation()
         do {
             try await clearSession()
@@ -141,6 +150,8 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession {
+        await operations.acquire()
+        defer { operations.release() }
         do {
             return try await provisionRemoteAccess(deviceID, port)
         } catch {
@@ -224,5 +235,36 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
             }
         }
         return publish(.failed(Self.redactedFailure), for: generation)
+    }
+}
+
+private final class GoodCloudAccountOperationLock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isAcquired = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        await withCheckedContinuation { continuation in
+            let acquiredImmediately = lock.withLock {
+                guard isAcquired else {
+                    isAcquired = true
+                    return true
+                }
+                waiters.append(continuation)
+                return false
+            }
+            if acquiredImmediately { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let next: CheckedContinuation<Void, Never>? = lock.withLock {
+            guard !waiters.isEmpty else {
+                isAcquired = false
+                return nil
+            }
+            return waiters.removeFirst()
+        }
+        next?.resume()
     }
 }
