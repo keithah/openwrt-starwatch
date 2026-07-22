@@ -72,7 +72,7 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     private let auth: GoodCloudAuth?
     private let client: (any GoodCloudAccountClient)?
     private let provisionRemoteAccess: @Sendable (String, Int) async throws -> RemoteAccessSession
-    private let operations = GoodCloudAccountOperationLock()
+    private let operations: GoodCloudAccountOperationLock
 
     public init(auth: GoodCloudAuth = GoodCloudAuth()) {
         self.auth = auth
@@ -81,6 +81,7 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
             let client = SignedAPIClient(tokens: PasswordTokenProvider(auth: auth))
             return try await client.remoteAccess(deviceID: deviceID, port: port)
         }
+        self.operations = GoodCloudAccountOperationLock()
     }
 
     public init(
@@ -92,10 +93,27 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         self.auth = nil
         self.client = client
         self.provisionRemoteAccess = remoteAccess
+        self.operations = GoodCloudAccountOperationLock()
+    }
+
+    init(
+        client: any GoodCloudAccountClient,
+        onOperationQueued: @escaping @Sendable () -> Void
+    ) {
+        self.auth = nil
+        self.client = client
+        self.provisionRemoteAccess = { _, _ in
+            throw GoodCloudError.relayUnavailable
+        }
+        self.operations = GoodCloudAccountOperationLock(onQueued: onOperationQueued)
     }
 
     public func validateStoredSession() async -> GoodCloudSessionState {
-        await operations.acquire()
+        guard await operations.acquire() else { return state }
+        guard !Task.isCancelled else {
+            operations.release()
+            return state
+        }
         defer { operations.release() }
         let generation = beginOperation()
         state = .loading
@@ -111,7 +129,11 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func login(email: String, password: String) async -> GoodCloudSessionState {
-        await operations.acquire()
+        guard await operations.acquire() else { return state }
+        guard !Task.isCancelled else {
+            operations.release()
+            return state
+        }
         defer { operations.release() }
         let generation = beginOperation()
         state = .loading
@@ -125,7 +147,11 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func refreshDevices() async -> GoodCloudSessionState {
-        await operations.acquire()
+        guard await operations.acquire() else { return state }
+        guard !Task.isCancelled else {
+            operations.release()
+            return state
+        }
         defer { operations.release() }
         let generation = beginOperation()
         state = .loading
@@ -138,7 +164,11 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func logout() async {
-        await operations.acquire()
+        guard await operations.acquire() else { return }
+        guard !Task.isCancelled else {
+            operations.release()
+            return
+        }
         defer { operations.release() }
         let generation = beginOperation()
         do {
@@ -150,7 +180,11 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     }
 
     public func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession {
-        await operations.acquire()
+        guard await operations.acquire() else { throw CancellationError() }
+        guard !Task.isCancelled else {
+            operations.release()
+            throw CancellationError()
+        }
         defer { operations.release() }
         do {
             return try await provisionRemoteAccess(deviceID, port)
@@ -239,32 +273,70 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
 }
 
 private final class GoodCloudAccountOperationLock: @unchecked Sendable {
-    private let lock = NSLock()
-    private var isAcquired = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
 
-    func acquire() async {
-        await withCheckedContinuation { continuation in
-            let acquiredImmediately = lock.withLock {
-                guard isAcquired else {
-                    isAcquired = true
-                    return true
+    private enum Registration {
+        case acquired
+        case cancelled
+        case queued
+    }
+
+    private let lock = NSLock()
+    private let onQueued: @Sendable () -> Void
+    private var isAcquired = false
+    private var waiters: [Waiter] = []
+
+    init(onQueued: @escaping @Sendable () -> Void = {}) {
+        self.onQueued = onQueued
+    }
+
+    func acquire() async -> Bool {
+        guard !Task.isCancelled else { return false }
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let registration = lock.withLock {
+                    guard !Task.isCancelled else {
+                        return Registration.cancelled
+                    }
+                    guard isAcquired else {
+                        isAcquired = true
+                        return Registration.acquired
+                    }
+                    waiters.append(Waiter(id: waiterID, continuation: continuation))
+                    return Registration.queued
                 }
-                waiters.append(continuation)
-                return false
+                switch registration {
+                case .acquired:
+                    continuation.resume(returning: true)
+                case .cancelled:
+                    continuation.resume(returning: false)
+                case .queued:
+                    onQueued()
+                }
             }
-            if acquiredImmediately { continuation.resume() }
+        } onCancel: {
+            let continuation: CheckedContinuation<Bool, Never>? = self.lock.withLock {
+                guard let index = self.waiters.firstIndex(where: { $0.id == waiterID }) else {
+                    return nil
+                }
+                return self.waiters.remove(at: index).continuation
+            }
+            continuation?.resume(returning: false)
         }
     }
 
     func release() {
-        let next: CheckedContinuation<Void, Never>? = lock.withLock {
+        let next: CheckedContinuation<Bool, Never>? = lock.withLock {
             guard !waiters.isEmpty else {
                 isAcquired = false
                 return nil
             }
-            return waiters.removeFirst()
+            return waiters.removeFirst().continuation
         }
-        next?.resume()
+        next?.resume(returning: true)
     }
 }
