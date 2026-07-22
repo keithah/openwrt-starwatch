@@ -398,16 +398,14 @@ final class RouterAppWiringTests: XCTestCase {
         let provisioner = GoodCloudAccountService.accountOnly(
             client: RouterWiringGoodCloudClient(devices: [])
         )
-        let associationBarrier = AsyncCallBarrier()
-        let associationLoader = SuspendedGoodCloudAssociationLoader(
+        let associationLoader = ControllableGoodCloudAssociationLoader(
             associations: [
                 GoodCloudAssociation(
                     hostID: saved.id,
                     routerMAC: "DC045AEB722B",
                     device: device
                 ),
-            ],
-            barrier: associationBarrier
+            ]
         )
 
         let hostStore = RouterHostStore(backend: RouterHostMemoryBackend())
@@ -448,25 +446,25 @@ final class RouterAppWiringTests: XCTestCase {
         await model.reloadSavedHosts()
         _ = try model.makeTransport(for: saved)
         _ = try model.administrationHTTPFactory(saved.endpoint)
-        await associationBarrier.holdNext()
+        await associationLoader.holdNext()
 
-        let olderRefreshFinished = expectation(description: "older refresh finished")
         let olderRefresh = Task {
             await model.reloadSavedHosts()
-            olderRefreshFinished.fulfill()
         }
         do {
             try await waitUntil(timeout: .seconds(2)) {
-                await associationBarrier.isBlocked
+                await associationLoader.isBlocked
             }
         } catch {
-            await associationBarrier.release()
+            olderRefresh.cancel()
+            await associationLoader.disarm()
+            await olderRefresh.value
             throw error
         }
         await model.refreshGoodCloudRemoteAccess()
-        await associationBarrier.release()
-        await fulfillment(of: [olderRefreshFinished], timeout: 2)
+        await associationLoader.release()
         olderRefresh.cancel()
+        await olderRefresh.value
 
         _ = try model.makeTransport(for: saved)
         _ = try model.administrationHTTPFactory(saved.endpoint)
@@ -629,18 +627,49 @@ private actor SequencedGoodCloudAccount: GoodCloudAccountServing {
     func logout() async {}
 }
 
-private actor SuspendedGoodCloudAssociationLoader {
+private actor ControllableGoodCloudAssociationLoader {
     private let associations: [GoodCloudAssociation]
-    private let barrier: AsyncCallBarrier
+    private var shouldHoldNext = false
+    private var holdContinuation: CheckedContinuation<Void, Never>?
+    private(set) var isBlocked = false
 
-    init(associations: [GoodCloudAssociation], barrier: AsyncCallBarrier) {
+    init(associations: [GoodCloudAssociation]) {
         self.associations = associations
-        self.barrier = barrier
+    }
+
+    func holdNext() {
+        shouldHoldNext = true
     }
 
     func load() async -> [GoodCloudAssociation] {
-        await barrier.waitIfHeld()
+        guard shouldHoldNext else { return associations }
+        shouldHoldNext = false
+        guard !Task.isCancelled else { return associations }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    isBlocked = true
+                    holdContinuation = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.release() }
+        }
         return associations
+    }
+
+    func release() {
+        isBlocked = false
+        let continuation = holdContinuation
+        holdContinuation = nil
+        continuation?.resume()
+    }
+
+    func disarm() {
+        shouldHoldNext = false
+        release()
     }
 }
 

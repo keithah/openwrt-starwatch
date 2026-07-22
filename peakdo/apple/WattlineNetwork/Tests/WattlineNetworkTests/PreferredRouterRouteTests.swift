@@ -134,9 +134,20 @@ final class PreferredRouterRouteTests: XCTestCase {
             remoteEvents: ScriptedPreferredEventStream(scripts: [])
         )
         let client = PreferredRouterHTTPClient(route: route)
+        let olderCompletion = PreferredRouteTaskCompletionProbe()
 
         let olderRequest = Task {
-            try await client.get("/api/v1/status", token: "wattline-token")
+            do {
+                let response = try await client.get(
+                    "/api/v1/status",
+                    token: "wattline-token"
+                )
+                await olderCompletion.mark()
+                return response
+            } catch {
+                await olderCompletion.mark()
+                throw error
+            }
         }
         do {
             try await lan.waitUntilFirstRequestIsSuspended()
@@ -147,9 +158,11 @@ final class PreferredRouterRouteTests: XCTestCase {
         } catch {
             olderRequest.cancel()
             await lan.resumeFirstRequest(with: .failure(CancellationError()))
+            try await olderCompletion.waitUntilMarked()
             _ = try? await olderRequest.value
             throw error
         }
+        try await olderCompletion.waitUntilMarked()
         _ = try await olderRequest.value
         _ = try await client.request(
             "PUT",
@@ -186,9 +199,20 @@ final class PreferredRouterRouteTests: XCTestCase {
         )
         let client = PreferredRouterHTTPClient(route: route)
         let events = PreferredRouterEventStream(route: route)
+        let olderCompletion = PreferredRouteTaskCompletionProbe()
 
         let olderRequest = Task {
-            try await client.get("/api/v1/status", token: "wattline-token")
+            do {
+                let response = try await client.get(
+                    "/api/v1/status",
+                    token: "wattline-token"
+                )
+                await olderCompletion.mark()
+                return response
+            } catch {
+                await olderCompletion.mark()
+                throw error
+            }
         }
         do {
             try await lan.waitUntilFirstRequestIsSuspended()
@@ -202,9 +226,11 @@ final class PreferredRouterRouteTests: XCTestCase {
         } catch {
             olderRequest.cancel()
             await lan.resumeFirstRequest(with: .failure(CancellationError()))
+            try await olderCompletion.waitUntilMarked()
             _ = try? await olderRequest.value
             throw error
         }
+        try await olderCompletion.waitUntilMarked()
         _ = try await olderRequest.value
         _ = try await client.request(
             "PUT",
@@ -219,6 +245,68 @@ final class PreferredRouterRouteTests: XCTestCase {
         XCTAssertEqual(lanCallCount, 3)
         XCTAssertEqual(remoteCallCount, 2)
         XCTAssertEqual(selected, .local)
+    }
+
+    func testSuspendedClientConsumesResolutionPublishedBeforeRequestRegistration() async throws {
+        let lan = SuspendedPreferredHTTPClient()
+        let completion = PreferredRouteTaskCompletionProbe()
+        await lan.resumeFirstRequest(with: .success(Self.okResponse()))
+
+        let request = Task {
+            do {
+                let response = try await lan.get("/api/v1/status", token: "token")
+                await completion.mark()
+                return response
+            } catch {
+                await completion.mark()
+                throw error
+            }
+        }
+        do {
+            try await completion.waitUntilMarked(timeout: .seconds(1))
+        } catch {
+            request.cancel()
+            await lan.resumeFirstRequest(with: .failure(CancellationError()))
+            try await completion.waitUntilMarked()
+            _ = try? await request.value
+            throw error
+        }
+
+        _ = try await request.value
+    }
+
+    func testCancelingSuspendedClientRequestCompletesIt() async throws {
+        let lan = SuspendedPreferredHTTPClient()
+        let completion = PreferredRouteTaskCompletionProbe()
+        let request = Task {
+            do {
+                let response = try await lan.get("/api/v1/status", token: "token")
+                await completion.mark()
+                return response
+            } catch {
+                await completion.mark()
+                throw error
+            }
+        }
+        try await lan.waitUntilFirstRequestIsSuspended()
+        request.cancel()
+        do {
+            try await completion.waitUntilMarked(timeout: .seconds(1))
+        } catch {
+            await lan.resumeFirstRequest(with: .failure(CancellationError()))
+            try await completion.waitUntilMarked()
+            _ = try? await request.value
+            throw error
+        }
+
+        do {
+            _ = try await request.value
+            XCTFail("expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("expected cancellation, got \(error)")
+        }
     }
 
     func testEachSSEConnectionProbesLANBeforeRemote() async throws {
@@ -338,6 +426,8 @@ private actor ScriptedPreferredHTTPClient: RouterHTTPClient {
 
 private actor SuspendedPreferredHTTPClient: RouterHTTPClient {
     private var firstRequestContinuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+    private var pendingFirstRequestResult: Result<(Data, HTTPURLResponse), Error>?
+    private var firstRequestIsResolved = false
     private var subsequentResults: [Result<(Data, HTTPURLResponse), Error>]
     private(set) var callCount = 0
 
@@ -357,8 +447,22 @@ private actor SuspendedPreferredHTTPClient: RouterHTTPClient {
     ) async throws -> (Data, HTTPURLResponse) {
         callCount += 1
         if callCount == 1 {
-            return try await withCheckedThrowingContinuation { continuation in
-                firstRequestContinuation = continuation
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    if let pendingFirstRequestResult {
+                        self.pendingFirstRequestResult = nil
+                        continuation.resume(with: pendingFirstRequestResult)
+                    } else if Task.isCancelled {
+                        firstRequestIsResolved = true
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        firstRequestContinuation = continuation
+                    }
+                }
+            } onCancel: {
+                Task {
+                    await self.resumeFirstRequest(with: .failure(CancellationError()))
+                }
             }
         }
         guard !subsequentResults.isEmpty else {
@@ -383,13 +487,38 @@ private actor SuspendedPreferredHTTPClient: RouterHTTPClient {
     func resumeFirstRequest(
         with result: Result<(Data, HTTPURLResponse), Error>
     ) {
-        firstRequestContinuation?.resume(with: result)
-        firstRequestContinuation = nil
+        guard !firstRequestIsResolved else { return }
+        firstRequestIsResolved = true
+        if let firstRequestContinuation {
+            self.firstRequestContinuation = nil
+            firstRequestContinuation.resume(with: result)
+        } else {
+            pendingFirstRequestResult = result
+        }
     }
 }
 
 private enum SuspendedPreferredHTTPClientError: Error {
     case timedOut
+}
+
+private actor PreferredRouteTaskCompletionProbe {
+    private var isMarked = false
+
+    func mark() {
+        isMarked = true
+    }
+
+    func waitUntilMarked(timeout: Duration = .seconds(2)) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !isMarked {
+            guard clock.now < deadline else {
+                throw SuspendedPreferredHTTPClientError.timedOut
+            }
+            try await clock.sleep(for: .milliseconds(10))
+        }
+    }
 }
 
 private final class ScriptedPreferredEventStream: RouterEventStream, @unchecked Sendable {
