@@ -376,6 +376,107 @@ final class RouterAppWiringTests: XCTestCase {
         XCTAssertEqual(recorder.endpoints, [saved.endpoint, saved.endpoint])
     }
 
+    func testOlderAuthenticatedRefreshCannotRepublishRemoteAccessAfterLogoutRefresh() async throws {
+        let saved = try host(
+            name: "Router",
+            address: "192.168.8.1:8377",
+            mac: "DC:04:5A:EB:72:2B"
+        )
+        let device = GoodCloudDeviceSummary(
+            id: "42",
+            name: "Wattline X3000",
+            mac: "DC:04:5A:EB:72:2B",
+            ddns: "wattline.glddns.com",
+            model: "GL-X3000",
+            isOnline: true
+        )
+        let account = SequencedGoodCloudAccount(states: [
+            .authenticated([device]),
+            .authenticated([device]),
+            .loggedOut,
+        ])
+        let provisioner = GoodCloudAccountService.accountOnly(
+            client: RouterWiringGoodCloudClient(devices: [])
+        )
+        let associationBarrier = AsyncCallBarrier()
+        let associationLoader = SuspendedGoodCloudAssociationLoader(
+            associations: [
+                GoodCloudAssociation(
+                    hostID: saved.id,
+                    routerMAC: "DC045AEB722B",
+                    device: device
+                ),
+            ],
+            barrier: associationBarrier
+        )
+
+        let hostStore = RouterHostStore(backend: RouterHostMemoryBackend())
+        try await hostStore.save(saved)
+        let administrationRecorder = RouteFactoryRecorder()
+        let administrationRegistry = GoodCloudAdministrationHTTPRegistry(
+            directFactory: { endpoint in
+                administrationRecorder.makeDirectClient(endpoint: endpoint)
+            },
+            preferredFactory: { endpoint, _, _ in
+                administrationRecorder.makePreferredClient(endpoint: endpoint)
+            }
+        )
+        var directTransportCount = 0
+        var preferredTransportCount = 0
+        let model = RouterConnectionModel(
+            hostStore: hostStore,
+            credentialStore: RouterCredentialStore(backend: RouterCredentialMemoryBackend()),
+            enrollmentClientFactory: { _ in
+                throw NetworkError.unsupported("not used")
+            },
+            transportFactory: { _, _ in
+                directTransportCount += 1
+                return RouterSelectionTransport(identity: self.identity(mac: nil, cid: nil))
+            },
+            goodCloudAccount: .init(account: account, provisioner: provisioner),
+            goodCloudAssociationLoader: { await associationLoader.load() },
+            preferredTransportFactory: { _, _, _, _ in
+                preferredTransportCount += 1
+                return RouterSelectionTransport(identity: self.identity(mac: nil, cid: nil))
+            },
+            administrationHTTPFactory: { endpoint in
+                try administrationRegistry.client(for: endpoint)
+            },
+            goodCloudAdministrationHTTPRegistry: administrationRegistry
+        )
+
+        await model.reloadSavedHosts()
+        _ = try model.makeTransport(for: saved)
+        _ = try model.administrationHTTPFactory(saved.endpoint)
+        await associationBarrier.holdNext()
+
+        let olderRefreshFinished = expectation(description: "older refresh finished")
+        let olderRefresh = Task {
+            await model.reloadSavedHosts()
+            olderRefreshFinished.fulfill()
+        }
+        do {
+            try await waitUntil(timeout: .seconds(2)) {
+                await associationBarrier.isBlocked
+            }
+        } catch {
+            await associationBarrier.release()
+            throw error
+        }
+        await model.refreshGoodCloudRemoteAccess()
+        await associationBarrier.release()
+        await fulfillment(of: [olderRefreshFinished], timeout: 2)
+        olderRefresh.cancel()
+
+        _ = try model.makeTransport(for: saved)
+        _ = try model.administrationHTTPFactory(saved.endpoint)
+
+        XCTAssertEqual(directTransportCount, 1)
+        XCTAssertEqual(preferredTransportCount, 1)
+        XCTAssertEqual(administrationRecorder.directCount, 1)
+        XCTAssertEqual(administrationRecorder.preferredCount, 1)
+    }
+
     private func makeFixture(
         hostBackend: RouterHostMemoryBackend = RouterHostMemoryBackend(),
         enrollmentClientFactory: @escaping RouterConnectionModel.EnrollmentClientFactory = { _ in
@@ -509,6 +610,56 @@ private final class RouterWiringAssociationBackend: GoodCloudAssociationKeyValue
 
     func set(_ data: Data?, forKey key: String) {
         lock.withLock { values[key] = data }
+    }
+}
+
+private actor SequencedGoodCloudAccount: GoodCloudAccountServing {
+    private var states: [GoodCloudSessionState]
+
+    init(states: [GoodCloudSessionState]) {
+        self.states = states
+    }
+
+    func validateStoredSession() async -> GoodCloudSessionState {
+        states.removeFirst()
+    }
+
+    func login(email: String, password: String) async -> GoodCloudSessionState { .loggedOut }
+    func refreshDevices() async -> GoodCloudSessionState { .loggedOut }
+    func logout() async {}
+}
+
+private actor SuspendedGoodCloudAssociationLoader {
+    private let associations: [GoodCloudAssociation]
+    private let barrier: AsyncCallBarrier
+
+    init(associations: [GoodCloudAssociation], barrier: AsyncCallBarrier) {
+        self.associations = associations
+        self.barrier = barrier
+    }
+
+    func load() async -> [GoodCloudAssociation] {
+        await barrier.waitIfHeld()
+        return associations
+    }
+}
+
+private final class RouteFactoryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedDirectCount = 0
+    private var recordedPreferredCount = 0
+
+    var directCount: Int { lock.withLock { recordedDirectCount } }
+    var preferredCount: Int { lock.withLock { recordedPreferredCount } }
+
+    func makeDirectClient(endpoint: RouterEndpoint) -> any RouterHTTPClient {
+        lock.withLock { recordedDirectCount += 1 }
+        return RouterAdministrationNoopHTTPClient()
+    }
+
+    func makePreferredClient(endpoint: RouterEndpoint) -> any RouterHTTPClient {
+        lock.withLock { recordedPreferredCount += 1 }
+        return RouterAdministrationNoopHTTPClient()
     }
 }
 

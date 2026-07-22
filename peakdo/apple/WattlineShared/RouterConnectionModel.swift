@@ -145,6 +145,7 @@ final class RouterConnectionModel {
         _ association: GoodCloudAssociation,
         _ provisioner: any GoodCloudRelayProvisioning
     ) throws -> any DeviceTransport
+    typealias GoodCloudAssociationLoader = @Sendable () async -> [GoodCloudAssociation]
 
     private(set) var savedHosts: [RouterHostMetadata] = []
     private(set) var discoveredRouters: [DiscoveredRouter] = []
@@ -165,10 +166,12 @@ final class RouterConnectionModel {
     let administrationHTTPFactory: RouterAdministrationClient.HTTPFactory
     let goodCloudAccount: GoodCloudAccountDependencies?
     let goodCloudAssociations: GoodCloudAssociationStore?
+    private let goodCloudAssociationLoader: GoodCloudAssociationLoader?
     private let preferredTransportFactory: PreferredTransportFactory?
     private let goodCloudAdministrationHTTPRegistry: GoodCloudAdministrationHTTPRegistry?
     private var goodCloudSessionIsAuthenticated = false
     private var goodCloudAssociationsByHostID: [UUID: GoodCloudAssociation] = [:]
+    private var goodCloudRefreshGeneration: UInt64 = 0
 
     init(
         hostStore: RouterHostStore,
@@ -184,6 +187,7 @@ final class RouterConnectionModel {
         transportFactory: @escaping TransportFactory,
         goodCloudAccount: GoodCloudAccountDependencies? = nil,
         goodCloudAssociations: GoodCloudAssociationStore? = nil,
+        goodCloudAssociationLoader: GoodCloudAssociationLoader? = nil,
         preferredTransportFactory: PreferredTransportFactory? = nil,
         administrationHTTPFactory: @escaping RouterAdministrationClient.HTTPFactory = {
             try HTTPClient(endpoint: $0)
@@ -203,6 +207,15 @@ final class RouterConnectionModel {
         self.administrationHTTPFactory = administrationHTTPFactory
         self.goodCloudAccount = goodCloudAccount
         self.goodCloudAssociations = goodCloudAssociations
+        if let goodCloudAssociationLoader {
+            self.goodCloudAssociationLoader = goodCloudAssociationLoader
+        } else if let goodCloudAssociations {
+            self.goodCloudAssociationLoader = {
+                await goodCloudAssociations.allAssociations()
+            }
+        } else {
+            self.goodCloudAssociationLoader = nil
+        }
         self.preferredTransportFactory = preferredTransportFactory
         self.goodCloudAdministrationHTTPRegistry = goodCloudAdministrationHTTPRegistry
     }
@@ -342,29 +355,21 @@ final class RouterConnectionModel {
     }
 
     func refreshGoodCloudRemoteAccess() async {
-        guard let goodCloudAccount, let goodCloudAssociations else {
-            goodCloudSessionIsAuthenticated = false
-            goodCloudAssociationsByHostID = [:]
-            goodCloudAdministrationHTTPRegistry?.update(
-                hosts: savedHosts,
-                associations: [],
-                provisioner: nil
-            )
+        goodCloudRefreshGeneration &+= 1
+        let generation = goodCloudRefreshGeneration
+        guard let goodCloudAccount, let goodCloudAssociationLoader else {
+            clearGoodCloudRemoteAccess(ifCurrent: generation)
             return
         }
         let state = await goodCloudAccount.account.validateStoredSession()
+        guard goodCloudRefreshGeneration == generation else { return }
         guard case .authenticated = state else {
-            goodCloudSessionIsAuthenticated = false
-            goodCloudAssociationsByHostID = [:]
-            goodCloudAdministrationHTTPRegistry?.update(
-                hosts: savedHosts,
-                associations: [],
-                provisioner: nil
-            )
+            clearGoodCloudRemoteAccess(ifCurrent: generation)
             return
         }
+        let associations = await goodCloudAssociationLoader()
+        guard goodCloudRefreshGeneration == generation else { return }
         goodCloudSessionIsAuthenticated = true
-        let associations = await goodCloudAssociations.allAssociations()
         goodCloudAssociationsByHostID = Dictionary(uniqueKeysWithValues: associations.map {
             ($0.hostID, $0)
         })
@@ -372,6 +377,17 @@ final class RouterConnectionModel {
             hosts: savedHosts,
             associations: associations,
             provisioner: goodCloudAccount.provisioner
+        )
+    }
+
+    private func clearGoodCloudRemoteAccess(ifCurrent generation: UInt64) {
+        guard goodCloudRefreshGeneration == generation else { return }
+        goodCloudSessionIsAuthenticated = false
+        goodCloudAssociationsByHostID = [:]
+        goodCloudAdministrationHTTPRegistry?.update(
+            hosts: savedHosts,
+            associations: [],
+            provisioner: nil
         )
     }
 

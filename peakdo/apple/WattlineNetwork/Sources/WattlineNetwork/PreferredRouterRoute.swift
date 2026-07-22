@@ -31,6 +31,7 @@ enum RouterRouteFallbackPolicy {
 
 public actor PreferredRouterRoute {
     public private(set) var selected: RouterRouteKind = .local
+    private var selectionGeneration: UInt64 = 0
 
     private let lanHTTP: any RouterHTTPClient
     private let lanEvents: any RouterEventStream
@@ -58,16 +59,21 @@ public actor PreferredRouterRoute {
         if selected == .remote {
             return try await remoteHTTP.request(method, path, body: body, token: token)
         }
+        let requestGeneration = selectionGeneration
 
         do {
             let result = try await lanHTTP.request(method, path, body: body, token: token)
-            selected = .local
+            if selectionGeneration == requestGeneration {
+                selected = .local
+            }
             return result
         } catch {
             guard RouterRouteFallbackPolicy.permitsRemoteFallback(error) else {
                 throw error
             }
-            selected = .remote
+            if selectionGeneration == requestGeneration {
+                select(.remote)
+            }
             return try await remoteHTTP.request(method, path, body: body, token: token)
         }
     }
@@ -81,6 +87,7 @@ public actor PreferredRouterRoute {
     }
 
     func select(_ route: RouterRouteKind) {
+        selectionGeneration &+= 1
         selected = route
     }
 }
