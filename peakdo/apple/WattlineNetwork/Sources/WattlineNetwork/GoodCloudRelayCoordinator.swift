@@ -101,23 +101,29 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
             provisioning = operation
         }
 
-        do {
-            let provisionedSession = try await operation.task.value
-            if let currentSession {
-                return currentSession
-            }
-            if provisioning?.id == operation.id {
-                provisioning = nil
-                sessionGeneration &+= 1
-                currentSession = provisionedSession
-            }
-            try Task.checkCancellation()
-            return currentSession ?? provisionedSession
-        } catch {
+        let waiter = ProvisioningTaskWaiter()
+        switch await waiter.wait(for: operation.task) {
+        case .waiterCancelled:
+            throw CancellationError()
+        case .sharedFailure(let error):
             if provisioning?.id == operation.id {
                 provisioning = nil
             }
             throw Self.normalized(error)
+        case .success(let provisionedSession):
+            let resolvedSession: RemoteAccessSession
+            if let currentSession {
+                resolvedSession = currentSession
+            } else if provisioning?.id == operation.id {
+                provisioning = nil
+                sessionGeneration &+= 1
+                currentSession = provisionedSession
+                resolvedSession = provisionedSession
+            } else {
+                resolvedSession = provisionedSession
+            }
+            try Task.checkCancellation()
+            return resolvedSession
         }
     }
 
@@ -249,5 +255,66 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
             return NetworkError.goodCloudSessionExpired
         }
         return NetworkError.transport("GoodCloud relay request failed")
+    }
+}
+
+private enum ProvisioningWaitOutcome: @unchecked Sendable {
+    case success(RemoteAccessSession)
+    case sharedFailure(any Error)
+    case waiterCancelled
+}
+
+/// Gives every caller an independently cancellable wait on a shared task.
+/// Cancellation resolves only that caller's continuation; the shared task and
+/// other live waiters continue unchanged.
+private final class ProvisioningTaskWaiter: @unchecked Sendable {
+    private enum Registration {
+        case observeSharedTask
+        case resume(ProvisioningWaitOutcome)
+    }
+
+    private let lock = NSLock()
+    private var outcome: ProvisioningWaitOutcome?
+    private var continuation: CheckedContinuation<ProvisioningWaitOutcome, Never>?
+
+    func wait(
+        for task: Task<RemoteAccessSession, Error>
+    ) async -> ProvisioningWaitOutcome {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let registration = lock.withLock { () -> Registration in
+                    if let outcome {
+                        return .resume(outcome)
+                    }
+                    self.continuation = continuation
+                    return .observeSharedTask
+                }
+
+                switch registration {
+                case .resume(let outcome):
+                    continuation.resume(returning: outcome)
+                case .observeSharedTask:
+                    Task.detached {
+                        let outcome: ProvisioningWaitOutcome = switch await task.result {
+                        case .success(let session): .success(session)
+                        case .failure(let error): .sharedFailure(error)
+                        }
+                        self.complete(with: outcome)
+                    }
+                }
+            }
+        } onCancel: {
+            self.complete(with: .waiterCancelled)
+        }
+    }
+
+    private func complete(with outcome: ProvisioningWaitOutcome) {
+        let continuation: CheckedContinuation<ProvisioningWaitOutcome, Never>? = lock.withLock {
+            guard self.outcome == nil else { return nil }
+            self.outcome = outcome
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        continuation?.resume(returning: outcome)
     }
 }

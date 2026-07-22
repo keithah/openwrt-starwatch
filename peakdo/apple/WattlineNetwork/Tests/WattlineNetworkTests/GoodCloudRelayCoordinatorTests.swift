@@ -191,8 +191,12 @@ final class GoodCloudRelayCoordinatorTests: XCTestCase {
             provisioner: provisioner,
             relayClient: { _ in relay }
         )
+        let cancellationFinished = expectation(
+            description: "cancelled mutation finishes before shared provisioning"
+        )
         let cancelledMutation = Task {
-            try await coordinator.request(
+            defer { cancellationFinished.fulfill() }
+            return try await coordinator.request(
                 method: "POST",
                 path: "/api/v1/device/action",
                 headers: [:],
@@ -211,6 +215,7 @@ final class GoodCloudRelayCoordinatorTests: XCTestCase {
         }
         await Task.yield()
         cancelledMutation.cancel()
+        await fulfillment(of: [cancellationFinished], timeout: 0.5)
         await provisioner.resume(with: .fixture)
 
         do {
@@ -225,6 +230,26 @@ final class GoodCloudRelayCoordinatorTests: XCTestCase {
         let provisionCalls = await provisioner.calls
         XCTAssertEqual(methods, ["GET"])
         XCTAssertEqual(provisionCalls.count, 1)
+    }
+
+    func test_provisionerCancellationClearsFailedSharedTaskForNextWaiter() async throws {
+        let provisioner = CancellationThenSuccessRelayProvisioner()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in EmptyRemoteRelayClient() }
+        )
+
+        do {
+            _ = try await coordinator.session()
+            XCTFail("Expected provisioner cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        _ = try await coordinator.session()
+        let callCount = await provisioner.callCount
+        XCTAssertEqual(callCount, 2)
     }
 
     func test_cancelledSSEWaitingForProvisioningNeverOpensRelayStream() async {
@@ -299,6 +324,18 @@ private actor CountingRelayProvisioner: GoodCloudRelayProvisioning {
             sessionID: "session-\(callCount)",
             issuedAtMillis: Int64(callCount)
         )
+    }
+}
+
+private actor CancellationThenSuccessRelayProvisioner: GoodCloudRelayProvisioning {
+    private(set) var callCount = 0
+
+    func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession {
+        callCount += 1
+        if callCount == 1 {
+            throw CancellationError()
+        }
+        return .fixture
     }
 }
 
