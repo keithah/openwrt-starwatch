@@ -9,7 +9,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../WattlineCore"),
-        .package(url: "https://github.com/keithah/goodcloudkit", revision: "66226f7fb23876d273029a13d0a799bf8aa8cc7c"),
+        .package(url: "https://github.com/keithah/goodcloudkit", revision: "a20abe4c3a59e1a990800c3c5d48fa5f0176314d"),
     ],
     targets: [
         .target(name: "WattlineNetwork", dependencies: [

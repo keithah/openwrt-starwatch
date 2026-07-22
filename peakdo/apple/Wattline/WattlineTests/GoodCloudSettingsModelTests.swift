@@ -806,6 +806,68 @@ final class GoodCloudSettingsModelTests: XCTestCase {
         XCTAssertEqual(recorder.preferredTransportCount, 0)
     }
 
+    func testRealAccountExpiryRemainsRequiresLoginAcrossSettingsLoad() async throws {
+        let host = try RouterHostValidator.validate(
+            "192.168.8.1:8377",
+            displayName: "Wattline router",
+            reachability: .lan,
+            allowsInsecureWAN: false,
+            deviceID: "dc-04-5a-eb-72-2b",
+            certificateFingerprint: nil
+        )
+        let hostStore = RouterHostStore(backend: SettingsHostBackend())
+        try await hostStore.save(host)
+        let client = RealSettingsAccountClient(device: Self.defaultDevice)
+        let account = GoodCloudAccountService.accountOnly(
+            client: client,
+            injectedRemoteAccessFailure: .sessionExpired
+        )
+        let associations = GoodCloudAssociationStore(backend: SettingsAssociationBackend())
+        let recorder = SettingsRouteRecorder()
+        let connections = RouterConnectionModel(
+            hostStore: hostStore,
+            credentialStore: RouterCredentialStore(backend: SettingsCredentialBackend()),
+            enrollmentClientFactory: { _ in throw NetworkError.unsupported("not used") },
+            transportFactory: { _, _ in recorder.makeDirectTransport() },
+            goodCloudAccount: .init(account: account, provisioner: account),
+            goodCloudAssociations: associations,
+            preferredTransportFactory: { _, _, _, _ in recorder.makePreferredTransport() },
+            administrationHTTPFactory: { try recorder.registry.client(for: $0) },
+            goodCloudAdministrationHTTPRegistry: recorder.registry
+        )
+        await connections.reloadSavedHosts(refreshGoodCloudRemoteAccess: false)
+        let model = GoodCloudSettingsModel(
+            account: account,
+            associations: associations,
+            connections: connections,
+            hostID: host.id
+        )
+        await model.load()
+        try await model.associate(deviceID: Self.defaultDevice.id)
+        let coordinator = GoodCloudRelayCoordinator.production(
+            deviceID: Self.defaultDevice.id,
+            provisioner: account
+        )
+        do {
+            _ = try await coordinator.request(
+                method: "GET",
+                path: "/api/v1/status",
+                headers: [:],
+                body: nil
+            )
+            XCTFail("Expected the expired GoodCloud session to reject the request")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .goodCloudSessionExpired)
+        }
+
+        await model.load()
+
+        XCTAssertEqual(model.state, .requiresLogin)
+        XCTAssertNotNil(model.association)
+        _ = try connections.makeTransport(for: host)
+        XCTAssertEqual(recorder.directTransportCount, 1)
+    }
+
     private func makeFixture(
         devices: [GoodCloudDeviceSummary] = [defaultDevice],
         clearsSessionOnLogout: Bool = true,
@@ -1045,6 +1107,20 @@ private actor SettingsAccountClient: GoodCloudAccountClient {
     func login(email: String, password: String) async throws {}
     func devices() async throws -> [GoodCloudDeviceSummary] { [] }
     func logout() async throws {}
+}
+
+private actor RealSettingsAccountClient: GoodCloudAccountClient {
+    private let device: GoodCloudDeviceSummary
+    private var tokenPresent = true
+
+    init(device: GoodCloudDeviceSummary) {
+        self.device = device
+    }
+
+    func hasStoredToken() async -> Bool { tokenPresent }
+    func login(email: String, password: String) async throws { tokenPresent = true }
+    func devices() async throws -> [GoodCloudDeviceSummary] { [device] }
+    func logout() async throws { tokenPresent = false }
 }
 
 private final class SettingsAssociationBackend: GoodCloudAssociationKeyValueStore, @unchecked Sendable {

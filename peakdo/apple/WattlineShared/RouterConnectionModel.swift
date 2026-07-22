@@ -222,6 +222,13 @@ final class RouterConnectionModel {
         }
         self.preferredTransportFactory = preferredTransportFactory
         self.goodCloudAdministrationHTTPRegistry = goodCloudAdministrationHTTPRegistry
+        if let invalidationInstaller = goodCloudAccount?.account
+            as? any GoodCloudRemoteAccessInvalidationInstalling
+        {
+            invalidationInstaller.installRemoteAccessInvalidationHandler { [weak self] in
+                await self?.invalidateGoodCloudRemoteAccessRoute()
+            }
+        }
     }
 
     static func production(
@@ -453,6 +460,11 @@ final class RouterConnectionModel {
             provisioner: nil
         )
         return true
+    }
+
+    private func invalidateGoodCloudRemoteAccessRoute() {
+        let generation = beginGoodCloudRemoteAccessUpdate()
+        _ = clearGoodCloudRemoteAccess(ifCurrent: generation)
     }
 
     @discardableResult

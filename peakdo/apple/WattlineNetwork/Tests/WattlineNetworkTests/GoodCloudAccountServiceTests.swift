@@ -206,6 +206,69 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         XCTAssertFalse(String(describing: update).contains("secret"))
     }
 
+    func test_remoteAccessMinus1010AwaitsRouteInvalidationBeforeThrowing() async {
+        let client = FakeGoodCloudAccountClient(tokenPresent: true)
+        let invalidation = SuspendedRemoteRouteInvalidation()
+        let completion = AccountTaskCompletion()
+        let service = GoodCloudAccountService(client: client) { _, _ in
+            throw GoodCloudError.api(code: -1010, message: "FE_TOKEN=secret")
+        }
+        service.installRemoteAccessInvalidationHandler {
+            await invalidation.invalidate()
+        }
+
+        let request = Task {
+            do {
+                let session = try await service.remoteAccess(deviceID: "device-42", port: 8377)
+                await completion.complete()
+                return session
+            } catch {
+                await completion.complete()
+                throw error
+            }
+        }
+        await invalidation.waitUntilCalled()
+
+        let completedBeforeInvalidation = await completion.isComplete
+        XCTAssertFalse(completedBeforeInvalidation)
+        await invalidation.resume()
+        do {
+            _ = try await request.value
+            XCTFail("Expected expiry")
+        } catch {
+            XCTAssertEqual(error as? GoodCloudError, .sessionExpired)
+        }
+        let completedAfterInvalidation = await completion.isComplete
+        XCTAssertTrue(completedAfterInvalidation)
+    }
+
+    func test_activeUseExpiryRemainsRequiresLoginWhenClearedTokenIsValidated() async {
+        let client = FakeGoodCloudAccountClient(tokenPresent: true)
+        let service = GoodCloudAccountService(client: client) { _, _ in
+            throw GoodCloudError.api(code: -1010, message: "FE_TOKEN=secret")
+        }
+
+        _ = try? await service.remoteAccess(deviceID: "device-42", port: 8377)
+        let validated = await service.validateStoredSession()
+
+        XCTAssertEqual(validated, .requiresLogin)
+        let state = await service.state
+        XCTAssertEqual(state, .requiresLogin)
+    }
+
+    func test_explicitLogoutClearsStickyActiveUseExpiry() async {
+        let client = FakeGoodCloudAccountClient(tokenPresent: true)
+        let service = GoodCloudAccountService(client: client) { _, _ in
+            throw GoodCloudError.api(code: -1010, message: "FE_TOKEN=secret")
+        }
+
+        _ = try? await service.remoteAccess(deviceID: "device-42", port: 8377)
+        _ = await service.logout()
+        let validated = await service.validateStoredSession()
+
+        XCTAssertEqual(validated, .loggedOut)
+    }
+
     func test_remoteAccessOtherAPIErrorMapsToFixedSafeError() async {
         let client = FakeGoodCloudAccountClient(tokenPresent: true)
         let service = GoodCloudAccountService(client: client) { _, _ in
@@ -341,6 +404,35 @@ final class GoodCloudAccountServiceTests: XCTestCase {
         XCTAssertFalse(snapshot.hasStoredToken)
         XCTAssertEqual(state, .loggedOut)
     }
+}
+
+private actor SuspendedRemoteRouteInvalidation {
+    private var called = false
+    private var callWaiters: [CheckedContinuation<Void, Never>] = []
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func invalidate() async {
+        called = true
+        let waiters = callWaiters
+        callWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilCalled() async {
+        guard !called else { return }
+        await withCheckedContinuation { callWaiters.append($0) }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor AccountTaskCompletion {
+    private(set) var isComplete = false
+    func complete() { isComplete = true }
 }
 
 private actor FakeGoodCloudAccountClient: GoodCloudAccountClient {

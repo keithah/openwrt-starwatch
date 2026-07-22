@@ -70,10 +70,25 @@ public protocol GoodCloudRelayProvisioning: Sendable {
     func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession
 }
 
-public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayProvisioning {
+public protocol GoodCloudRemoteAccessInvalidationInstalling: Sendable {
+    func installRemoteAccessInvalidationHandler(
+        _ handler: @escaping @Sendable () async -> Void
+    )
+}
+
+public actor GoodCloudAccountService: GoodCloudAccountServing,
+    GoodCloudRelayProvisioning,
+    GoodCloudRemoteAccessInvalidationInstalling
+{
+    enum InjectedRemoteAccessFailure: Sendable {
+        case sessionExpired
+    }
+
     public private(set) var state: GoodCloudSessionState = .loggedOut
     private nonisolated let stateBroadcaster = GoodCloudAccountStateBroadcaster()
+    private nonisolated let remoteAccessInvalidation = GoodCloudRemoteAccessInvalidation()
     private var operationGeneration: UInt64 = 0
+    private var requiresLoginAfterActiveExpiry = false
 
     private static let redactedFailure = "GoodCloud request failed."
 
@@ -103,6 +118,18 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
             client: client,
             remoteAccess: { _, _ in throw GoodCloudError.relayUnavailable }
         )
+    }
+
+    static func accountOnly(
+        client: any GoodCloudAccountClient,
+        injectedRemoteAccessFailure: InjectedRemoteAccessFailure
+    ) -> GoodCloudAccountService {
+        GoodCloudAccountService(client: client) { _, _ in
+            switch injectedRemoteAccessFailure {
+            case .sessionExpired:
+                throw GoodCloudError.api(code: -1010, message: "session expired")
+            }
+        }
     }
 
     public init(
@@ -140,9 +167,13 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         state = .loading
         do {
             guard try await hasStoredToken() else {
-                return publish(.loggedOut, for: generation)
+                return publish(
+                    requiresLoginAfterActiveExpiry ? .requiresLogin : .loggedOut,
+                    for: generation
+                )
             }
             let devices = try await loadDevices()
+            requiresLoginAfterActiveExpiry = false
             return publish(.authenticated(devices), for: generation)
         } catch {
             return await stateForFailure(error, generation: generation)
@@ -161,6 +192,7 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         do {
             try await performLogin(email: email, password: password)
             let devices = try await loadDevices()
+            requiresLoginAfterActiveExpiry = false
             return publish(.authenticated(devices), for: generation)
         } catch {
             return await stateForFailure(error, generation: generation)
@@ -178,6 +210,7 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
         state = .loading
         do {
             let devices = try await loadDevices()
+            requiresLoginAfterActiveExpiry = false
             return publish(.authenticated(devices), for: generation)
         } catch {
             return await stateForFailure(error, generation: generation)
@@ -198,6 +231,7 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
             guard try await !hasStoredToken() else {
                 return publish(.failed(Self.redactedFailure), for: generation)
             }
+            requiresLoginAfterActiveExpiry = false
             return publish(.loggedOut, for: generation)
         } catch {
             return publish(.failed(Self.redactedFailure), for: generation)
@@ -220,6 +254,11 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
                 }
                 let generation = beginOperation()
                 let failureState = await stateForFailure(error, generation: generation)
+                if failureState == .requiresLogin {
+                    requiresLoginAfterActiveExpiry = true
+                }
+                stateBroadcaster.publish(failureState)
+                await remoteAccessInvalidation.invalidate()
                 guard failureState == .requiresLogin else {
                     throw GoodCloudError.authFailed
                 }
@@ -231,6 +270,12 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
 
     public nonisolated func stateUpdates() -> AsyncStream<GoodCloudSessionState> {
         stateBroadcaster.stream()
+    }
+
+    public nonisolated func installRemoteAccessInvalidationHandler(
+        _ handler: @escaping @Sendable () async -> Void
+    ) {
+        remoteAccessInvalidation.install(handler)
     }
 
     private func hasStoredToken() async throws -> Bool {
@@ -281,7 +326,6 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
     ) -> GoodCloudSessionState {
         guard generation == operationGeneration else { return state }
         state = newState
-        stateBroadcaster.publish(newState)
         return state
     }
 
@@ -299,6 +343,20 @@ public actor GoodCloudAccountService: GoodCloudAccountServing, GoodCloudRelayPro
             }
         }
         return publish(.failed(Self.redactedFailure), for: generation)
+    }
+}
+
+private final class GoodCloudRemoteAccessInvalidation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable () async -> Void)?
+
+    func install(_ handler: @escaping @Sendable () async -> Void) {
+        lock.withLock { self.handler = handler }
+    }
+
+    func invalidate() async {
+        let handler = lock.withLock { self.handler }
+        await handler?()
     }
 }
 

@@ -658,6 +658,74 @@ final class RouterAppWiringTests: XCTestCase {
         XCTAssertEqual(recorder.endpoints, [saved.endpoint, saved.endpoint])
     }
 
+    func testRealAccountExpiryRevokesRemoteRouteBeforeRequestReturnsWithoutSettingsListener() async throws {
+        let saved = try host(
+            name: "Router",
+            address: "192.168.8.1:8377",
+            mac: "DC:04:5A:EB:72:2B"
+        )
+        let device = GoodCloudDeviceSummary(
+            id: "42",
+            name: "Wattline X3000",
+            mac: "DC:04:5A:EB:72:2B",
+            ddns: nil,
+            model: "GL-X3000",
+            isOnline: true
+        )
+        let account = GoodCloudAccountService.accountOnly(
+            client: RouterWiringGoodCloudClient(devices: [device]),
+            injectedRemoteAccessFailure: .sessionExpired
+        )
+        let hostStore = RouterHostStore(backend: RouterHostMemoryBackend())
+        try await hostStore.save(saved)
+        var directTransportCount = 0
+        var preferredTransportCount = 0
+        let model = RouterConnectionModel(
+            hostStore: hostStore,
+            credentialStore: RouterCredentialStore(backend: RouterCredentialMemoryBackend()),
+            enrollmentClientFactory: { _ in throw NetworkError.unsupported("not used") },
+            transportFactory: { _, _ in
+                directTransportCount += 1
+                return RouterSelectionTransport(identity: self.identity(mac: nil, cid: nil))
+            },
+            goodCloudAccount: .init(account: account, provisioner: account),
+            goodCloudAssociationLoader: {
+                [GoodCloudAssociation(
+                    hostID: saved.id,
+                    routerMAC: "DC045AEB722B",
+                    device: device
+                )]
+            },
+            preferredTransportFactory: { _, _, _, _ in
+                preferredTransportCount += 1
+                return RouterSelectionTransport(identity: self.identity(mac: nil, cid: nil))
+            }
+        )
+        await model.reloadSavedHosts()
+        _ = try model.makeTransport(for: saved)
+        XCTAssertEqual(preferredTransportCount, 1)
+
+        let coordinator = GoodCloudRelayCoordinator.production(
+            deviceID: device.id,
+            provisioner: account
+        )
+        do {
+            _ = try await coordinator.request(
+                method: "GET",
+                path: "/api/v1/status",
+                headers: [:],
+                body: nil
+            )
+            XCTFail("Expected the expired GoodCloud session to reject the request")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .goodCloudSessionExpired)
+        }
+
+        _ = try model.makeTransport(for: saved)
+        XCTAssertEqual(directTransportCount, 1)
+        XCTAssertEqual(preferredTransportCount, 1)
+    }
+
     func testOlderAuthenticatedRefreshCannotRepublishRemoteAccessAfterLogoutRefresh() async throws {
         let saved = try host(
             name: "Router",
