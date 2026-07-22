@@ -65,6 +65,8 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
     private let deviceID: String
     private let provisioner: any GoodCloudRelayProvisioning
     private let relayClientFactory: RelayClientFactory
+    private let onBeforeOrphanRetry: @Sendable (Int) async -> Void
+    private let onBeforeProvisioningWait: @Sendable (UUID, Int) async -> Void
     private var currentSession: RemoteAccessSession?
     private var sessionGeneration: UInt64 = 0
     private var provisioning: Provisioning?
@@ -77,9 +79,29 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
         self.deviceID = deviceID
         self.provisioner = provisioner
         self.relayClientFactory = relayClient
+        self.onBeforeOrphanRetry = { _ in }
+        self.onBeforeProvisioningWait = { _, _ in }
+    }
+
+    init(
+        deviceID: String,
+        provisioner: any GoodCloudRelayProvisioning,
+        relayClient: @escaping RelayClientFactory,
+        onBeforeOrphanRetry: @escaping @Sendable (Int) async -> Void,
+        onBeforeProvisioningWait: @escaping @Sendable (UUID, Int) async -> Void
+    ) {
+        self.deviceID = deviceID
+        self.provisioner = provisioner
+        self.relayClientFactory = relayClient
+        self.onBeforeOrphanRetry = onBeforeOrphanRetry
+        self.onBeforeProvisioningWait = onBeforeProvisioningWait
     }
 
     public func session() async throws -> RemoteAccessSession {
+        try await session(orphanRetriesRemaining: 1)
+    }
+
+    private func session(orphanRetriesRemaining: Int) async throws -> RemoteAccessSession {
         try Task.checkCancellation()
         if let currentSession {
             return currentSession
@@ -104,15 +126,20 @@ public actor GoodCloudRelayCoordinator: RemoteRelayCoordinating {
             observeCompletion(of: operation)
         }
 
+        await onBeforeProvisioningWait(operation.id, orphanRetriesRemaining)
+        try Task.checkCancellation()
         switch await operation.waiters.wait() {
         case .waiterCancelled:
             throw CancellationError()
         case .sharedFailure(let error, let joinedOrphanedProvisioning):
-            if joinedOrphanedProvisioning {
-                try Task.checkCancellation()
-                return try await session()
+            guard joinedOrphanedProvisioning, orphanRetriesRemaining > 0 else {
+                throw Self.normalized(error)
             }
-            throw Self.normalized(error)
+            try Task.checkCancellation()
+            let retriesRemaining = orphanRetriesRemaining - 1
+            await onBeforeOrphanRetry(retriesRemaining)
+            try Task.checkCancellation()
+            return try await session(orphanRetriesRemaining: retriesRemaining)
         case .success(let provisionedSession, joinedOrphanedProvisioning: _):
             try Task.checkCancellation()
             return currentSession ?? provisionedSession

@@ -285,6 +285,58 @@ final class GoodCloudRelayCoordinatorTests: XCTestCase {
         }
     }
 
+    func test_sameCallerConsumesAtMostOneOrphanedProvisioningFailure() async throws {
+        let provisioner = TwoSuspendedFailuresRelayProvisioner()
+        let waitController = DoubleOrphanWaitController()
+        let coordinatorReference = RelayCoordinatorReference()
+        let coordinator = GoodCloudRelayCoordinator(
+            deviceID: "42",
+            provisioner: provisioner,
+            relayClient: { _ in EmptyRemoteRelayClient() },
+            onBeforeOrphanRetry: { retriesRemaining in
+                guard retriesRemaining == 0,
+                      let coordinator = await coordinatorReference.coordinator
+                else { return }
+                let churnWaiter = Task { try await coordinator.session() }
+                await provisioner.waitUntilCallCount(2)
+                churnWaiter.cancel()
+                _ = try? await churnWaiter.value
+            },
+            onBeforeProvisioningWait: { id, retriesRemaining in
+                await waitController.recordWait(
+                    provisioningID: id,
+                    retriesRemaining: retriesRemaining
+                )
+            }
+        )
+        await coordinatorReference.set(coordinator)
+
+        let firstChurnWaiter = Task { try await coordinator.session() }
+        await provisioner.waitUntilCallCount(1)
+        await waitController.waitUntilFirstGenerationWaitCount(1)
+        firstChurnWaiter.cancel()
+        _ = try? await firstChurnWaiter.value
+
+        let liveCaller = Task { try await coordinator.session() }
+        await waitController.waitUntilFirstGenerationWaitCount(2)
+        await provisioner.fail(call: 1)
+
+        await waitController.waitUntilZeroBudgetWaitsOnSecondGeneration()
+        await provisioner.fail(call: 2)
+
+        do {
+            _ = try await liveCaller.value
+            XCTFail("Expected the second orphaned failure to surface")
+        } catch {
+            XCTAssertEqual(
+                error as? NetworkError,
+                .transport("GoodCloud relay request failed")
+            )
+        }
+        let callCount = await provisioner.callCount
+        XCTAssertEqual(callCount, 2)
+    }
+
     func test_cancelledSSEWaitingForProvisioningNeverOpensRelayStream() async {
         let provisioner = SuspendedRelayProvisioner()
         let relay = DispatchRecordingRemoteRelayClient()
@@ -403,6 +455,89 @@ private actor SuspendedFailureThenSuccessRelayProvisioner: GoodCloudRelayProvisi
     func failFirstCall() {
         firstContinuation?.resume(throwing: GoodCloudError.relayUnavailable)
         firstContinuation = nil
+    }
+}
+
+private actor TwoSuspendedFailuresRelayProvisioner: GoodCloudRelayProvisioning {
+    private(set) var callCount = 0
+    private var continuations: [Int: CheckedContinuation<RemoteAccessSession, Error>] = [:]
+    private var callCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func remoteAccess(deviceID: String, port: Int) async throws -> RemoteAccessSession {
+        callCount += 1
+        let currentCall = callCount
+        let ready = callCountWaiters.filter { $0.0 <= callCount }
+        callCountWaiters.removeAll { $0.0 <= callCount }
+        ready.forEach { $0.1.resume() }
+        guard currentCall <= 2 else {
+            return RemoteAccessSession(
+                baseURL: URL(string: "https://relay.goodcloud.xyz/unexpected-third/")!,
+                tokenDomain: ".goodcloud.xyz",
+                sessionID: "unexpected-third-session",
+                issuedAtMillis: 126
+            )
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            continuations[currentCall] = continuation
+        }
+    }
+
+    func waitUntilCallCount(_ count: Int) async {
+        guard callCount < count else { return }
+        await withCheckedContinuation { continuation in
+            callCountWaiters.append((count, continuation))
+        }
+    }
+
+    func fail(call: Int) {
+        continuations.removeValue(forKey: call)?.resume(
+            throwing: GoodCloudError.relayUnavailable
+        )
+    }
+}
+
+private actor RelayCoordinatorReference {
+    private(set) var coordinator: GoodCloudRelayCoordinator?
+
+    func set(_ coordinator: GoodCloudRelayCoordinator) {
+        self.coordinator = coordinator
+    }
+}
+
+private actor DoubleOrphanWaitController {
+    private var firstGenerationID: UUID?
+    private var firstGenerationWaitCount = 0
+    private var firstGenerationWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var sawZeroBudgetSecondGeneration = false
+    private var zeroBudgetWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func recordWait(provisioningID: UUID, retriesRemaining: Int) {
+        if firstGenerationID == nil {
+            firstGenerationID = provisioningID
+        }
+        if provisioningID == firstGenerationID {
+            firstGenerationWaitCount += 1
+            let ready = firstGenerationWaiters.filter { $0.0 <= firstGenerationWaitCount }
+            firstGenerationWaiters.removeAll { $0.0 <= firstGenerationWaitCount }
+            ready.forEach { $0.1.resume() }
+        } else if retriesRemaining == 0 {
+            sawZeroBudgetSecondGeneration = true
+            let waiters = zeroBudgetWaiters
+            zeroBudgetWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    func waitUntilFirstGenerationWaitCount(_ count: Int) async {
+        guard firstGenerationWaitCount < count else { return }
+        await withCheckedContinuation { continuation in
+            firstGenerationWaiters.append((count, continuation))
+        }
+    }
+
+    func waitUntilZeroBudgetWaitsOnSecondGeneration() async {
+        guard !sawZeroBudgetSecondGeneration else { return }
+        await withCheckedContinuation { zeroBudgetWaiters.append($0) }
     }
 }
 
