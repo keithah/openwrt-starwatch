@@ -281,6 +281,7 @@ extension RouterAdministrationClient {
         return switch network {
         case .invalidURL: NetworkError.invalidURL
         case .unauthorized: NetworkError.unauthorized
+        case .goodCloudSessionExpired: NetworkError.goodCloudSessionExpired
         case let .api(status, code, message):
             NetworkError.api(status: status, code: redact(code), message: redact(message))
         case let .httpStatus(status, body): NetworkError.httpStatus(status, redact(body))

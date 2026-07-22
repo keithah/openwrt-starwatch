@@ -1,0 +1,254 @@
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+import GoodCloudKit
+import XCTest
+@testable import WattlineNetwork
+
+final class RemoteRouterTransportTests: XCTestCase {
+    func test_remoteHTTPPassesWattlineAuthorizationAndJSONBody() async throws {
+        let coordinator = RecordingRemoteCoordinator(response: .ok)
+        let client = RemoteRouterHTTPClient(coordinator: coordinator)
+        let body = Data(#"{"action":"dc_off"}"#.utf8)
+
+        _ = try await client.request(
+            "POST",
+            "/api/v1/device/action",
+            body: body,
+            token: "wattline-token"
+        )
+
+        let request = await coordinator.lastRequest
+        XCTAssertEqual(request?.headers["Authorization"], "Bearer wattline-token")
+        XCTAssertEqual(request?.headers["Content-Type"], "application/json")
+        XCTAssertEqual(request?.body, body)
+    }
+
+    func test_remoteHTTPMapsNon2xxAndRedactsWattlineToken() async {
+        let body = Data(#"{"error":{"code":"internal_error","message":"token wattline-token failed"}}"#.utf8)
+        let coordinator = RecordingRemoteCoordinator(
+            responseData: body,
+            response: .fixture(status: 500)
+        )
+        let client = RemoteRouterHTTPClient(coordinator: coordinator)
+
+        do {
+            _ = try await client.get("/api/v1/status", token: "wattline-token")
+            XCTFail("Expected HTTP error")
+        } catch {
+            XCTAssertEqual(
+                error as? NetworkError,
+                .api(status: 500, code: .internalError, message: "token [REDACTED] failed")
+            )
+        }
+    }
+
+    func test_remoteHTTPRejectsRelativePathBeforeOpeningRelay() async {
+        let coordinator = RecordingRemoteCoordinator(response: .ok)
+        let client = RemoteRouterHTTPClient(coordinator: coordinator)
+
+        do {
+            _ = try await client.get("api/v1/status", token: "token")
+            XCTFail("Expected invalid URL")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .invalidURL)
+        }
+
+        let request = await coordinator.lastRequest
+        XCTAssertNil(request)
+    }
+
+    func test_remoteSSEParsesFramesAndForwardsBearer() async throws {
+        let coordinator = RecordingRemoteCoordinator(streamEvents: [
+            .response(.ok),
+            .data(Data("data: {\"type\":\"snapshot\"}\n\n".utf8)),
+        ])
+        let stream = RemoteRouterEventStream(coordinator: coordinator)
+        var iterator = stream.events(
+            path: "/api/v1/events",
+            token: "wattline-token"
+        ).makeAsyncIterator()
+
+        let payload = try await iterator.next()
+        XCTAssertEqual(payload, Data(#"{"type":"snapshot"}"#.utf8))
+        let request = await coordinator.lastStream
+        XCTAssertEqual(request?.headers["Authorization"], "Bearer wattline-token")
+        XCTAssertEqual(request?.headers["Accept"], "text/event-stream")
+    }
+
+    func test_remoteSSEParsesFramesSplitAcrossRelayChunks() async throws {
+        let coordinator = RecordingRemoteCoordinator(streamEvents: [
+            .response(.ok),
+            .data(Data("da".utf8)),
+            .data(Data("ta: first\r\n".utf8)),
+            .data(Data("data: second\n\n".utf8)),
+        ])
+        let stream = RemoteRouterEventStream(coordinator: coordinator)
+        var iterator = stream.events(path: "/api/v1/events", token: "token").makeAsyncIterator()
+
+        let payload = try await iterator.next()
+        let end = try await iterator.next()
+        XCTAssertEqual(payload, Data("first\nsecond".utf8))
+        XCTAssertNil(end)
+    }
+
+    func test_remoteSSEDiscardsTruncatedFrameAtEOF() async throws {
+        let coordinator = RecordingRemoteCoordinator(streamEvents: [
+            .response(.ok),
+            .data(Data("data: incomplete".utf8)),
+        ])
+        let stream = RemoteRouterEventStream(coordinator: coordinator)
+        var iterator = stream.events(path: "/api/v1/events", token: "token").makeAsyncIterator()
+
+        let payload = try await iterator.next()
+        XCTAssertNil(payload)
+    }
+
+    func test_remoteSSEMapsUnauthorizedResponse() async {
+        let coordinator = RecordingRemoteCoordinator(streamEvents: [
+            .response(.fixture(status: 401)),
+        ])
+        let stream = RemoteRouterEventStream(coordinator: coordinator)
+
+        do {
+            for try await _ in stream.events(path: "/api/v1/events", token: "token") {}
+            XCTFail("Expected unauthorized")
+        } catch {
+            XCTAssertEqual(error as? NetworkError, .unauthorized)
+        }
+    }
+
+    func test_remoteSSECancellationCancelsRelayConsumption() async throws {
+        let probe = StreamCancellationProbe()
+        let coordinator = RecordingRemoteCoordinator(cancellationProbe: probe)
+        let stream = RemoteRouterEventStream(coordinator: coordinator)
+        let task = Task {
+            for try await _ in stream.events(path: "/api/v1/events", token: "token") {}
+        }
+
+        await probe.waitUntilStarted()
+        task.cancel()
+        _ = try? await task.value
+
+        await probe.waitUntilCancelled()
+        let wasCancelled = await probe.wasCancelled
+        XCTAssertTrue(wasCancelled)
+    }
+}
+
+private actor RecordingRemoteCoordinator: RemoteRelayCoordinating {
+    struct Request: Sendable {
+        let method: String
+        let path: String
+        let headers: [String: String]
+        let body: Data?
+    }
+
+    private let responseData: Data
+    private let response: HTTPURLResponse
+    private let streamEvents: [RelayHTTPStreamEvent]
+    private let cancellationProbe: StreamCancellationProbe?
+    private(set) var lastRequest: Request?
+    private(set) var lastStream: Request?
+
+    init(
+        responseData: Data = Data(),
+        response: HTTPURLResponse = .ok,
+        streamEvents: [RelayHTTPStreamEvent] = [],
+        cancellationProbe: StreamCancellationProbe? = nil
+    ) {
+        self.responseData = responseData
+        self.response = response
+        self.streamEvents = streamEvents
+        self.cancellationProbe = cancellationProbe
+    }
+
+    init(cancellationProbe: StreamCancellationProbe) {
+        self.init(
+            response: .ok,
+            cancellationProbe: cancellationProbe
+        )
+    }
+
+    func request(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) async throws -> (Data, HTTPURLResponse) {
+        lastRequest = .init(method: method, path: path, headers: headers, body: body)
+        return (responseData, response)
+    }
+
+    func stream(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) async -> AsyncThrowingStream<RelayHTTPStreamEvent, Error> {
+        lastStream = .init(method: method, path: path, headers: headers, body: body)
+        if let cancellationProbe {
+            return AsyncThrowingStream { continuation in
+                let task = Task {
+                    await cancellationProbe.started()
+                    do {
+                        try await Task.sleep(for: .seconds(60))
+                    } catch {
+                        await cancellationProbe.cancelled()
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        }
+        return AsyncThrowingStream { continuation in
+            streamEvents.forEach { continuation.yield($0) }
+            continuation.finish()
+        }
+    }
+}
+
+private actor StreamCancellationProbe {
+    private(set) var wasCancelled = false
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancelWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func started() {
+        didStart = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    func cancelled() {
+        wasCancelled = true
+        let waiters = cancelWaiters
+        cancelWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitUntilStarted() async {
+        guard !didStart else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func waitUntilCancelled() async {
+        guard !wasCancelled else { return }
+        await withCheckedContinuation { cancelWaiters.append($0) }
+    }
+}
+
+private extension HTTPURLResponse {
+    static let ok = fixture(status: 200)
+
+    static func fixture(status: Int) -> HTTPURLResponse {
+        HTTPURLResponse(
+            url: URL(string: "https://relay.goodcloud.xyz/wattlined")!,
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+    }
+}

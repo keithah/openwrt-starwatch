@@ -35,6 +35,7 @@ public enum RouterAPIErrorCode: Equatable, Sendable {
 public enum NetworkError: Error, Equatable, Sendable {
     case invalidURL
     case unauthorized
+    case goodCloudSessionExpired
     case api(status: Int, code: RouterAPIErrorCode, message: String)
     case httpStatus(Int, String)
     case decode(String)

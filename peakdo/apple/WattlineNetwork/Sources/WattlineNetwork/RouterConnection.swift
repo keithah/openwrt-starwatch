@@ -913,7 +913,7 @@ actor RouterConnection {
                     code: code,
                     message: redact(message, token: token)
                 )
-            case .invalidURL, .unauthorized, .streamEnded, .timeout:
+            case .invalidURL, .unauthorized, .goodCloudSessionExpired, .streamEnded, .timeout:
                 return networkError
             }
         }
