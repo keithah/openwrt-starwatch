@@ -18,7 +18,7 @@ boundary.
 
 ## Quick install
 
-The public 0.1.3 feed currently supports `aarch64_cortex-a53` routers. Connect
+The public 0.1.4 feed currently supports `aarch64_cortex-a53` routers. Connect
 over SSH as root and run:
 
 ```sh
@@ -33,7 +33,7 @@ legacy `starwatch`/`wattline` entries to one shared `keithah` entry in
 Starwatch configuration. It never forces a downgrade or reinstall. The shared
 feed index is signed with Keith's OpenWrt publisher key installed
 alongside OpenWrt's existing opkg keys; global signature checking stays enabled.
-Upgrading `starwatchd` to 0.1.3 also performs this migration automatically, so
+Upgrading `starwatchd` to 0.1.4 also performs this migration automatically, so
 routers already using the legacy feed move to the dedicated feed without
 rerunning the installer.
 
@@ -72,11 +72,11 @@ ls -la package/out/*.ipk
 
 The build produces:
 
-- `starwatchd_0.1.3_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
+- `starwatchd_0.1.4_aarch64_cortex-a53.ipk` — static daemon, embedded SPA,
   UCI configuration, guarded dish route, token generator, and procd service.
-- `luci-app-starwatch_0.1.3_all.ipk` — LuCI menu, one-method rpcd bridge, and
+- `luci-app-starwatch_0.1.4_all.ipk` — LuCI menu, one-method rpcd bridge, and
   iframe launcher.
-- `gl-app-starwatch_0.1.3_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
+- `gl-app-starwatch_0.1.4_all.ipk` — GL.iNet oui menu, Lua RPC bridge, and
   evaluated Vue 2 iframe view.
 
 The outer `.ipk` is a **gzipped ustar tar**, not an `ar` archive. Its three
@@ -88,7 +88,7 @@ macOS pax headers. All payload paths remain below ustar's 100-character limit.
 architecture when needed:
 
 ```sh
-make -C package VERSION=0.1.3 ARCH=aarch64_cortex-a53 all
+make -C package VERSION=0.1.4 ARCH=aarch64_cortex-a53 all
 ```
 
 The committed GL view at
@@ -112,9 +112,9 @@ for f in package/out/*.ipk; do
 done
 
 ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/starwatchd_0.1.3_aarch64_cortex-a53.ipk \
-  /tmp/luci-app-starwatch_0.1.3_all.ipk \
-  /tmp/gl-app-starwatch_0.1.3_all.ipk'
+  /tmp/starwatchd_0.1.4_aarch64_cortex-a53.ipk \
+  /tmp/luci-app-starwatch_0.1.4_all.ipk \
+  /tmp/gl-app-starwatch_0.1.4_all.ipk'
 ```
 
 Install either admin-panel package or both. `starwatchd`'s post-install script
