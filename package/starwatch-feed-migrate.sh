@@ -27,11 +27,23 @@ feeds_dir=$(dirname "$feeds_file")
 feeds_tmp=''
 trim_tmp=''
 key_tmp=''
+feed_backup=''
+key_backup=''
+feed_had=0
+key_had=0
+rollback=0
 
 cleanup() {
 	[ -z "$feeds_tmp" ] || rm -f "$feeds_tmp" || :
 	[ -z "$trim_tmp" ] || rm -f "$trim_tmp" || :
 	[ -z "$key_tmp" ] || rm -f "$key_tmp" || :
+	if [ "$rollback" -eq 1 ]; then
+		rm -f "$feeds_file" "$feed_key_file" || :
+		[ "$feed_had" -eq 0 ] || mv -f "$feed_backup" "$feeds_file" || :
+		[ "$key_had" -eq 0 ] || mv -f "$key_backup" "$feed_key_file" || :
+	fi
+	[ -z "$feed_backup" ] || rm -f "$feed_backup" || :
+	[ -z "$key_backup" ] || rm -f "$key_backup" || :
 }
 
 handle_signal() {
@@ -104,10 +116,19 @@ preserve_metadata() {
 preserve_metadata "$feeds_file" "$feeds_tmp" 0644
 preserve_metadata "$feed_key_file" "$key_tmp" 0644
 
+feed_backup="$feeds_dir/.customfeeds.conf.backup.$$"
+key_backup="$keys_dir/.f6c72c675c844b91.backup.$$"
+if [ -e "$feeds_file" ]; then feed_had=1; mv "$feeds_file" "$feed_backup" || fail 'could not stage feed backup'; fi
+if [ -e "$feed_key_file" ]; then key_had=1; mv "$feed_key_file" "$key_backup" || fail 'could not stage key backup'; fi
+rollback=1
 mv "$key_tmp" "$feed_key_file"
 key_tmp=''
 mv "$feeds_tmp" "$feeds_file"
 feeds_tmp=''
+rollback=0
+rm -f "$feed_backup" "$key_backup"
+feed_backup=''
+key_backup=''
 rm -f "$trim_tmp"
 trim_tmp=''
 trap - 0 HUP INT TERM
