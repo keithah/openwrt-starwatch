@@ -3,7 +3,7 @@ set -e
 
 [ -n "$IPKG_INSTROOT" ] && exit 0
 
-/usr/libexec/keithah-feed-migrate
+/usr/libexec/starwatch-feed-migrate aarch64_cortex-a53
 /etc/uci-defaults/99-starwatch
 /etc/init.d/starwatch enable
 # restart (not start) so an upgrade picks up the new binary and the

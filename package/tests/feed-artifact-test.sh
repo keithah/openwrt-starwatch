@@ -29,8 +29,12 @@ starwatchd_ipk=$(basename "$1")
 mkdir -p "$tmp/starwatchd-data"
 tar -xOzf "$1" ./data.tar.gz >"$tmp/data.tar.gz"
 tar -xzf "$tmp/data.tar.gz" -C "$tmp/starwatchd-data"
-cmp -s "$root/keithah-feed-migrate.sh" "$tmp/starwatchd-data/usr/libexec/keithah-feed-migrate"
-tar -tzvf "$tmp/data.tar.gz" | awk '$1 == "-rwxr-xr-x" && $6 == "./usr/libexec/keithah-feed-migrate" { found = 1 } END { exit !found }'
+cmp -s "$root/starwatch-feed-migrate.sh" "$tmp/starwatchd-data/usr/libexec/starwatch-feed-migrate"
+tar -tzvf "$tmp/data.tar.gz" | awk '$1 == "-rwxr-xr-x" && $6 == "./usr/libexec/starwatch-feed-migrate" { found = 1 } END { exit !found }'
+if tar -tzf "$tmp/data.tar.gz" | grep -Fx './usr/libexec/keithah-feed-migrate' >/dev/null; then
+	echo 'legacy migration helper remains in Starwatch feed artifact' >&2
+	exit 1
+fi
 
 set -- "$pages/luci-app-starwatch_${version}_all.ipk"
 [ "$#" -eq 1 ]

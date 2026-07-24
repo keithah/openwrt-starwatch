@@ -43,8 +43,12 @@ inspect_control "$out/gl-app-starwatch_${version}_all.ipk" gl-app-starwatch all
 
 data="$tmp/starwatchd.data.tar.gz"
 tar -xOzf "$out/starwatchd_${version}_aarch64_cortex-a53.ipk" ./data.tar.gz >"$data"
-tar -xOzf "$data" ./usr/libexec/keithah-feed-migrate >"$tmp/keithah-feed-migrate"
-cmp -s "$root/keithah-feed-migrate.sh" "$tmp/keithah-feed-migrate"
-tar -tzvf "$data" | awk '$1 == "-rwxr-xr-x" && $6 == "./usr/libexec/keithah-feed-migrate" { found = 1 } END { exit !found }'
+tar -xOzf "$data" ./usr/libexec/starwatch-feed-migrate >"$tmp/starwatch-feed-migrate"
+cmp -s "$root/starwatch-feed-migrate.sh" "$tmp/starwatch-feed-migrate"
+tar -tzvf "$data" | awk '$1 == "-rwxr-xr-x" && $6 == "./usr/libexec/starwatch-feed-migrate" { found = 1 } END { exit !found }'
+if tar -tzf "$data" | grep -Fx './usr/libexec/keithah-feed-migrate' >/dev/null; then
+	echo 'legacy migration helper remains in Starwatch package' >&2
+	exit 1
+fi
 
 echo 'release inventory tests passed'

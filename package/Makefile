@@ -4,7 +4,7 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 0.1.3
+VERSION := 0.1.4
 ARCH := aarch64_cortex-a53
 OUT := out
 BIN := $(OUT)/starwatchd-bin
@@ -81,7 +81,7 @@ define make_ipk
 	rm -rf $(OUT)/stage-$(1)
 	cp -r $(2) $(OUT)/stage-$(1)
 	if [ "$(1)" = "starwatchd" ]; then \
-		chmod 0755 $(OUT)/stage-$(1)/usr/bin/starwatchd $(OUT)/stage-$(1)/usr/libexec/keithah-feed-migrate; \
+		chmod 0755 $(OUT)/stage-$(1)/usr/bin/starwatchd $(OUT)/stage-$(1)/usr/libexec/starwatch-feed-migrate; \
 	fi
 	mkdir -p $(OUT)/stage-$(1)/CONTROL
 	# Inject VERSION into the control's Version: field so the .ipk filename,
@@ -106,9 +106,9 @@ ipk-starwatchd: bin
 	rm -rf $(OUT)/stage
 	mkdir -p $(OUT)/stage/usr/bin $(OUT)/stage/usr/libexec
 	cp $(BIN) $(OUT)/stage/usr/bin/starwatchd
-	cp keithah-feed-migrate.sh $(OUT)/stage/usr/libexec/keithah-feed-migrate
+	cp starwatch-feed-migrate.sh $(OUT)/stage/usr/libexec/starwatch-feed-migrate
 	chmod 0755 $(OUT)/stage/usr/bin/starwatchd
-	chmod 0755 $(OUT)/stage/usr/libexec/keithah-feed-migrate
+	chmod 0755 $(OUT)/stage/usr/libexec/starwatch-feed-migrate
 	cp -r starwatchd/etc $(OUT)/stage/
 	cp -r starwatchd/CONTROL $(OUT)/stage/
 	chmod +x $(OUT)/stage/etc/init.d/starwatch $(OUT)/stage/etc/uci-defaults/99-starwatch $(OUT)/stage/CONTROL/postinst
