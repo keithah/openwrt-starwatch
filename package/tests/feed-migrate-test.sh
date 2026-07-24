@@ -55,6 +55,21 @@ cmp "$tmp/atomicity/key.before" "$tmp/atomicity/root/etc/opkg/keys/f6c72c675c844
 [ "$(stat -c %a "$tmp/atomicity/root/etc/opkg/customfeeds.conf")" = 640 ] || fail 'feed metadata changed on rollback'
 [ "$(stat -c %a "$tmp/atomicity/root/etc/opkg/keys/f6c72c675c844b91")" = 600 ] || fail 'key metadata changed on rollback'
 
+make_case backup_atomicity
+printf 'old feed\n' >"$tmp/backup_atomicity/root/etc/opkg/customfeeds.conf"
+printf 'old key\n' >"$tmp/backup_atomicity/root/etc/opkg/keys/f6c72c675c844b91"
+cp -p "$tmp/backup_atomicity/root/etc/opkg/customfeeds.conf" "$tmp/backup_atomicity/feed.before"
+cp -p "$tmp/backup_atomicity/root/etc/opkg/keys/f6c72c675c844b91" "$tmp/backup_atomicity/key.before"
+cat >"$tmp/backup_atomicity/bin/mv" <<'EOF'
+#!/bin/sh
+case "$1:$2" in *f6c72c675c844b91:*backup.*) exit 74 ;; esac
+exec /bin/mv "$@"
+EOF
+chmod +x "$tmp/backup_atomicity/bin/mv"
+expect_fail run_case backup_atomicity
+cmp "$tmp/backup_atomicity/feed.before" "$tmp/backup_atomicity/root/etc/opkg/customfeeds.conf" || fail 'second backup failure changed feed'
+cmp "$tmp/backup_atomicity/key.before" "$tmp/backup_atomicity/root/etc/opkg/keys/f6c72c675c844b91" || fail 'second backup failure changed key'
+
 # Missing and unsupported architecture arguments must be rejected before either
 # managed file is touched.
 make_case unsupported

@@ -32,15 +32,20 @@ key_backup=''
 feed_had=0
 key_had=0
 rollback=0
+feed_staged=0
+key_staged=0
+feed_replaced=0
+key_replaced=0
 
 cleanup() {
 	[ -z "$feeds_tmp" ] || rm -f "$feeds_tmp" || :
 	[ -z "$trim_tmp" ] || rm -f "$trim_tmp" || :
 	[ -z "$key_tmp" ] || rm -f "$key_tmp" || :
 	if [ "$rollback" -eq 1 ]; then
-		rm -f "$feeds_file" "$feed_key_file" || :
-		[ "$feed_had" -eq 0 ] || mv -f "$feed_backup" "$feeds_file" || :
-		[ "$key_had" -eq 0 ] || mv -f "$key_backup" "$feed_key_file" || :
+		[ "$feed_staged" -eq 0 ] && [ "$feed_replaced" -eq 0 ] || rm -f "$feeds_file" || :
+		[ "$key_staged" -eq 0 ] && [ "$key_replaced" -eq 0 ] || rm -f "$feed_key_file" || :
+		[ ! -e "$feed_backup" ] || mv -f "$feed_backup" "$feeds_file" || :
+		[ ! -e "$key_backup" ] || mv -f "$key_backup" "$feed_key_file" || :
 	fi
 	[ -z "$feed_backup" ] || rm -f "$feed_backup" || :
 	[ -z "$key_backup" ] || rm -f "$key_backup" || :
@@ -117,14 +122,16 @@ preserve_metadata "$feeds_file" "$feeds_tmp" 0644
 preserve_metadata "$feed_key_file" "$key_tmp" 0644
 
 feed_backup="$feeds_dir/.customfeeds.conf.backup.$$"
-key_backup="$keys_dir/.f6c72c675c844b91.backup.$$"
-if [ -e "$feeds_file" ]; then feed_had=1; mv "$feeds_file" "$feed_backup" || fail 'could not stage feed backup'; fi
-if [ -e "$feed_key_file" ]; then key_had=1; mv "$feed_key_file" "$key_backup" || fail 'could not stage key backup'; fi
 rollback=1
+key_backup="$keys_dir/.f6c72c675c844b91.backup.$$"
+if [ -e "$feeds_file" ]; then feed_had=1; mv "$feeds_file" "$feed_backup" || fail 'could not stage feed backup'; feed_staged=1; fi
+if [ -e "$feed_key_file" ]; then key_had=1; mv "$feed_key_file" "$key_backup" || fail 'could not stage key backup'; key_staged=1; fi
 mv "$key_tmp" "$feed_key_file"
 key_tmp=''
+key_replaced=1
 mv "$feeds_tmp" "$feeds_file"
 feeds_tmp=''
+feed_replaced=1
 rollback=0
 rm -f "$feed_backup" "$key_backup"
 feed_backup=''
