@@ -1,6 +1,6 @@
 #!/bin/sh
 # Generate an API token on first install if unset.
-tok="$(uci -q get starwatch.main.token)"
+tok="$(uci -q get starwatch.main.token || true)"
 if [ -z "$tok" ]; then
 	newtok="$(head -c 24 /dev/urandom | md5sum | cut -c1-32)"
 	uci set starwatch.main.token="$newtok"
