@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.4 — 2026-07-24
+
+- Makes package installation safe on GL firmware by avoiding network reloads
+  and destructive procd restarts while opkg is configuring packages.
+- Defers service startup to boot when ubus is unhealthy instead of damaging
+  the router control plane.
+
+## 0.1.3 — 2026-07-24
+
+- Fixes fresh installs failing to generate the initial API token under the
+  post-install script's `set -e` mode.
+
 ## 0.1.2 — 2026-07-20
 
 - Reduces dashboard render churn by caching derived history data and avoiding
