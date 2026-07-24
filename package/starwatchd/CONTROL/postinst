@@ -6,7 +6,11 @@ set -e
 /usr/libexec/keithah-feed-migrate
 /etc/uci-defaults/99-starwatch
 /etc/init.d/starwatch enable
-# restart (not start) so an upgrade picks up the new binary and the
-# freshly-generated token; restart also starts a stopped service.
-/etc/init.d/starwatch restart
+# Do not stop/restart a running service or reload the network from postinst:
+# GL firmware can wedge ubus/procd while opkg is still configuring packages.
+# A healthy supervisor starts the service now; otherwise the enabled service
+# is picked up on the next boot without damaging the router control plane.
+if ubus -t 2 list >/dev/null 2>&1; then
+	/etc/init.d/starwatch start || true
+fi
 exit 0

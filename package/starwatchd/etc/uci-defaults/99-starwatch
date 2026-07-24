@@ -140,5 +140,7 @@ if [ -n "$wan_gateway" ]; then
 	uci set network.starwatch_dish.gateway="$wan_gateway"
 fi
 uci commit network
-/etc/init.d/network reload >/dev/null 2>&1 || true
+# The daemon reconciles this route after startup. Do not reload network from
+# package installation: on GL firmware that can race procd/ubus and break the
+# router's control plane. A normal network restart/boot applies the UCI route.
 exit 0
