@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.5 — 2026-07-27
+
+- Fixes feed migration failing installation on routers whose BusyBox build
+  omits the `stat` applet (observed on GL-X3000), by falling back to parsing
+  `ls -ln` to preserve config and key file ownership/permissions.
+
 ## 0.1.4 — 2026-07-24
 
 - Makes package installation safe on GL firmware by avoiding network reloads

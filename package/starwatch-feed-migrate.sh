@@ -97,16 +97,48 @@ if [ -f "$feeds_file" ]; then
 	fi
 fi
 
+# Convert one ls -l permission triad (e.g. "rwx", "r-S") to an octal digit.
+# Only used as a stat(1) fallback for BusyBox builds that omit the applet
+# (observed on GL-X3000 firmware, BusyBox v1.33.2).
+triad_to_digit() {
+	case $1 in
+	---) echo 0 ;;
+	--x | --s | --t) echo 1 ;;
+	-w- | -wS | -wT) echo 2 ;;
+	-wx | -ws | -wt) echo 3 ;;
+	r-- | r-S | r-T) echo 4 ;;
+	r-x | r-s | r-t) echo 5 ;;
+	rw- | rwS | rwT) echo 6 ;;
+	rwx | rws | rwt) echo 7 ;;
+	*) echo '' ;;
+	esac
+}
+
+# ls -ln prints numeric owner/group across every BusyBox and GNU coreutils
+# build tested, unlike stat(1) which some minimal BusyBox images omit.
+metadata_from_ls() {
+	source_file=$1
+	listing=$(ls -ln "$source_file" 2>/dev/null) || return 1
+	set -- $listing
+	perm=$1 uid=$3 gid=$4
+	[ ${#perm} -eq 10 ] || return 1
+	owner_digit=$(triad_to_digit "$(printf '%s' "$perm" | cut -c2-4)")
+	group_digit=$(triad_to_digit "$(printf '%s' "$perm" | cut -c5-7)")
+	other_digit=$(triad_to_digit "$(printf '%s' "$perm" | cut -c8-10)")
+	[ -n "$owner_digit" ] && [ -n "$group_digit" ] && [ -n "$other_digit" ] || return 1
+	case $uid in *[!0-9]*) return 1 ;; esac
+	case $gid in *[!0-9]*) return 1 ;; esac
+	printf '%s%s%s %s %s\n' "$owner_digit" "$group_digit" "$other_digit" "$uid" "$gid"
+}
+
 preserve_metadata() {
 	source_file=$1
 	temporary_file=$2
 	default_mode=$3
 	if [ -e "$source_file" ]; then
-		if metadata=$(stat -c '%a %u %g' "$source_file" 2>/dev/null); then
-			set -- $metadata
-			chmod "$1" "$temporary_file"
-			chown "$2:$3" "$temporary_file" 2>/dev/null || fail "could not preserve ownership for $source_file"
-		elif metadata=$(stat -f '%Lp %u %g' "$source_file" 2>/dev/null); then
+		if metadata=$(stat -c '%a %u %g' "$source_file" 2>/dev/null) ||
+			metadata=$(stat -f '%Lp %u %g' "$source_file" 2>/dev/null) ||
+			metadata=$(metadata_from_ls "$source_file"); then
 			set -- $metadata
 			chmod "$1" "$temporary_file"
 			chown "$2:$3" "$temporary_file" 2>/dev/null || fail "could not preserve ownership for $source_file"

@@ -102,6 +102,25 @@ cmp -s "$public_key" "$tmp/migrate/root/etc/opkg/keys/f6c72c675c844b91" || fail 
 [ "$(stat -c '%u:%g' "$tmp/migrate/root/etc/opkg/customfeeds.conf")" = "$feeds_owner_before" ] || fail 'feed ownership changed'
 [ "$(stat -c '%u:%g' "$tmp/migrate/root/etc/opkg/keys/f6c72c675c844b91")" = "$key_owner_before" ] || fail 'key ownership changed'
 
+# BusyBox builds without a stat(1) applet (observed on GL-X3000, BusyBox
+# v1.33.2) must fall back to parsing `ls -ln` to preserve mode and ownership.
+make_case no_stat
+printf 'src/gz keithah https://legacy.keithah\n' >"$tmp/no_stat/root/etc/opkg/customfeeds.conf"
+chmod 0640 "$tmp/no_stat/root/etc/opkg/customfeeds.conf"
+printf 'obsolete key\n' >"$tmp/no_stat/root/etc/opkg/keys/f6c72c675c844b91"
+chmod 0600 "$tmp/no_stat/root/etc/opkg/keys/f6c72c675c844b91"
+cat >"$tmp/no_stat/bin/stat" <<'EOF'
+#!/bin/sh
+echo "stat: not found" >&2
+exit 127
+EOF
+chmod +x "$tmp/no_stat/bin/stat"
+run_case no_stat aarch64_cortex-a53
+[ "$(stat -c %a "$tmp/no_stat/root/etc/opkg/customfeeds.conf")" = 640 ] || fail 'no-stat fallback lost feed mode'
+[ "$(stat -c %a "$tmp/no_stat/root/etc/opkg/keys/f6c72c675c844b91")" = 600 ] || fail 'no-stat fallback lost key mode'
+[ "$(stat -c '%u:%g' "$tmp/no_stat/root/etc/opkg/customfeeds.conf")" = "$(id -u):$(id -g)" ] || fail 'no-stat fallback changed feed ownership'
+cmp -s "$public_key" "$tmp/no_stat/root/etc/opkg/keys/f6c72c675c844b91" || fail 'no-stat fallback did not replace publisher key'
+
 # Re-running is a byte-for-byte no-op.
 cp -p "$tmp/migrate/root/etc/opkg/customfeeds.conf" "$tmp/migrate/feeds.once"
 cp -p "$tmp/migrate/root/etc/opkg/keys/f6c72c675c844b91" "$tmp/migrate/key.once"
