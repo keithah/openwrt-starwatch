@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.7 — 2026-07-27
+
+- Reduces starwatchd's memory footprint for memory-constrained routers:
+  caps the Go heap with `debug.SetMemoryLimit`/`SetGCPercent` so transient
+  spikes (e.g. the hourly dish history backfill) don't inflate resident
+  memory long after the data is discarded, and lowers the default in-RAM
+  history retention (`ram_hours`) from 3 to 1 hour. Minute/quarter-resolution
+  history is unaffected; it's already served from the on-disk SQLite tiers.
+
 ## 0.1.6 — 2026-07-27
 
 - Fixes the API listener being unreachable over IPv4 on routers whose kernel

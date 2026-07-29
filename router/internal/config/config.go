@@ -65,7 +65,7 @@ func defaults() *Config {
 		PollStatus: time.Second, PollMap: 15 * time.Minute,
 		ManageDishRoute: true,
 		ProbeHosts:      []string{"1.1.1.1", "8.8.8.8"}, ProbeInterval: 2 * time.Second,
-		History: HistoryConfig{RAMHours: 3, MinuteDays: 7, QuarterDays: 30,
+		History: HistoryConfig{RAMHours: 1, MinuteDays: 7, QuarterDays: 30,
 			DBPath: "/etc/starwatch/history.db", FlushInterval: 5 * time.Minute},
 		Alerts:  defaultAlerts(),
 		Battery: BatteryConfig{CapacityWh: 1000, StateOfChargePercent: 100, ReservePercent: 10, ConversionEfficiencyPercent: 90},

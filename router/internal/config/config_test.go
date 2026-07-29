@@ -54,7 +54,7 @@ func TestLoadDefaults(t *testing.T) {
 	if !reflect.DeepEqual(cfg.ProbeHosts, []string{"1.1.1.1", "8.8.8.8"}) {
 		t.Fatalf("probe hosts: %#v", cfg.ProbeHosts)
 	}
-	if cfg.History.RAMHours != 3 || cfg.History.MinuteDays != 7 || cfg.History.QuarterDays != 30 ||
+	if cfg.History.RAMHours != 1 || cfg.History.MinuteDays != 7 || cfg.History.QuarterDays != 30 ||
 		cfg.History.DBPath != "/etc/starwatch/history.db" || cfg.History.FlushInterval != 5*time.Minute {
 		t.Fatalf("history defaults: %+v", cfg.History)
 	}

@@ -197,7 +197,7 @@ config starwatch 'main'
     option location_enabled '0'
 
 config history
-    option ram_hours '3'
+    option ram_hours '1'
     option minute_days '7'
     option quarter_days '30'
     option db_path '/etc/starwatch/history.db'
