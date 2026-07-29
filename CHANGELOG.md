@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.6 — 2026-07-27
+
+- Fixes the API listener being unreachable over IPv4 on routers whose kernel
+  advertises dual-stack support (`net.ipv6.bindv6only=0`) but doesn't
+  actually deliver IPv4-mapped connections to it. `listen '0.0.0.0'` now
+  binds an explicit IPv4 socket instead of relying on Go's wildcard
+  auto-detection to pick a working dual-stack socket.
+
 ## 0.1.5 — 2026-07-27
 
 - Fixes feed migration failing installation on routers whose BusyBox build

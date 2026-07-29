@@ -28,6 +28,25 @@ func TestBindAddr(t *testing.T) {
 	}
 }
 
+func TestBindNetwork(t *testing.T) {
+	cases := []struct {
+		listen string
+		want   string
+	}{
+		{"0.0.0.0", "tcp4"},
+		{"192.168.1.1", "tcp4"},
+		{"::", "tcp6"},
+		{"::1", "tcp6"},
+		{"", "tcp"},
+	}
+	for _, c := range cases {
+		cfg := &config.Config{Listen: c.listen, Port: 9633}
+		if got := bindNetwork(cfg); got != c.want {
+			t.Fatalf("bindNetwork(%q) = %q, want %q", c.listen, got, c.want)
+		}
+	}
+}
+
 func TestNewHTTPServerSetsSafeTimeoutsWithoutBreakingWebSockets(t *testing.T) {
 	server := newHTTPServer("127.0.0.1:9633", http.NewServeMux())
 	if server.ReadHeaderTimeout != 5*time.Second || server.IdleTimeout != 60*time.Second {

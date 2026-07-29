@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
@@ -37,7 +38,17 @@ type runtimeDeps struct {
 	dishRouteRunner dishroute.Runner
 }
 
+// softMemoryLimit caps Go's heap on memory-constrained OpenWrt routers,
+// where free RAM is shared with Tailscale, Speedify, and the vendor's own
+// stack. Without it, the default GC (GOGC=100) lets the heap grow to ~2x the
+// live set and doesn't return pages to the OS promptly, so a transient spike
+// (e.g. an hourly dish history backfill) inflates RSS long after the data is
+// discarded.
+const softMemoryLimit = 24 << 20
+
 func main() {
+	debug.SetGCPercent(50)
+	debug.SetMemoryLimit(softMemoryLimit)
 	configPath := flag.String("config", "/etc/config/starwatch", "UCI config path")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -237,7 +248,7 @@ func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error 
 	apiHandler := api.NewServer(apiDeps)
 	defer apiHandler.Close()
 	server := newHTTPServer(bindAddr(cfg), apiHandler)
-	listener, err := deps.listen("tcp", server.Addr)
+	listener, err := deps.listen(bindNetwork(cfg), server.Addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", server.Addr, err)
 	}
@@ -392,4 +403,22 @@ func warnEmptyToken(token string, logf func(string, ...any)) {
 
 func bindAddr(cfg *config.Config) string {
 	return net.JoinHostPort(cfg.Listen, strconv.Itoa(cfg.Port))
+}
+
+// bindNetwork picks tcp4/tcp6 for a literal listen address instead of letting
+// net.Listen's "tcp" auto-detect a dual-stack wildcard socket: some OpenWrt
+// kernels advertise net.ipv6.bindv6only=0 but don't actually deliver
+// IPv4-mapped connections to it, silently dropping every IPv4 client while
+// "0.0.0.0" in config implies IPv4. An address with no family (empty string)
+// keeps the previous "tcp" auto-detect behavior.
+func bindNetwork(cfg *config.Config) string {
+	ip := net.ParseIP(cfg.Listen)
+	switch {
+	case ip == nil:
+		return "tcp"
+	case ip.To4() != nil:
+		return "tcp4"
+	default:
+		return "tcp6"
+	}
 }
