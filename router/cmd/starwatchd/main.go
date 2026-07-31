@@ -68,7 +68,7 @@ func run(ctx context.Context, configPath string) error {
 
 func runConfig(ctx context.Context, cfg *config.Config, deps runtimeDeps) error {
 	if deps.listen == nil {
-		deps.listen = net.Listen
+		deps.listen = listenTCP
 	}
 	if deps.now == nil {
 		deps.now = time.Now
@@ -421,4 +421,13 @@ func bindNetwork(cfg *config.Config) string {
 	default:
 		return "tcp6"
 	}
+}
+
+// listenTCP explicitly disables Multipath TCP. Go 1.24 and newer enable MPTCP
+// for listeners when the kernel advertises it, but some GL.iNet kernels expose
+// an MPTCP implementation whose server sockets never complete a TCP handshake.
+func listenTCP(network, address string) (net.Listener, error) {
+	var config net.ListenConfig
+	config.SetMultipathTCP(false)
+	return config.Listen(context.Background(), network, address)
 }

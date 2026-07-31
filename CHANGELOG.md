@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.8 — 2026-07-30
+
+- Fixes the API listener on GL.iNet kernels that advertise Multipath TCP but
+  cannot complete handshakes on MPTCP server sockets. Go 1.24 and newer enable
+  MPTCP for listeners by default; Starwatch now explicitly requests ordinary
+  TCP while retaining the IPv4/IPv6 address-family selection added in 0.1.6.
+
 ## 0.1.7 — 2026-07-27
 
 - Reduces starwatchd's memory footprint for memory-constrained routers:
