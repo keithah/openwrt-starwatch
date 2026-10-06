@@ -5,8 +5,9 @@ go 1.25.0
 require (
 	github.com/clarkzjw/starlink-grpc-golang v0.0.0
 	github.com/coder/websocket v1.8.13
-	golang.org/x/net v0.55.0
-	google.golang.org/grpc v1.82.1
+	golang.org/x/net v0.58.0
+	golang.org/x/sys v0.47.0
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.34.5
 )
@@ -17,9 +18,8 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	golang.org/x/text v0.41.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
