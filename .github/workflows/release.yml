@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v7
